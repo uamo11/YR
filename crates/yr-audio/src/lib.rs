@@ -129,7 +129,9 @@ fn audio_thread_main(
     let mut base_pos_secs = 0.0_f64;
     let mut play_started_at: Option<Instant> = None;
 
-    let ensure_output = |out: &mut Option<(OutputStream, OutputStreamHandle)>| -> Option<&OutputStreamHandle> {
+    fn ensure_output(
+        out: &mut Option<(OutputStream, OutputStreamHandle)>,
+    ) -> Option<&OutputStreamHandle> {
         if out.is_none() {
             match OutputStream::try_default() {
                 Ok(pair) => *out = Some(pair),
@@ -140,7 +142,7 @@ fn audio_thread_main(
             }
         }
         out.as_ref().map(|(_, h)| h)
-    };
+    }
 
     loop {
         match rx.recv_timeout(Duration::from_millis(120)) {
@@ -551,21 +553,23 @@ fn open_progressive_stream(
     });
 
     // Wait briefly for initial bytes (header) so Decoder::new doesn't fail on an empty file.
-    let (lock, cvar) = &*state;
-    let mut guard = lock.lock().map_err(|_| "poisoned".to_string())?;
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while guard.written < 16_384 && !guard.finished {
-        if let Some(err) = &guard.error {
-            return Err(err.clone());
+    {
+        let (lock, cvar) = &*state;
+        let mut guard = lock.lock().map_err(|_| "poisoned".to_string())?;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while guard.written < 16_384 && !guard.finished {
+            if let Some(err) = &guard.error {
+                return Err(err.clone());
+            }
+            let rem = deadline.saturating_duration_since(Instant::now());
+            if rem.is_zero() {
+                break;
+            }
+            let (g, _) = cvar
+                .wait_timeout(guard, rem)
+                .map_err(|_| "poisoned".to_string())?;
+            guard = g;
         }
-        let rem = deadline.saturating_duration_since(Instant::now());
-        if rem.is_zero() {
-            break;
-        }
-        let (g, _) = cvar
-            .wait_timeout(guard, rem)
-            .map_err(|_| "poisoned".to_string())?;
-        guard = g;
     }
 
     Ok(ProgressiveFileReader {
