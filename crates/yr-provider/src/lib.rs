@@ -167,7 +167,7 @@ impl MusicProvider for YtMusicProvider {
             }
         }
 
-        let new_albums = new_albums_res
+        let new_albums: Vec<AlbumSummary> = new_albums_res
             .map(|albums| albums.into_iter().map(Self::map_album).collect())
             .unwrap_or_default();
 
@@ -203,7 +203,7 @@ impl MusicProvider for YtMusicProvider {
             q.music_search_tracks(query),
             q.music_search_albums(query),
             q.music_search_artists(query),
-            q.music_search_playlists(query),
+            q.music_search_playlists(query, false),
         );
 
         let songs = songs_res
