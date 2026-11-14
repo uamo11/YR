@@ -25,7 +25,8 @@ mkdir -p screenshots
 adb logcat -c
 START_RES=$(adb shell am start -W -S -n com.yr.music/android.app.NativeActivity)
 echo "$START_RES"
-sleep 5
+# Allow home feed & album thumbnails to load over network
+sleep 9
 
 PID=$(adb shell pidof com.yr.music | tr -d '\r' || true)
 if [ -z "$PID" ]; then
@@ -36,13 +37,20 @@ if [ -z "$PID" ]; then
 fi
 echo "YR Music running with PID: $PID"
 
-# 1. Home tab
+# 1. Home tab (with moods, quick picks, new albums)
 adb shell screencap -p /data/local/tmp/01_home.png
 adb pull /data/local/tmp/01_home.png screenshots/01_home.png
 
 # 2. Search tab (second column at bottom nav)
 adb shell input tap 405 2160
 sleep 2
+# Tap search box, type query, tap Buscar button
+adb shell input tap 350 245
+sleep 1
+adb shell input text "daft%spunk"
+sleep 1
+adb shell input tap 960 245
+sleep 5
 adb shell screencap -p /data/local/tmp/02_search.png
 adb pull /data/local/tmp/02_search.png screenshots/02_search.png
 
@@ -58,7 +66,6 @@ sleep 2
 adb shell screencap -p /data/local/tmp/04_downloads.png
 adb pull /data/local/tmp/04_downloads.png screenshots/04_downloads.png
 
-# Verify process is still alive after all tab transitions
 PID_AFTER=$(adb shell pidof com.yr.music | tr -d '\r' || true)
 adb logcat -d > emulator-logcat.log
 if [ -z "$PID_AFTER" ]; then

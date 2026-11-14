@@ -113,6 +113,26 @@ pub struct PlaylistDetail {
     pub tracks: Vec<Track>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtistDetail {
+    pub summary: ArtistSummary,
+    pub top_tracks: Vec<Track>,
+    pub albums: Vec<AlbumSummary>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MoodGenre {
+    pub id: String,
+    pub title: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct HomeFeed {
+    pub quick_picks: Vec<Track>,
+    pub new_albums: Vec<AlbumSummary>,
+    pub moods: Vec<MoodGenre>,
+}
+
 /// Resolved direct audio stream metadata.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StreamInfo {

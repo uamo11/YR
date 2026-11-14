@@ -10,8 +10,8 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use yr_audio::{AudioEngine, AudioSnapshot};
 use yr_core::{
-    format_seconds, AlbumDetail, AudioQuality, LibraryStore, PlaybackQueue, PlaybackStatus,
-    PlaylistDetail, SearchResults, Track,
+    format_seconds, AlbumDetail, ArtistDetail, AudioQuality, HomeFeed, LibraryStore,
+    PlaybackQueue, PlaybackStatus, PlaylistDetail, PlaylistSummary, SearchResults, Track,
 };
 use yr_download::{DownloadManager, DownloadStatus, DownloadTask};
 use yr_provider::{MusicProvider, YtMusicProvider};
@@ -28,20 +28,37 @@ enum NavTab {
 enum SearchFilter {
     Songs,
     Albums,
+    Artists,
     Playlists,
 }
 
+#[derive(Clone)]
 enum DetailView {
     None,
     Album(AlbumDetail),
     Playlist(PlaylistDetail),
+    Artist(ArtistDetail),
+    Mood {
+        title: String,
+        playlists: Vec<PlaylistSummary>,
+    },
 }
 
 enum AppEvent {
-    TrendingLoaded(Result<Vec<Track>, String>),
+    HomeLoaded(Result<HomeFeed, String>),
     SearchLoaded(Result<SearchResults, String>),
     AlbumLoaded(Result<AlbumDetail, String>),
     PlaylistLoaded(Result<PlaylistDetail, String>),
+    ArtistLoaded(Result<ArtistDetail, String>),
+    MoodLoaded {
+        title: String,
+        result: Result<Vec<PlaylistSummary>, String>,
+    },
+    RadioLoaded(Result<Vec<Track>, String>),
+    LyricsLoaded {
+        track_id: String,
+        result: Result<Option<String>, String>,
+    },
     StreamResolved {
         track: Track,
         result: Result<String, String>,
@@ -65,8 +82,9 @@ pub struct YrApp {
     search_filter: SearchFilter,
     search_results: SearchResults,
     search_loading: bool,
-    trending_tracks: Vec<Track>,
-    trending_loading: bool,
+
+    home_feed: HomeFeed,
+    home_loading: bool,
     detail_view: DetailView,
     detail_loading: bool,
 
@@ -75,6 +93,10 @@ pub struct YrApp {
 
     now_playing_open: bool,
     show_queue: bool,
+    show_lyrics: bool,
+    lyrics_track_id: Option<String>,
+    lyrics_text: Option<String>,
+    lyrics_loading: bool,
     show_settings: bool,
     new_playlist_name: String,
 
@@ -126,14 +148,18 @@ impl YrApp {
             search_filter: SearchFilter::Songs,
             search_results: SearchResults::default(),
             search_loading: false,
-            trending_tracks: Vec::new(),
-            trending_loading: false,
+            home_feed: HomeFeed::default(),
+            home_loading: false,
             detail_view: DetailView::None,
             detail_loading: false,
             downloads: Vec::new(),
             last_download_poll: Instant::now() - Duration::from_secs(10),
             now_playing_open: false,
             show_queue: false,
+            show_lyrics: false,
+            lyrics_track_id: None,
+            lyrics_text: None,
+            lyrics_loading: false,
             show_settings: false,
             new_playlist_name: String::new(),
             last_finished_counter: 0,
@@ -141,7 +167,7 @@ impl YrApp {
             seeking_secs: None,
         };
 
-        app.refresh_trending(&cc.egui_ctx);
+        app.refresh_home(&cc.egui_ctx);
         app.refresh_downloads(&cc.egui_ctx);
         app
     }
@@ -150,17 +176,14 @@ impl YrApp {
         self.status_banner = Some((msg.into(), Instant::now()));
     }
 
-    fn refresh_trending(&mut self, ctx: &egui::Context) {
-        self.trending_loading = true;
+    fn refresh_home(&mut self, ctx: &egui::Context) {
+        self.home_loading = true;
         let provider = Arc::clone(&self.provider);
         let tx = self.event_tx.clone();
         let ctx = ctx.clone();
         self.runtime.spawn(async move {
-            let res = provider
-                .get_trending_music()
-                .await
-                .map_err(|e| e.to_string());
-            let _ = tx.send(AppEvent::TrendingLoaded(res));
+            let res = provider.get_home_feed().await.map_err(|e| e.to_string());
+            let _ = tx.send(AppEvent::HomeLoaded(res));
             ctx.request_repaint();
         });
     }
@@ -209,6 +232,68 @@ impl YrApp {
         });
     }
 
+    fn open_artist(&mut self, artist_id: String, ctx: &egui::Context) {
+        self.detail_loading = true;
+        let provider = Arc::clone(&self.provider);
+        let tx = self.event_tx.clone();
+        let ctx = ctx.clone();
+        self.runtime.spawn(async move {
+            let res = provider
+                .get_artist(&artist_id)
+                .await
+                .map_err(|e| e.to_string());
+            let _ = tx.send(AppEvent::ArtistLoaded(res));
+            ctx.request_repaint();
+        });
+    }
+
+    fn open_mood(&mut self, genre_id: String, title: String, ctx: &egui::Context) {
+        self.detail_loading = true;
+        let provider = Arc::clone(&self.provider);
+        let tx = self.event_tx.clone();
+        let ctx = ctx.clone();
+        self.runtime.spawn(async move {
+            let res = provider
+                .get_mood_playlists(&genre_id)
+                .await
+                .map_err(|e| e.to_string());
+            let _ = tx.send(AppEvent::MoodLoaded { title, result: res });
+            ctx.request_repaint();
+        });
+    }
+
+    fn start_radio(&mut self, track_id: String, ctx: &egui::Context) {
+        let provider = Arc::clone(&self.provider);
+        let tx = self.event_tx.clone();
+        let ctx = ctx.clone();
+        self.set_banner("Generando radio...");
+        self.runtime.spawn(async move {
+            let res = provider.get_radio(&track_id).await.map_err(|e| e.to_string());
+            let _ = tx.send(AppEvent::RadioLoaded(res));
+            ctx.request_repaint();
+        });
+    }
+
+    fn load_lyrics(&mut self, track_id: String, ctx: &egui::Context) {
+        self.lyrics_loading = true;
+        self.lyrics_track_id = Some(track_id.clone());
+        self.lyrics_text = None;
+        let provider = Arc::clone(&self.provider);
+        let tx = self.event_tx.clone();
+        let ctx = ctx.clone();
+        self.runtime.spawn(async move {
+            let res = provider
+                .get_lyrics(&track_id)
+                .await
+                .map_err(|e| e.to_string());
+            let _ = tx.send(AppEvent::LyricsLoaded {
+                track_id,
+                result: res,
+            });
+            ctx.request_repaint();
+        });
+    }
+
     fn refresh_downloads(&mut self, ctx: &egui::Context) {
         self.last_download_poll = Instant::now();
         let dl = Arc::clone(&self.downloader);
@@ -232,8 +317,12 @@ impl YrApp {
         };
         self.store.record_play(track.clone());
         self.seeking_secs = None;
+        self.lyrics_text = None;
+        self.lyrics_track_id = None;
+        if self.show_lyrics {
+            self.load_lyrics(track.id.clone(), ctx);
+        }
 
-        // Check local offline file first for zero-latency playback.
         if let Some(local) = &track.local_path {
             let p = PathBuf::from(local);
             if p.exists() {
@@ -280,14 +369,31 @@ impl YrApp {
         self.set_banner(format!("Descargando: {title}"));
     }
 
+    fn enqueue_download_all(&mut self, tracks: Vec<Track>, ctx: &egui::Context) {
+        let dl = Arc::clone(&self.downloader);
+        let quality = self.store.data.config.download_quality;
+        let count = tracks.len();
+        let tx = self.event_tx.clone();
+        let ctx = ctx.clone();
+        self.runtime.spawn(async move {
+            for track in tracks {
+                dl.enqueue(track, quality).await;
+            }
+            let items = dl.list_tasks().await;
+            let _ = tx.send(AppEvent::DownloadsRefreshed(items));
+            ctx.request_repaint();
+        });
+        self.set_banner(format!("Descargando {count} canciones..."));
+    }
+
     fn process_events(&mut self, ctx: &egui::Context) {
         while let Ok(ev) = self.event_rx.try_recv() {
             match ev {
-                AppEvent::TrendingLoaded(res) => {
-                    self.trending_loading = false;
+                AppEvent::HomeLoaded(res) => {
+                    self.home_loading = false;
                     match res {
-                        Ok(tracks) => self.trending_tracks = tracks,
-                        Err(e) => self.set_banner(format!("Sin conexión o error: {e}")),
+                        Ok(feed) => self.home_feed = feed,
+                        Err(e) => self.set_banner(format!("Sin conexión: {e}")),
                     }
                 }
                 AppEvent::SearchLoaded(res) => {
@@ -311,6 +417,42 @@ impl YrApp {
                         Err(e) => self.set_banner(format!("Error al abrir playlist: {e}")),
                     }
                 }
+                AppEvent::ArtistLoaded(res) => {
+                    self.detail_loading = false;
+                    match res {
+                        Ok(a) => self.detail_view = DetailView::Artist(a),
+                        Err(e) => self.set_banner(format!("Error al abrir artista: {e}")),
+                    }
+                }
+                AppEvent::MoodLoaded { title, result } => {
+                    self.detail_loading = false;
+                    match result {
+                        Ok(playlists) => {
+                            self.detail_view = DetailView::Mood { title, playlists }
+                        }
+                        Err(e) => self.set_banner(format!("Error al abrir género: {e}")),
+                    }
+                }
+                AppEvent::RadioLoaded(res) => match res {
+                    Ok(tracks) if !tracks.is_empty() => {
+                        for t in tracks {
+                            self.queue.enqueue(t);
+                        }
+                        self.set_banner("Radio añadida a la cola");
+                    }
+                    Ok(_) => self.set_banner("No se encontraron canciones similares"),
+                    Err(e) => self.set_banner(format!("Error de radio: {e}")),
+                },
+                AppEvent::LyricsLoaded { track_id, result } => {
+                    if self.lyrics_track_id.as_deref() == Some(&track_id) {
+                        self.lyrics_loading = false;
+                        self.lyrics_text = match result {
+                            Ok(Some(text)) => Some(text),
+                            Ok(None) => Some("Letra no disponible para esta canción.".into()),
+                            Err(e) => Some(format!("Error al cargar letra: {e}")),
+                        };
+                    }
+                }
                 AppEvent::StreamResolved { track, result } => match result {
                     Ok(url) => {
                         if self.queue.current_track().map(|t| t.id.as_str()) == Some(&track.id) {
@@ -325,7 +467,6 @@ impl YrApp {
             }
         }
 
-        // Poll downloads periodically while on Downloads tab or active tasks exist.
         let has_active_dl = self.downloads.iter().any(|d| {
             matches!(
                 d.status,
@@ -341,7 +482,6 @@ impl YrApp {
             self.refresh_downloads(ctx);
         }
 
-        // Auto-advance when current track finishes.
         let snap = self.audio.snapshot();
         if snap.finished_counter > self.last_finished_counter {
             self.last_finished_counter = snap.finished_counter;
@@ -367,7 +507,6 @@ impl eframe::App for YrApp {
         egui::TopBottomPanel::top("yr_top_bar")
             .frame(egui::Frame::new().fill(BG_PRIMARY).inner_margin(12.0))
             .show(ctx, |ui| {
-                // Extra top spacing on Android status bar
                 #[cfg(target_os = "android")]
                 ui.add_space(20.0);
 
@@ -444,6 +583,10 @@ impl eframe::App for YrApp {
                     return;
                 }
 
+                if self.render_detail_if_active(ui, ctx) {
+                    return;
+                }
+
                 match self.active_tab {
                     NavTab::Home => self.render_home(ui, ctx),
                     NavTab::Search => self.render_search(ui, ctx),
@@ -467,22 +610,238 @@ impl YrApp {
             self.active_tab = tab;
             self.now_playing_open = false;
             self.show_settings = false;
+            self.detail_view = DetailView::None;
+        }
+    }
+
+    fn render_detail_if_active(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) -> bool {
+        if self.detail_loading {
+            ui.horizontal(|ui| {
+                if ui.button("← Volver").clicked() {
+                    self.detail_loading = false;
+                    self.detail_view = DetailView::None;
+                }
+                ui.spinner();
+                ui.label("Cargando...");
+            });
+            return true;
+        }
+
+        let view = self.detail_view.clone();
+        match view {
+            DetailView::None => false,
+            DetailView::Album(album) => {
+                ui.horizontal(|ui| {
+                    if ui.button("← Volver").clicked() {
+                        self.detail_view = DetailView::None;
+                    }
+                    ui.heading(&album.summary.title);
+                });
+                ui.horizontal(|ui| {
+                    render_thumb(ui, album.summary.thumbnail_url.as_deref(), 64.0);
+                    ui.vertical(|ui| {
+                        ui.label(RichText::new(&album.summary.artist).color(TEXT_SECONDARY));
+                        ui.horizontal(|ui| {
+                            if ui
+                                .add(
+                                    egui::Button::new(RichText::new("▶ Reproducir").color(Color32::WHITE))
+                                        .fill(ACCENT_RED),
+                                )
+                                .clicked()
+                                && !album.tracks.is_empty()
+                            {
+                                self.play_track_in_list(album.tracks.clone(), 0, ctx);
+                            }
+                            if ui.button("⬇ Descargar todo").clicked() && !album.tracks.is_empty() {
+                                self.enqueue_download_all(album.tracks.clone(), ctx);
+                            }
+                        });
+                    });
+                });
+                ui.add_space(6.0);
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    for (idx, track) in album.tracks.iter().enumerate() {
+                        self.render_track_row(ui, ctx, track, &album.tracks, idx, false);
+                    }
+                });
+                true
+            }
+            DetailView::Playlist(pl) => {
+                ui.horizontal(|ui| {
+                    if ui.button("← Volver").clicked() {
+                        self.detail_view = DetailView::None;
+                    }
+                    ui.heading(&pl.summary.title);
+                });
+                ui.horizontal(|ui| {
+                    if ui
+                        .add(
+                            egui::Button::new(RichText::new("▶ Reproducir").color(Color32::WHITE))
+                                .fill(ACCENT_RED),
+                        )
+                        .clicked()
+                        && !pl.tracks.is_empty()
+                    {
+                        self.play_track_in_list(pl.tracks.clone(), 0, ctx);
+                    }
+                    if ui.button("⬇ Descargar todo").clicked() && !pl.tracks.is_empty() {
+                        self.enqueue_download_all(pl.tracks.clone(), ctx);
+                    }
+                });
+                ui.add_space(6.0);
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    for (idx, track) in pl.tracks.iter().enumerate() {
+                        self.render_track_row(ui, ctx, track, &pl.tracks, idx, false);
+                    }
+                });
+                true
+            }
+            DetailView::Artist(artist) => {
+                ui.horizontal(|ui| {
+                    if ui.button("← Volver").clicked() {
+                        self.detail_view = DetailView::None;
+                    }
+                    ui.heading(&artist.summary.name);
+                });
+                if let Some(subs) = &artist.summary.subscribers {
+                    ui.label(RichText::new(subs).small().color(TEXT_SECONDARY));
+                }
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    if !artist.top_tracks.is_empty() {
+                        ui.add_space(6.0);
+                        ui.label(RichText::new("Canciones populares").size(16.0).strong());
+                        for (idx, track) in artist.top_tracks.iter().enumerate() {
+                            self.render_track_row(ui, ctx, track, &artist.top_tracks, idx, false);
+                        }
+                    }
+                    if !artist.albums.is_empty() {
+                        ui.add_space(10.0);
+                        ui.label(RichText::new("Álbumes").size(16.0).strong());
+                        for album in &artist.albums {
+                            self.render_album_row(ui, ctx, album);
+                        }
+                    }
+                });
+                true
+            }
+            DetailView::Mood { title, playlists } => {
+                ui.horizontal(|ui| {
+                    if ui.button("← Volver").clicked() {
+                        self.detail_view = DetailView::None;
+                    }
+                    ui.heading(&title);
+                });
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    for pl in &playlists {
+                        self.render_playlist_row(ui, ctx, pl);
+                    }
+                });
+                true
+            }
         }
     }
 
     fn render_home(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         egui::ScrollArea::vertical().show(ui, |ui| {
+            // Mood / Genre Chips row (YT Music style)
+            if !self.home_feed.moods.is_empty() {
+                let moods = self.home_feed.moods.clone();
+                egui::ScrollArea::horizontal()
+                    .id_salt("home_moods")
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            for mood in moods {
+                                let btn = egui::Button::new(
+                                    RichText::new(&mood.title).size(13.0).color(TEXT_PRIMARY),
+                                )
+                                .fill(BG_ELEVATED)
+                                .corner_radius(CornerRadius::same(16));
+                                if ui.add(btn).clicked() {
+                                    self.open_mood(mood.id, mood.title, ctx);
+                                }
+                            }
+                        });
+                    });
+                ui.add_space(8.0);
+            }
+
             ui.horizontal(|ui| {
-                ui.heading(RichText::new("Para ti").color(TEXT_PRIMARY));
+                ui.heading(RichText::new("Selección rápida").color(TEXT_PRIMARY));
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     if ui.button("↻ Actualizar").clicked() {
-                        self.refresh_trending(ctx);
+                        self.refresh_home(ctx);
                     }
                 });
             });
 
-            if self.trending_loading {
-                ui.spinner();
+            if self.home_loading {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label(RichText::new("Cargando música de YT Music...").color(TEXT_SECONDARY));
+                });
+            }
+
+            if !self.home_feed.quick_picks.is_empty() {
+                let picks = self.home_feed.quick_picks.clone();
+                for (idx, track) in picks.iter().take(15).enumerate() {
+                    self.render_track_row(ui, ctx, track, &picks, idx, false);
+                }
+            }
+
+            if !self.home_feed.new_albums.is_empty() {
+                ui.add_space(12.0);
+                ui.label(
+                    RichText::new("Nuevos lanzamientos")
+                        .size(17.0)
+                        .strong()
+                        .color(TEXT_PRIMARY),
+                );
+                let albums = self.home_feed.new_albums.clone();
+                egui::ScrollArea::horizontal()
+                    .id_salt("home_new_albums")
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            for album in albums.iter().take(12) {
+                                egui::Frame::new()
+                                    .fill(BG_SURFACE)
+                                    .corner_radius(CornerRadius::same(10))
+                                    .inner_margin(8.0)
+                                    .show(ui, |ui| {
+                                        ui.set_width(126.0);
+                                        ui.vertical(|ui| {
+                                            render_thumb(
+                                                ui,
+                                                album.thumbnail_url.as_deref(),
+                                                110.0,
+                                            );
+                                            ui.add_space(4.0);
+                                            if ui
+                                                .add(
+                                                    egui::Label::new(
+                                                        RichText::new(&album.title)
+                                                            .strong()
+                                                            .size(13.0),
+                                                    )
+                                                    .truncate()
+                                                    .sense(Sense::click()),
+                                                )
+                                                .clicked()
+                                            {
+                                                self.open_album(album.id.clone(), ctx);
+                                            }
+                                            ui.add(
+                                                egui::Label::new(
+                                                    RichText::new(&album.artist)
+                                                        .small()
+                                                        .color(TEXT_SECONDARY),
+                                                )
+                                                .truncate(),
+                                            );
+                                        });
+                                    });
+                            }
+                        });
+                    });
             }
 
             let offline_tracks: Vec<Track> = self
@@ -493,7 +852,7 @@ impl YrApp {
                 .collect();
 
             if !offline_tracks.is_empty() {
-                ui.add_space(6.0);
+                ui.add_space(12.0);
                 ui.label(
                     RichText::new("Disponibles sin conexión")
                         .size(16.0)
@@ -506,7 +865,7 @@ impl YrApp {
             }
 
             if !self.store.data.recent_tracks.is_empty() {
-                ui.add_space(10.0);
+                ui.add_space(12.0);
                 ui.label(
                     RichText::new("Escuchadas recientemente")
                         .size(16.0)
@@ -518,26 +877,6 @@ impl YrApp {
                     self.render_track_row(ui, ctx, track, &recents, idx, false);
                 }
             }
-
-            if !self.trending_tracks.is_empty() {
-                ui.add_space(10.0);
-                ui.label(
-                    RichText::new("Tendencias en YT Music")
-                        .size(16.0)
-                        .strong()
-                        .color(TEXT_PRIMARY),
-                );
-                let trending = self.trending_tracks.clone();
-                for (idx, track) in trending.iter().take(20).enumerate() {
-                    self.render_track_row(ui, ctx, track, &trending, idx, false);
-                }
-            } else if !self.trending_loading {
-                ui.add_space(16.0);
-                ui.label(
-                    RichText::new("Busca canciones o explora tus descargas offline.")
-                        .color(TEXT_SECONDARY),
-                );
-            }
         });
     }
 
@@ -545,7 +884,7 @@ impl YrApp {
         ui.horizontal(|ui| {
             let resp = ui.add(
                 egui::TextEdit::singleline(&mut self.search_query)
-                    .hint_text("Buscar canciones, álbumes, playlists...")
+                    .hint_text("Buscar canciones, álbumes, artistas...")
                     .desired_width(ui.available_width() - 88.0),
             );
             let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
@@ -557,6 +896,7 @@ impl YrApp {
         ui.horizontal(|ui| {
             ui.selectable_value(&mut self.search_filter, SearchFilter::Songs, "Canciones");
             ui.selectable_value(&mut self.search_filter, SearchFilter::Albums, "Álbumes");
+            ui.selectable_value(&mut self.search_filter, SearchFilter::Artists, "Artistas");
             ui.selectable_value(
                 &mut self.search_filter,
                 SearchFilter::Playlists,
@@ -564,51 +904,25 @@ impl YrApp {
             );
         });
 
-        if self.search_loading || self.detail_loading {
-            ui.spinner();
+        if self.search_loading {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label(RichText::new("Buscando en YT Music...").color(TEXT_SECONDARY));
+            });
         }
 
-        // Album / Playlist detail drill-down
-        let mut close_detail = false;
-        match &self.detail_view {
-            DetailView::Album(album) => {
-                let album = album.clone();
-                ui.horizontal(|ui| {
-                    if ui.button("← Volver").clicked() {
-                        close_detail = true;
+        // Quick search chips when results are empty
+        if self.search_results.songs.is_empty() && !self.search_loading {
+            ui.add_space(6.0);
+            ui.label(RichText::new("Búsquedas populares").small().color(TEXT_SECONDARY));
+            ui.horizontal_wrapped(|ui| {
+                for preset in ["Bad Bunny", "Daft Punk", "Feid", "Lo-Fi Beats", "Rock", "Pop"] {
+                    if ui.button(preset).clicked() {
+                        self.search_query = preset.to_string();
+                        self.trigger_search(ctx);
                     }
-                    ui.heading(&album.summary.title);
-                });
-                ui.label(RichText::new(&album.summary.artist).color(TEXT_SECONDARY));
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    for (idx, track) in album.tracks.iter().enumerate() {
-                        self.render_track_row(ui, ctx, track, &album.tracks, idx, false);
-                    }
-                });
-                if close_detail {
-                    self.detail_view = DetailView::None;
                 }
-                return;
-            }
-            DetailView::Playlist(pl) => {
-                let pl = pl.clone();
-                ui.horizontal(|ui| {
-                    if ui.button("← Volver").clicked() {
-                        close_detail = true;
-                    }
-                    ui.heading(&pl.summary.title);
-                });
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    for (idx, track) in pl.tracks.iter().enumerate() {
-                        self.render_track_row(ui, ctx, track, &pl.tracks, idx, false);
-                    }
-                });
-                if close_detail {
-                    self.detail_view = DetailView::None;
-                }
-                return;
-            }
-            DetailView::None => {}
+            });
         }
 
         egui::ScrollArea::vertical().show(ui, |ui| match self.search_filter {
@@ -620,23 +934,31 @@ impl YrApp {
             }
             SearchFilter::Albums => {
                 let albums = self.search_results.albums.clone();
-                for album in albums {
+                for album in &albums {
+                    self.render_album_row(ui, ctx, album);
+                }
+            }
+            SearchFilter::Artists => {
+                let artists = self.search_results.artists.clone();
+                for artist in artists {
                     egui::Frame::new()
                         .fill(BG_SURFACE)
                         .corner_radius(CornerRadius::same(10))
                         .inner_margin(10.0)
                         .show(ui, |ui| {
                             ui.horizontal(|ui| {
-                                render_thumb(ui, album.thumbnail_url.as_deref(), 48.0);
+                                render_thumb(ui, artist.thumbnail_url.as_deref(), 48.0);
                                 ui.vertical(|ui| {
-                                    ui.label(RichText::new(&album.title).strong());
-                                    ui.label(
-                                        RichText::new(&album.artist).small().color(TEXT_SECONDARY),
-                                    );
+                                    ui.label(RichText::new(&artist.name).strong());
+                                    if let Some(subs) = &artist.subscribers {
+                                        ui.label(
+                                            RichText::new(subs).small().color(TEXT_SECONDARY),
+                                        );
+                                    }
                                 });
                                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                    if ui.button("Abrir").clicked() {
-                                        self.open_album(album.id.clone(), ctx);
+                                    if ui.button("Ver").clicked() {
+                                        self.open_artist(artist.id.clone(), ctx);
                                     }
                                 });
                             });
@@ -645,32 +967,65 @@ impl YrApp {
             }
             SearchFilter::Playlists => {
                 let playlists = self.search_results.playlists.clone();
-                for pl in playlists {
-                    egui::Frame::new()
-                        .fill(BG_SURFACE)
-                        .corner_radius(CornerRadius::same(10))
-                        .inner_margin(10.0)
-                        .show(ui, |ui| {
-                            ui.horizontal(|ui| {
-                                render_thumb(ui, pl.thumbnail_url.as_deref(), 48.0);
-                                ui.vertical(|ui| {
-                                    ui.label(RichText::new(&pl.title).strong());
-                                    if let Some(author) = &pl.author {
-                                        ui.label(
-                                            RichText::new(author).small().color(TEXT_SECONDARY),
-                                        );
-                                    }
-                                });
-                                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                    if ui.button("Abrir").clicked() {
-                                        self.open_playlist(pl.id.clone(), ctx);
-                                    }
-                                });
-                            });
-                        });
+                for pl in &playlists {
+                    self.render_playlist_row(ui, ctx, pl);
                 }
             }
         });
+    }
+
+    fn render_album_row(
+        &mut self,
+        ui: &mut egui::Ui,
+        ctx: &egui::Context,
+        album: &yr_core::AlbumSummary,
+    ) {
+        egui::Frame::new()
+            .fill(BG_SURFACE)
+            .corner_radius(CornerRadius::same(10))
+            .inner_margin(10.0)
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    render_thumb(ui, album.thumbnail_url.as_deref(), 48.0);
+                    ui.vertical(|ui| {
+                        ui.label(RichText::new(&album.title).strong());
+                        ui.label(RichText::new(&album.artist).small().color(TEXT_SECONDARY));
+                    });
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if ui.button("Abrir").clicked() {
+                            self.open_album(album.id.clone(), ctx);
+                        }
+                    });
+                });
+            });
+    }
+
+    fn render_playlist_row(
+        &mut self,
+        ui: &mut egui::Ui,
+        ctx: &egui::Context,
+        pl: &PlaylistSummary,
+    ) {
+        egui::Frame::new()
+            .fill(BG_SURFACE)
+            .corner_radius(CornerRadius::same(10))
+            .inner_margin(10.0)
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    render_thumb(ui, pl.thumbnail_url.as_deref(), 48.0);
+                    ui.vertical(|ui| {
+                        ui.label(RichText::new(&pl.title).strong());
+                        if let Some(author) = &pl.author {
+                            ui.label(RichText::new(author).small().color(TEXT_SECONDARY));
+                        }
+                    });
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if ui.button("Abrir").clicked() {
+                            self.open_playlist(pl.id.clone(), ctx);
+                        }
+                    });
+                });
+            });
     }
 
     fn render_library(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
@@ -777,10 +1132,9 @@ impl YrApp {
                                             .map(|s| format!(" • {s}s"))
                                             .unwrap_or_default();
                                         ui.add(
-                                            egui::ProgressBar::new(task.progress())
-                                                .text(format!(
-                                                    "{pct}% • {mb_done:.1} MB • {speed_kb:.0} KB/s{eta}"
-                                                )),
+                                            egui::ProgressBar::new(task.progress()).text(format!(
+                                                "{pct}% • {mb_done:.1} MB • {speed_kb:.0} KB/s{eta}"
+                                            )),
                                         );
                                     }
                                     DownloadStatus::Paused => {
@@ -889,28 +1243,38 @@ impl YrApp {
             .fill(fill)
             .corner_radius(CornerRadius::same(10))
             .stroke(if is_current {
-                Stroke::new(1.0, ACCENT_RED)
+                Stroke::new(1.0_f32, ACCENT_RED)
             } else {
                 Stroke::NONE
             })
             .inner_margin(8.0)
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    render_thumb(ui, track.thumbnail_url.as_deref(), 46.0);
+                    render_thumb(ui, track.thumbnail_url.as_deref(), 48.0);
 
                     let info_resp = ui
                         .vertical(|ui| {
-                            ui.label(
-                                RichText::new(&track.title)
-                                    .strong()
-                                    .color(if is_current { ACCENT_RED } else { TEXT_PRIMARY }),
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(&track.title).strong().color(if is_current {
+                                        ACCENT_RED
+                                    } else {
+                                        TEXT_PRIMARY
+                                    }),
+                                )
+                                .truncate(),
                             );
                             let sub = if offline_badge {
                                 format!("{} • Offline", track.artist)
                             } else {
                                 format!("{} • {}", track.artist, track.formatted_duration())
                             };
-                            ui.label(RichText::new(sub).small().color(TEXT_SECONDARY));
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(sub).small().color(TEXT_SECONDARY),
+                                )
+                                .truncate(),
+                            );
                         })
                         .response
                         .interact(Sense::click());
@@ -965,8 +1329,13 @@ impl YrApp {
                     render_thumb(ui, track.thumbnail_url.as_deref(), 40.0);
                     let resp = ui
                         .vertical(|ui| {
-                            ui.label(RichText::new(&track.title).strong());
-                            ui.label(RichText::new(&track.artist).small().color(TEXT_SECONDARY));
+                            ui.add(egui::Label::new(RichText::new(&track.title).strong()).truncate());
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(&track.artist).small().color(TEXT_SECONDARY),
+                                )
+                                .truncate(),
+                            );
                         })
                         .response
                         .interact(Sense::click());
@@ -1012,6 +1381,14 @@ impl YrApp {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if ui.button("Cola").clicked() {
                     self.show_queue = !self.show_queue;
+                    self.show_lyrics = false;
+                }
+                if ui.button("Letras").clicked() {
+                    self.show_lyrics = !self.show_lyrics;
+                    self.show_queue = false;
+                    if self.show_lyrics && self.lyrics_track_id.as_deref() != Some(&track.id) {
+                        self.load_lyrics(track.id.clone(), ctx);
+                    }
                 }
             });
         });
@@ -1040,11 +1417,23 @@ impl YrApp {
             return;
         }
 
+        if self.show_lyrics {
+            ui.heading("Letra");
+            if self.lyrics_loading {
+                ui.spinner();
+            } else if let Some(text) = &self.lyrics_text {
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    ui.label(RichText::new(text).size(15.0));
+                });
+            }
+            return;
+        }
+
         ui.vertical_centered(|ui| {
-            ui.add_space(12.0);
+            ui.add_space(10.0);
             render_thumb(ui, track.thumbnail_url.as_deref(), 220.0);
-            ui.add_space(16.0);
-            ui.label(RichText::new(&track.title).size(22.0).strong());
+            ui.add_space(14.0);
+            ui.label(RichText::new(&track.title).size(20.0).strong());
             ui.label(RichText::new(&track.artist).size(15.0).color(TEXT_SECONDARY));
 
             match &snap.status {
@@ -1057,7 +1446,7 @@ impl YrApp {
                 _ => {}
             }
 
-            ui.add_space(14.0);
+            ui.add_space(12.0);
 
             let total = snap
                 .duration_secs
@@ -1082,7 +1471,7 @@ impl YrApp {
                 });
             });
 
-            ui.add_space(12.0);
+            ui.add_space(10.0);
             ui.horizontal(|ui| {
                 if ui
                     .button(RichText::new("🔀").color(if self.queue.shuffle {
@@ -1124,7 +1513,7 @@ impl YrApp {
                 }
             });
 
-            ui.add_space(12.0);
+            ui.add_space(10.0);
             ui.horizontal(|ui| {
                 let liked = self.store.is_liked(&track.id);
                 if ui
@@ -1136,9 +1525,12 @@ impl YrApp {
                 if ui.button("⬇ Descargar").clicked() {
                     self.enqueue_download(track.clone(), ctx);
                 }
+                if ui.button("📻 Radio").clicked() {
+                    self.start_radio(track.id.clone(), ctx);
+                }
             });
 
-            ui.add_space(10.0);
+            ui.add_space(8.0);
             let mut vol = self.store.data.config.volume;
             if ui
                 .add(egui::Slider::new(&mut vol, 0.0..=1.0).text("Volumen"))
@@ -1163,7 +1555,7 @@ impl YrApp {
 
         ui.add_space(10.0);
         ui.label("Calidad de streaming:");
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             for q in [
                 AudioQuality::Low,
                 AudioQuality::Medium,
@@ -1181,7 +1573,7 @@ impl YrApp {
 
         ui.add_space(10.0);
         ui.label("Calidad de descargas:");
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             for q in [
                 AudioQuality::Low,
                 AudioQuality::Medium,
