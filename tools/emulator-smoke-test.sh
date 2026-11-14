@@ -105,30 +105,50 @@ sleep 1
 adb shell screencap -p /data/local/tmp/07_mini_player.png
 adb pull /data/local/tmp/07_mini_player.png screenshots/07_mini_player.png
 
-# 8. Screen off: verify background service survives AND media keyevents (NEXT/PAUSE) work with screen OFF
+# 8. Expand notification shade, capture MediaStyle notification controls, tap Siguiente & Pausar, and verify screen-off survival
+adb shell cmd statusbar expand-notifications
+sleep 2
+adb shell screencap -p /data/local/tmp/07b_notification_controls.png
+adb pull /data/local/tmp/07b_notification_controls.png screenshots/07b_notification_controls.png
+adb shell uiautomator dump /data/local/tmp/notif_dump.xml || true
+adb pull /data/local/tmp/notif_dump.xml screenshots/notif_dump.xml || true
+{
+    echo "=== BEFORE Notification Siguiente tap ==="
+    adb shell dumpsys media_session | grep -A 25 "YrMusicSession" || true
+    NEXT_COORDS=$(python3 -c "
+import xml.etree.ElementTree as ET, re
+try:
+    root = ET.parse('screenshots/notif_dump.xml').getroot()
+    for n in root.iter('node'):
+        desc = (n.attrib.get('content-desc','') + ' ' + n.attrib.get('text','')).lower()
+        if 'siguiente' in desc:
+            m = re.findall(r'\d+', n.attrib.get('bounds',''))
+            if len(m)==4:
+                print((int(m[0])+int(m[2]))//2, (int(m[1])+int(m[3]))//2)
+                break
+except Exception as e:
+    pass
+")
+    echo "NEXT_COORDS=$NEXT_COORDS"
+    if [ -n "$NEXT_COORDS" ]; then
+        adb shell input tap $NEXT_COORDS
+        sleep 2
+    fi
+    echo "=== AFTER Notification Siguiente tap ==="
+    adb shell dumpsys media_session | grep -A 25 "YrMusicSession" || true
+} > screenshots/dumpsys_media_screen_off.txt
+adb shell cmd statusbar collapse || true
+sleep 1
 adb shell input keyevent 26
-sleep 3
+sleep 4
 adb shell dumpsys activity services com.yr.music | grep -q "YrPlaybackService" && echo "YrPlaybackService alive with screen off!"
 {
-    echo "=== BEFORE media keyevents (screen OFF) ==="
+    echo "=== WHILE SCREEN OFF ==="
     adb shell dumpsys media_session | grep -A 25 "YrMusicSession" || true
-    echo "=== Sending KEYCODE_MEDIA_NEXT (87) with screen OFF ==="
-    adb shell input keyevent 87
-    sleep 2
-    adb shell dumpsys media_session | grep -A 25 "YrMusicSession" || true
-    echo "=== Sending KEYCODE_MEDIA_PAUSE (127) with screen OFF ==="
-    adb shell input keyevent 127
-    sleep 2
-    adb shell dumpsys media_session | grep -A 25 "YrMusicSession" || true
-    echo "=== YrPlaybackService logcat ==="
-    adb logcat -d -s YrPlaybackService:I || true
-} > screenshots/dumpsys_media_screen_off.txt
+} >> screenshots/dumpsys_media_screen_off.txt
 cat screenshots/dumpsys_media_screen_off.txt
-# Wake to lockscreen (without unlocking) and capture lockscreen media controls
 adb shell input keyevent 26
-sleep 2
-adb shell screencap -p /data/local/tmp/07b_lockscreen.png
-adb pull /data/local/tmp/07b_lockscreen.png screenshots/07b_lockscreen.png
+sleep 1
 adb shell input swipe 540 1900 540 700 300
 sleep 1
 

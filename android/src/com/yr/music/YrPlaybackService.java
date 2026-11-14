@@ -261,6 +261,9 @@ public class YrPlaybackService extends Service {
     private PendingIntent serviceActionPi(String action, int reqCode, int piFlags) {
         Intent i = new Intent(this, YrPlaybackService.class);
         i.setAction(action);
+        if (Build.VERSION.SDK_INT >= 26) {
+            return PendingIntent.getForegroundService(this, reqCode, i, piFlags);
+        }
         return PendingIntent.getService(this, reqCode, i, piFlags);
     }
 
