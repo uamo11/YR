@@ -94,7 +94,8 @@ impl YrApp {
             .expect("failed to build tokio runtime");
 
         let store = LibraryStore::load_or_default(&data_dir);
-        let provider: Arc<dyn MusicProvider> = Arc::new(YtMusicProvider::new());
+        let provider: Arc<dyn MusicProvider> =
+            Arc::new(YtMusicProvider::with_cache_dir(data_dir.join("rustypipe_cache")));
         let download_dir = data_dir.join("downloads");
         let cache_dir = data_dir.join("stream_cache");
 
@@ -424,6 +425,9 @@ impl eframe::App for YrApp {
                     };
                     self.nav_button(&mut cols[3], NavTab::Downloads, &dl_label);
                 });
+
+                #[cfg(target_os = "android")]
+                ui.add_space(48.0);
             });
 
         // Main Content Area

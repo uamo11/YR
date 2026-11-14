@@ -41,19 +41,19 @@ adb shell screencap -p /data/local/tmp/01_home.png
 adb pull /data/local/tmp/01_home.png screenshots/01_home.png
 
 # 2. Search tab (second column at bottom nav)
-adb shell input tap 405 2280
+adb shell input tap 405 2160
 sleep 2
 adb shell screencap -p /data/local/tmp/02_search.png
 adb pull /data/local/tmp/02_search.png screenshots/02_search.png
 
 # 3. Library tab (third column)
-adb shell input tap 675 2280
+adb shell input tap 675 2160
 sleep 2
 adb shell screencap -p /data/local/tmp/03_library.png
 adb pull /data/local/tmp/03_library.png screenshots/03_library.png
 
 # 4. Downloads tab (fourth column)
-adb shell input tap 945 2280
+adb shell input tap 945 2160
 sleep 2
 adb shell screencap -p /data/local/tmp/04_downloads.png
 adb pull /data/local/tmp/04_downloads.png screenshots/04_downloads.png

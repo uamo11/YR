@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use rustypipe::client::RustyPipe;
 use rustypipe::model::{AlbumItem, MusicItem, MusicPlaylistItem, TrackItem};
+use std::path::PathBuf;
 use thiserror::Error;
 use yr_core::{
     AlbumDetail, AlbumSummary, ArtistSummary, AudioQuality, PlaylistDetail, PlaylistSummary,
@@ -45,6 +46,15 @@ impl YtMusicProvider {
         Self {
             client: RustyPipe::new(),
         }
+    }
+
+    pub fn with_cache_dir(cache_dir: PathBuf) -> Self {
+        let _ = std::fs::create_dir_all(&cache_dir);
+        let client = RustyPipe::builder()
+            .storage_dir(cache_dir)
+            .build()
+            .unwrap_or_else(|_| RustyPipe::new());
+        Self { client }
     }
 
     fn map_track(item: TrackItem) -> Track {
@@ -167,14 +177,24 @@ impl MusicProvider for YtMusicProvider {
     }
 
     async fn get_trending_music(&self) -> Result<Vec<Track>, ProviderError> {
-        let charts = self
-            .client
-            .query()
-            .music_charts(None)
-            .await
-            .map_err(|e| ProviderError::Api(e.to_string()))?;
+        if let Ok(charts) = self.client.query().music_charts(None).await {
+            let tracks: Vec<Track> = if !charts.top_tracks.is_empty() {
+                charts.top_tracks.into_iter().map(Self::map_track).collect()
+            } else {
+                charts
+                    .trending_tracks
+                    .into_iter()
+                    .map(Self::map_track)
+                    .collect()
+            };
+            if !tracks.is_empty() {
+                return Ok(tracks);
+            }
+        }
 
-        Ok(charts.top_tracks.into_iter().map(Self::map_track).collect())
+        // Fallback to popular songs search if charts endpoint returns empty
+        let fallback = self.search("top hits music").await?;
+        Ok(fallback.songs)
     }
 
     async fn resolve_audio_stream(
