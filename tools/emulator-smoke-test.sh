@@ -54,6 +54,14 @@ sleep 5
 adb shell screencap -p /data/local/tmp/02_search.png
 adb pull /data/local/tmp/02_search.png screenshots/02_search.png
 
+# 2b. Open track row ... menu to verify all actions inside menu
+adb shell input tap 980 520
+sleep 1
+adb shell screencap -p /data/local/tmp/02b_track_menu.png
+adb pull /data/local/tmp/02b_track_menu.png screenshots/02b_track_menu.png
+adb shell input tap 200 1300
+sleep 1
+
 # 3. Open Settings (top right gear), trigger local audio demo (2 tracks)
 adb shell input tap 1000 135
 sleep 1
@@ -158,6 +166,16 @@ adb shell input keyevent 26
 sleep 1
 adb shell input swipe 540 1900 540 700 300
 sleep 1
+
+# 8b. Re-open Now Playing -> Cola and remove non-playing track (X)
+adb shell input tap 1015 2020
+sleep 1
+adb shell input tap 556 266
+sleep 1
+adb shell input tap 990 675
+sleep 1
+adb shell screencap -p /data/local/tmp/06c_queue_removed.png
+adb pull /data/local/tmp/06c_queue_removed.png screenshots/06c_queue_removed.png
 
 # 9. 5-minute stress test with Monkey (1500 events * 200ms = 300s)
 adb shell monkey -p com.yr.music --throttle 200 --pct-syskeys 0 1500 || true
