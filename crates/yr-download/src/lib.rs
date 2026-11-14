@@ -158,6 +158,15 @@ impl DownloadManager {
             .filter(|p| p.exists())
     }
 
+    pub async fn total_downloaded_bytes(&self) -> u64 {
+        let guard = self.tasks.lock().await;
+        guard
+            .values()
+            .filter(|t| t.status == DownloadStatus::Completed)
+            .map(|t| t.downloaded_bytes)
+            .sum()
+    }
+
     pub async fn enqueue(self: &Arc<Self>, track: Track, quality: AudioQuality) {
         let track_id = track.id.clone();
         {

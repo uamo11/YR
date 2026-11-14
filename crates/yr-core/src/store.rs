@@ -10,6 +10,12 @@ pub struct AppConfig {
     pub download_quality: AudioQuality,
     pub max_concurrent_downloads: usize,
     pub volume: f32,
+    #[serde(default = "default_true")]
+    pub autoplay_radio: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for AppConfig {
@@ -19,6 +25,7 @@ impl Default for AppConfig {
             download_quality: AudioQuality::High,
             max_concurrent_downloads: 3,
             volume: 0.85,
+            autoplay_radio: true,
         }
     }
 }
@@ -28,6 +35,8 @@ pub struct LibraryData {
     pub liked_tracks: Vec<Track>,
     pub recent_tracks: Vec<Track>,
     pub playlists: Vec<LocalPlaylist>,
+    #[serde(default)]
+    pub search_history: Vec<String>,
     pub config: AppConfig,
 }
 
@@ -104,6 +113,29 @@ impl LibraryStore {
                 let _ = self.save();
             }
         }
+    }
+
+    pub fn delete_playlist(&mut self, playlist_id: &str) {
+        self.data.playlists.retain(|p| p.id != playlist_id);
+        let _ = self.save();
+    }
+
+    pub fn record_search(&mut self, query: &str) {
+        let q = query.trim();
+        if q.is_empty() {
+            return;
+        }
+        self.data.search_history.retain(|s| !s.eq_ignore_ascii_case(q));
+        self.data.search_history.insert(0, q.to_string());
+        if self.data.search_history.len() > 15 {
+            self.data.search_history.truncate(15);
+        }
+        let _ = self.save();
+    }
+
+    pub fn remove_search_history(&mut self, query: &str) {
+        self.data.search_history.retain(|s| s != query);
+        let _ = self.save();
     }
 }
 

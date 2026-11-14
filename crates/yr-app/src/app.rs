@@ -63,7 +63,14 @@ enum AppEvent {
         track: Track,
         result: Result<String, String>,
     },
-    DownloadsRefreshed(Vec<DownloadTask>),
+    SearchSuggestionsLoaded {
+        query: String,
+        suggestions: Vec<String>,
+    },
+    DownloadsRefreshed {
+        tasks: Vec<DownloadTask>,
+        total_bytes: u64,
+    },
 }
 
 pub struct YrApp {
@@ -73,6 +80,7 @@ pub struct YrApp {
     audio: AudioEngine,
     store: LibraryStore,
     queue: PlaybackQueue,
+    data_dir: PathBuf,
 
     event_tx: mpsc::UnboundedSender<AppEvent>,
     event_rx: mpsc::UnboundedReceiver<AppEvent>,
@@ -82,6 +90,9 @@ pub struct YrApp {
     search_filter: SearchFilter,
     search_results: SearchResults,
     search_loading: bool,
+    search_suggestions: Vec<String>,
+    last_search_input_at: Option<Instant>,
+    suggestions_last_query: String,
 
     home_feed: HomeFeed,
     home_loading: bool,
@@ -89,6 +100,7 @@ pub struct YrApp {
     detail_loading: bool,
 
     downloads: Vec<DownloadTask>,
+    total_downloaded_bytes: u64,
     last_download_poll: Instant,
 
     now_playing_open: bool,
@@ -99,6 +111,10 @@ pub struct YrApp {
     lyrics_loading: bool,
     show_settings: bool,
     new_playlist_name: String,
+
+    sleep_timer_until: Option<Instant>,
+    sleep_after_track: bool,
+    playlist_picker_track: Option<Track>,
 
     last_finished_counter: u64,
     status_banner: Option<(String, Instant)>,
@@ -141,6 +157,7 @@ impl YrApp {
             audio,
             store,
             queue: PlaybackQueue::new(),
+            data_dir,
             event_tx,
             event_rx,
             active_tab: NavTab::Home,
@@ -148,11 +165,15 @@ impl YrApp {
             search_filter: SearchFilter::Songs,
             search_results: SearchResults::default(),
             search_loading: false,
+            search_suggestions: Vec::new(),
+            last_search_input_at: None,
+            suggestions_last_query: String::new(),
             home_feed: HomeFeed::default(),
             home_loading: false,
             detail_view: DetailView::None,
             detail_loading: false,
             downloads: Vec::new(),
+            total_downloaded_bytes: 0,
             last_download_poll: Instant::now() - Duration::from_secs(10),
             now_playing_open: false,
             show_queue: false,
@@ -162,6 +183,9 @@ impl YrApp {
             lyrics_loading: false,
             show_settings: false,
             new_playlist_name: String::new(),
+            sleep_timer_until: None,
+            sleep_after_track: false,
+            playlist_picker_track: None,
             last_finished_counter: 0,
             status_banner: None,
             seeking_secs: None,
@@ -193,6 +217,9 @@ impl YrApp {
         if q.is_empty() {
             return;
         }
+        self.store.record_search(&q);
+        self.search_suggestions.clear();
+        self.suggestions_last_query = q.clone();
         self.search_loading = true;
         self.detail_view = DetailView::None;
         let provider = Arc::clone(&self.provider);
@@ -202,6 +229,37 @@ impl YrApp {
             let res = provider.search(&q).await.map_err(|e| e.to_string());
             let _ = tx.send(AppEvent::SearchLoaded(res));
             ctx.request_repaint();
+        });
+    }
+
+    fn maybe_fetch_suggestions(&mut self, ctx: &egui::Context) {
+        let q = self.search_query.trim().to_string();
+        if q.len() < 2 {
+            self.search_suggestions.clear();
+            return;
+        }
+        if q == self.suggestions_last_query {
+            return;
+        }
+        let Some(at) = self.last_search_input_at else {
+            return;
+        };
+        if at.elapsed() < Duration::from_millis(300) {
+            ctx.request_repaint_after(Duration::from_millis(120));
+            return;
+        }
+        self.suggestions_last_query = q.clone();
+        let provider = Arc::clone(&self.provider);
+        let tx = self.event_tx.clone();
+        let ctx = ctx.clone();
+        self.runtime.spawn(async move {
+            if let Ok(suggestions) = provider.search_suggestions(&q).await {
+                let _ = tx.send(AppEvent::SearchSuggestionsLoaded {
+                    query: q,
+                    suggestions,
+                });
+                ctx.request_repaint();
+            }
         });
     }
 
@@ -263,10 +321,14 @@ impl YrApp {
     }
 
     fn start_radio(&mut self, track_id: String, ctx: &egui::Context) {
+        self.set_banner("Generando radio...");
+        self.fetch_radio_internal(track_id, ctx);
+    }
+
+    fn fetch_radio_internal(&mut self, track_id: String, ctx: &egui::Context) {
         let provider = Arc::clone(&self.provider);
         let tx = self.event_tx.clone();
         let ctx = ctx.clone();
-        self.set_banner("Generando radio...");
         self.runtime.spawn(async move {
             let res = provider.get_radio(&track_id).await.map_err(|e| e.to_string());
             let _ = tx.send(AppEvent::RadioLoaded(res));
@@ -300,15 +362,26 @@ impl YrApp {
         let tx = self.event_tx.clone();
         let ctx = ctx.clone();
         self.runtime.spawn(async move {
-            let items = dl.list_tasks().await;
-            let _ = tx.send(AppEvent::DownloadsRefreshed(items));
+            let tasks = dl.list_tasks().await;
+            let total_bytes = dl.total_downloaded_bytes().await;
+            let _ = tx.send(AppEvent::DownloadsRefreshed { tasks, total_bytes });
             ctx.request_repaint();
         });
     }
 
     fn play_track_in_list(&mut self, tracks: Vec<Track>, index: usize, ctx: &egui::Context) {
+        let single_track_id = if tracks.len() == 1 {
+            tracks.first().map(|t| t.id.clone())
+        } else {
+            None
+        };
         self.queue.set_queue(tracks, index);
         self.play_current_queue_track(ctx);
+        if self.store.data.config.autoplay_radio {
+            if let Some(track_id) = single_track_id {
+                self.fetch_radio_internal(track_id, ctx);
+            }
+        }
     }
 
     fn play_current_queue_track(&mut self, ctx: &egui::Context) {
@@ -362,8 +435,9 @@ impl YrApp {
         let ctx = ctx.clone();
         self.runtime.spawn(async move {
             dl.enqueue(track, quality).await;
-            let items = dl.list_tasks().await;
-            let _ = tx.send(AppEvent::DownloadsRefreshed(items));
+            let tasks = dl.list_tasks().await;
+            let total_bytes = dl.total_downloaded_bytes().await;
+            let _ = tx.send(AppEvent::DownloadsRefreshed { tasks, total_bytes });
             ctx.request_repaint();
         });
         self.set_banner(format!("Descargando: {title}"));
@@ -379,8 +453,9 @@ impl YrApp {
             for track in tracks {
                 dl.enqueue(track, quality).await;
             }
-            let items = dl.list_tasks().await;
-            let _ = tx.send(AppEvent::DownloadsRefreshed(items));
+            let tasks = dl.list_tasks().await;
+            let total_bytes = dl.total_downloaded_bytes().await;
+            let _ = tx.send(AppEvent::DownloadsRefreshed { tasks, total_bytes });
             ctx.request_repaint();
         });
         self.set_banner(format!("Descargando {count} canciones..."));
@@ -461,9 +536,29 @@ impl YrApp {
                     }
                     Err(e) => self.set_banner(format!("No se pudo reproducir: {e}")),
                 },
-                AppEvent::DownloadsRefreshed(items) => {
-                    self.downloads = items;
+                AppEvent::SearchSuggestionsLoaded { query, suggestions } => {
+                    if self.search_query.trim() == query {
+                        self.search_suggestions = suggestions;
+                    }
                 }
+                AppEvent::DownloadsRefreshed { tasks, total_bytes } => {
+                    self.downloads = tasks;
+                    self.total_downloaded_bytes = total_bytes;
+                }
+            }
+        }
+
+        if self.active_tab == NavTab::Search {
+            self.maybe_fetch_suggestions(ctx);
+        }
+
+        if let Some(until) = self.sleep_timer_until {
+            if Instant::now() >= until {
+                self.sleep_timer_until = None;
+                self.audio.pause();
+                self.set_banner("Temporizador de apagado: reproducción pausada");
+            } else {
+                ctx.request_repaint_after(Duration::from_secs(1));
             }
         }
 
@@ -485,7 +580,11 @@ impl YrApp {
         let snap = self.audio.snapshot();
         if snap.finished_counter > self.last_finished_counter {
             self.last_finished_counter = snap.finished_counter;
-            if self.queue.next_track(false).is_some() {
+            if self.sleep_after_track {
+                self.sleep_after_track = false;
+                self.audio.pause();
+                self.set_banner("Temporizador: detenido al finalizar la canción");
+            } else if self.queue.next_track(false).is_some() {
                 self.play_current_queue_track(ctx);
             }
         }
@@ -594,6 +693,8 @@ impl eframe::App for YrApp {
                     NavTab::Downloads => self.render_downloads(ui, ctx),
                 }
             });
+
+        self.render_playlist_picker_modal(ctx);
     }
 }
 
@@ -765,6 +866,62 @@ impl YrApp {
                 ui.add_space(8.0);
             }
 
+            if !self.store.data.recent_tracks.is_empty() {
+                ui.label(
+                    RichText::new("Volver a escuchar")
+                        .size(17.0)
+                        .strong()
+                        .color(TEXT_PRIMARY),
+                );
+                let recents = self.store.data.recent_tracks.clone();
+                egui::ScrollArea::horizontal()
+                    .id_salt("home_recent_cards")
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            for (idx, track) in recents.iter().take(12).enumerate() {
+                                egui::Frame::new()
+                                    .fill(BG_SURFACE)
+                                    .corner_radius(CornerRadius::same(10))
+                                    .inner_margin(8.0)
+                                    .show(ui, |ui| {
+                                        ui.set_width(116.0);
+                                        ui.vertical(|ui| {
+                                            render_thumb(
+                                                ui,
+                                                track.thumbnail_url.as_deref(),
+                                                100.0,
+                                            );
+                                            ui.add_space(4.0);
+                                            if ui
+                                                .add(
+                                                    egui::Label::new(
+                                                        RichText::new(&track.title)
+                                                            .strong()
+                                                            .size(12.5),
+                                                    )
+                                                    .truncate()
+                                                    .sense(Sense::click()),
+                                                )
+                                                .clicked()
+                                            {
+                                                self.play_track_in_list(recents.clone(), idx, ctx);
+                                            }
+                                            ui.add(
+                                                egui::Label::new(
+                                                    RichText::new(&track.artist)
+                                                        .size(11.0)
+                                                        .color(TEXT_SECONDARY),
+                                                )
+                                                .truncate(),
+                                            );
+                                        });
+                                    });
+                            }
+                        });
+                    });
+                ui.add_space(10.0);
+            }
+
             ui.horizontal(|ui| {
                 ui.heading(RichText::new("Selección rápida").color(TEXT_PRIMARY));
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -887,11 +1044,35 @@ impl YrApp {
                     .hint_text("Buscar canciones, álbumes, artistas...")
                     .desired_width(ui.available_width() - 88.0),
             );
+            if resp.changed() {
+                self.last_search_input_at = Some(Instant::now());
+            }
             let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
             if ui.button("Buscar").clicked() || enter {
                 self.trigger_search(ctx);
             }
         });
+
+        if !self.search_suggestions.is_empty() && !self.search_loading {
+            let suggestions = self.search_suggestions.clone();
+            egui::ScrollArea::horizontal()
+                .id_salt("search_suggestions")
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        for s in suggestions.iter().take(8) {
+                            let btn = egui::Button::new(
+                                RichText::new(s).size(12.5).color(TEXT_PRIMARY),
+                            )
+                            .fill(BG_ELEVATED)
+                            .corner_radius(CornerRadius::same(14));
+                            if ui.add(btn).clicked() {
+                                self.search_query = s.clone();
+                                self.trigger_search(ctx);
+                            }
+                        }
+                    });
+                });
+        }
 
         ui.horizontal(|ui| {
             ui.selectable_value(&mut self.search_filter, SearchFilter::Songs, "Canciones");
@@ -911,8 +1092,31 @@ impl YrApp {
             });
         }
 
-        // Quick search chips when results are empty
+        // Quick search chips & search history when results are empty
         if self.search_results.songs.is_empty() && !self.search_loading {
+            if !self.store.data.search_history.is_empty() {
+                ui.add_space(6.0);
+                ui.label(
+                    RichText::new("Búsquedas recientes")
+                        .small()
+                        .color(TEXT_SECONDARY),
+                );
+                let history = self.store.data.search_history.clone();
+                ui.horizontal_wrapped(|ui| {
+                    for item in history.iter().take(10) {
+                        ui.horizontal(|ui| {
+                            if ui.button(item).clicked() {
+                                self.search_query = item.clone();
+                                self.trigger_search(ctx);
+                            }
+                            if ui.small_button("✕").clicked() {
+                                self.store.remove_search_history(item);
+                            }
+                        });
+                    }
+                });
+            }
+
             ui.add_space(6.0);
             ui.label(RichText::new("Búsquedas populares").small().color(TEXT_SECONDARY));
             ui.horizontal_wrapped(|ui| {
@@ -1060,12 +1264,21 @@ impl YrApp {
                 ui.label(RichText::new("Tus playlists").size(16.0).strong());
                 let pls = self.store.data.playlists.clone();
                 for pl in pls {
-                    egui::CollapsingHeader::new(format!("{} ({})", pl.name, pl.tracks.len()))
-                        .show(ui, |ui| {
-                            for (idx, track) in pl.tracks.iter().enumerate() {
-                                self.render_track_row(ui, ctx, track, &pl.tracks, idx, false);
+                    ui.horizontal(|ui| {
+                        egui::CollapsingHeader::new(format!("{} ({})", pl.name, pl.tracks.len()))
+                            .id_salt(&pl.id)
+                            .show(ui, |ui| {
+                                for (idx, track) in pl.tracks.iter().enumerate() {
+                                    self.render_track_row(ui, ctx, track, &pl.tracks, idx, false);
+                                }
+                            });
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            if ui.small_button("🗑").clicked() {
+                                self.store.delete_playlist(&pl.id);
+                                self.set_banner(format!("Playlist '{}' eliminada", pl.name));
                             }
                         });
+                    });
                 }
             }
         });
@@ -1074,6 +1287,14 @@ impl YrApp {
     fn render_downloads(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         ui.horizontal(|ui| {
             ui.heading("Descargas");
+            let mb = self.total_downloaded_bytes as f64 / (1024.0 * 1024.0);
+            if mb > 0.0 {
+                ui.label(
+                    RichText::new(format!("({mb:.1} MB)"))
+                        .small()
+                        .color(TEXT_SECONDARY),
+                );
+            }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if ui.button("↻").clicked() {
                     self.refresh_downloads(ctx);
@@ -1252,7 +1473,7 @@ impl YrApp {
                 ui.horizontal(|ui| {
                     render_thumb(ui, track.thumbnail_url.as_deref(), 48.0);
 
-                    let text_width = (ui.available_width() - 128.0).max(80.0);
+                    let text_width = (ui.available_width() - 156.0).max(80.0);
                     let info_resp = ui
                         .allocate_ui(Vec2::new(text_width, 46.0), |ui| {
                             ui.vertical(|ui| {
@@ -1297,6 +1518,10 @@ impl YrApp {
                             self.enqueue_download(track.clone(), ctx);
                         }
 
+                        if ui.button("➕").clicked() {
+                            self.playlist_picker_track = Some(track.clone());
+                        }
+
                         let liked = self.store.is_liked(&track.id);
                         let heart = if liked { "♥" } else { "♡" };
                         if ui
@@ -1324,7 +1549,14 @@ impl YrApp {
         track: &Track,
         snap: &AudioSnapshot,
     ) {
-        egui::Frame::new()
+        let total = snap
+            .duration_secs
+            .or(track.duration_secs.map(|d| d as f64))
+            .unwrap_or(1.0)
+            .max(1.0);
+        let progress = (snap.position_secs / total).clamp(0.0, 1.0) as f32;
+
+        let frame_resp = egui::Frame::new()
             .fill(BG_ELEVATED)
             .corner_radius(CornerRadius::same(10))
             .inner_margin(8.0)
@@ -1374,6 +1606,13 @@ impl YrApp {
                     });
                 });
             });
+
+        let bar_rect = egui::Rect::from_min_size(
+            frame_resp.response.rect.left_top(),
+            Vec2::new(frame_resp.response.rect.width() * progress, 2.0),
+        );
+        ui.painter()
+            .rect_filled(bar_rect, CornerRadius::same(1), ACCENT_RED);
     }
 
     fn render_full_player(
@@ -1392,16 +1631,23 @@ impl YrApp {
                 self.now_playing_open = false;
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if ui.button("Cola").clicked() {
-                    self.show_queue = !self.show_queue;
+                if ui.selectable_label(self.show_queue, "Cola").clicked() {
+                    self.show_queue = true;
                     self.show_lyrics = false;
                 }
-                if ui.button("Letras").clicked() {
-                    self.show_lyrics = !self.show_lyrics;
+                if ui.selectable_label(self.show_lyrics, "Letras").clicked() {
+                    self.show_lyrics = true;
                     self.show_queue = false;
-                    if self.show_lyrics && self.lyrics_track_id.as_deref() != Some(&track.id) {
+                    if self.lyrics_track_id.as_deref() != Some(&track.id) {
                         self.load_lyrics(track.id.clone(), ctx);
                     }
+                }
+                if ui
+                    .selectable_label(!self.show_queue && !self.show_lyrics, "Portada")
+                    .clicked()
+                {
+                    self.show_queue = false;
+                    self.show_lyrics = false;
                 }
             });
         });
@@ -1448,6 +1694,26 @@ impl YrApp {
             ui.add_space(14.0);
             ui.label(RichText::new(&track.title).size(20.0).strong());
             ui.label(RichText::new(&track.artist).size(15.0).color(TEXT_SECONDARY));
+
+            let is_offline = self
+                .downloads
+                .iter()
+                .any(|d| d.track.id == track.id && d.status == DownloadStatus::Completed);
+            let source_badge = if is_offline {
+                "Offline • Sin anuncios"
+            } else {
+                match self.store.data.config.stream_quality {
+                    AudioQuality::Best => "Streaming • Máxima calidad",
+                    AudioQuality::High => "Streaming • Alta calidad",
+                    AudioQuality::Medium => "Streaming • Calidad media",
+                    AudioQuality::Low => "Streaming • Ahorro de datos",
+                }
+            };
+            ui.label(
+                RichText::new(source_badge)
+                    .size(11.5)
+                    .color(if is_offline { GREEN_OK } else { TEXT_SECONDARY }),
+            );
 
             match &snap.status {
                 PlaybackStatus::Buffering | PlaybackStatus::Loading => {
@@ -1527,7 +1793,7 @@ impl YrApp {
             });
 
             ui.add_space(10.0);
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 let liked = self.store.is_liked(&track.id);
                 if ui
                     .button(if liked { "♥ Me gusta" } else { "♡ Me gusta" })
@@ -1535,12 +1801,49 @@ impl YrApp {
                 {
                     self.store.toggle_like(track.clone());
                 }
+                if ui.button("➕ Playlist").clicked() {
+                    self.playlist_picker_track = Some(track.clone());
+                }
                 if ui.button("⬇ Descargar").clicked() {
                     self.enqueue_download(track.clone(), ctx);
                 }
                 if ui.button("📻 Radio").clicked() {
                     self.start_radio(track.id.clone(), ctx);
                 }
+                let timer_label = if let Some(until) = self.sleep_timer_until {
+                    let rem = until
+                        .saturating_duration_since(Instant::now())
+                        .as_secs();
+                    format!("🌙 {}:{:02}", rem / 60, rem % 60)
+                } else if self.sleep_after_track {
+                    "🌙 Fin canción".to_string()
+                } else {
+                    "🌙 Timer".to_string()
+                };
+                ui.menu_button(timer_label, |ui| {
+                    for mins in [15_u64, 30, 45, 60] {
+                        if ui.button(format!("{mins} minutos")).clicked() {
+                            self.sleep_timer_until =
+                                Some(Instant::now() + Duration::from_secs(mins * 60));
+                            self.sleep_after_track = false;
+                            self.set_banner(format!("Temporizador: {mins} min"));
+                            ui.close_menu();
+                        }
+                    }
+                    if ui.button("Al finalizar la canción").clicked() {
+                        self.sleep_timer_until = None;
+                        self.sleep_after_track = true;
+                        self.set_banner("Se detendrá al finalizar la canción");
+                        ui.close_menu();
+                    }
+                    if (self.sleep_timer_until.is_some() || self.sleep_after_track)
+                        && ui.button("Desactivar temporizador").clicked()
+                    {
+                        self.sleep_timer_until = None;
+                        self.sleep_after_track = false;
+                        ui.close_menu();
+                    }
+                });
             });
 
             ui.add_space(8.0);
@@ -1601,6 +1904,88 @@ impl YrApp {
                 }
             }
         });
+
+        ui.add_space(12.0);
+        if ui
+            .checkbox(
+                &mut self.store.data.config.autoplay_radio,
+                "Radio automática al reproducir una canción",
+            )
+            .changed()
+        {
+            let _ = self.store.save();
+        }
+
+        ui.add_space(12.0);
+        let mb = self.total_downloaded_bytes as f64 / (1024.0 * 1024.0);
+        ui.label(
+            RichText::new(format!("Almacenamiento offline: {mb:.1} MB"))
+                .color(TEXT_SECONDARY),
+        );
+        ui.add_space(6.0);
+        if ui.button("Limpiar caché de streaming").clicked() {
+            let cache_dir = self.data_dir.join("stream_cache");
+            let _ = std::fs::remove_dir_all(&cache_dir);
+            let _ = std::fs::create_dir_all(&cache_dir);
+            self.set_banner("Caché de streaming eliminada");
+        }
+    }
+
+    fn render_playlist_picker_modal(&mut self, ctx: &egui::Context) {
+        let Some(track) = self.playlist_picker_track.clone() else {
+            return;
+        };
+        let mut open = true;
+        egui::Window::new("Añadir a playlist")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
+            .show(ctx, |ui| {
+                ui.set_min_width(260.0);
+                ui.label(RichText::new(&track.title).strong());
+                ui.add_space(6.0);
+                let pls = self.store.data.playlists.clone();
+                if pls.is_empty() {
+                    ui.label(
+                        RichText::new("No tienes playlists aún.")
+                            .small()
+                            .color(TEXT_SECONDARY),
+                    );
+                } else {
+                    for pl in pls {
+                        if ui
+                            .button(format!("{} ({})", pl.name, pl.tracks.len()))
+                            .clicked()
+                        {
+                            self.store.add_to_playlist(&pl.id, track.clone());
+                            self.set_banner(format!("Añadida a '{}'", pl.name));
+                            self.playlist_picker_track = None;
+                        }
+                    }
+                }
+                ui.separator();
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.new_playlist_name)
+                            .hint_text("Nueva playlist...")
+                            .desired_width(150.0),
+                    );
+                    if ui.button("Crear y añadir").clicked()
+                        && !self.new_playlist_name.trim().is_empty()
+                    {
+                        let name = self.new_playlist_name.trim().to_string();
+                        let created = self.store.create_playlist(name);
+                        self.store.add_to_playlist(&created.id, track.clone());
+                        self.new_playlist_name.clear();
+                        self.set_banner(format!("Añadida a '{}'", created.name));
+                        self.playlist_picker_track = None;
+                    }
+                });
+            });
+        if !open {
+            self.playlist_picker_track = None;
+        }
     }
 }
 
