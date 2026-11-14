@@ -88,19 +88,26 @@ sleep 2
 adb shell screencap -p /data/local/tmp/05b_swipe_prev.png
 adb pull /data/local/tmp/05b_swipe_prev.png screenshots/05b_swipe_prev.png
 
-# 6. Open Queue tab (Cola) & Letra tab
+# 6. Open Queue tab (Cola), reorder Pista 2 up (^), & Letra tab
 adb shell input tap 556 266
 sleep 1
 adb shell screencap -p /data/local/tmp/06_queue_editable.png
 adb pull /data/local/tmp/06_queue_editable.png screenshots/06_queue_editable.png
+
+adb shell input tap 880 675
+sleep 1
+adb shell screencap -p /data/local/tmp/06a_queue_reordered.png
+adb pull /data/local/tmp/06a_queue_reordered.png screenshots/06a_queue_reordered.png
 
 adb shell input tap 404 266
 sleep 2
 adb shell screencap -p /data/local/tmp/06b_lyrics.png
 adb pull /data/local/tmp/06b_lyrics.png screenshots/06b_lyrics.png
 
-# 7. Minimize Now Playing (v) to show Mini-Player with progress bar
-adb shell input tap 68 266
+# 7. Return to Portada and swipe DOWN on cover art to minimize to Mini-Player
+adb shell input tap 228 266
+sleep 1
+adb shell input swipe 540 550 540 1050 250
 sleep 1
 adb shell screencap -p /data/local/tmp/07_mini_player.png
 adb pull /data/local/tmp/07_mini_player.png screenshots/07_mini_player.png
