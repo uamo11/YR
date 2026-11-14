@@ -1252,29 +1252,33 @@ impl YrApp {
                 ui.horizontal(|ui| {
                     render_thumb(ui, track.thumbnail_url.as_deref(), 48.0);
 
+                    let text_width = (ui.available_width() - 128.0).max(80.0);
                     let info_resp = ui
-                        .vertical(|ui| {
-                            ui.add(
-                                egui::Label::new(
-                                    RichText::new(&track.title).strong().color(if is_current {
-                                        ACCENT_RED
-                                    } else {
-                                        TEXT_PRIMARY
-                                    }),
-                                )
-                                .truncate(),
-                            );
-                            let sub = if offline_badge {
-                                format!("{} • Offline", track.artist)
-                            } else {
-                                format!("{} • {}", track.artist, track.formatted_duration())
-                            };
-                            ui.add(
-                                egui::Label::new(
-                                    RichText::new(sub).small().color(TEXT_SECONDARY),
-                                )
-                                .truncate(),
-                            );
+                        .allocate_ui(Vec2::new(text_width, 46.0), |ui| {
+                            ui.vertical(|ui| {
+                                ui.set_max_width(text_width);
+                                ui.add(
+                                    egui::Label::new(
+                                        RichText::new(&track.title).strong().color(if is_current {
+                                            ACCENT_RED
+                                        } else {
+                                            TEXT_PRIMARY
+                                        }),
+                                    )
+                                    .truncate(),
+                                );
+                                let sub = if offline_badge {
+                                    format!("{} • Offline", track.artist)
+                                } else {
+                                    format!("{} • {}", track.artist, track.formatted_duration())
+                                };
+                                ui.add(
+                                    egui::Label::new(
+                                        RichText::new(sub).small().color(TEXT_SECONDARY),
+                                    )
+                                    .truncate(),
+                                );
+                            });
                         })
                         .response
                         .interact(Sense::click());
@@ -1327,15 +1331,24 @@ impl YrApp {
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     render_thumb(ui, track.thumbnail_url.as_deref(), 40.0);
+                    let text_width = (ui.available_width() - 96.0).max(80.0);
                     let resp = ui
-                        .vertical(|ui| {
-                            ui.add(egui::Label::new(RichText::new(&track.title).strong()).truncate());
-                            ui.add(
-                                egui::Label::new(
-                                    RichText::new(&track.artist).small().color(TEXT_SECONDARY),
-                                )
-                                .truncate(),
-                            );
+                        .allocate_ui(Vec2::new(text_width, 40.0), |ui| {
+                            ui.vertical(|ui| {
+                                ui.set_max_width(text_width);
+                                ui.add(
+                                    egui::Label::new(RichText::new(&track.title).strong())
+                                        .truncate(),
+                                );
+                                ui.add(
+                                    egui::Label::new(
+                                        RichText::new(&track.artist)
+                                            .small()
+                                            .color(TEXT_SECONDARY),
+                                    )
+                                    .truncate(),
+                                );
+                            });
                         })
                         .response
                         .interact(Sense::click());
