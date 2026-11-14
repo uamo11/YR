@@ -33,12 +33,17 @@ jobs:
         with:
           key: android
 
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
       - name: Install Android NDK and SDK components
         run: |
           SDK_ROOT="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
           SDKMANAGER="$(command -v sdkmanager || find "$SDK_ROOT/cmdline-tools" -name sdkmanager -type f | head -n 1)"
           yes | "$SDKMANAGER" --licenses >/dev/null || true
-          "$SDKMANAGER" "platforms;android-34" "build-tools;34.0.0" "ndk;27.2.12479018"
+          "$SDKMANAGER" "platforms;android-34" "build-tools;35.0.0" "ndk;27.2.12479018"
           NDK_DIR="${SDK_ROOT}/ndk/27.2.12479018"
           echo "ANDROID_HOME=${SDK_ROOT}" >> "$GITHUB_ENV"
           echo "ANDROID_SDK_ROOT=${SDK_ROOT}" >> "$GITHUB_ENV"
@@ -67,7 +72,7 @@ jobs:
           mkdir -p android/jniLibs android/build/classes android/build/apk_root/lib target/release/apk
           cargo ndk -t arm64-v8a -t armeabi-v7a -t x86_64 -o android/jniLibs build --release -p yr-app --lib
 
-          BUILD_TOOLS="$ANDROID_HOME/build-tools/34.0.0"
+          BUILD_TOOLS="$ANDROID_HOME/build-tools/35.0.0"
           ANDROID_JAR="$ANDROID_HOME/platforms/android-34/android.jar"
 
           "$BUILD_TOOLS/aapt2" compile --dir android/res -o android/build/res.zip
