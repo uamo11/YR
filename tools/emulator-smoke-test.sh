@@ -154,6 +154,7 @@ except Exception as e:
 } > screenshots/dumpsys_media_screen_off.txt
 adb shell cmd statusbar collapse || true
 sleep 1
+adb shell locksettings set-pin 1234 || true
 adb shell input keyevent 26
 sleep 4
 adb shell dumpsys activity services com.yr.music | grep -q "YrPlaybackService" && echo "YrPlaybackService alive with screen off!"
@@ -162,10 +163,18 @@ adb shell dumpsys activity services com.yr.music | grep -q "YrPlaybackService" &
     adb shell dumpsys media_session | grep -A 25 "YrMusicSession" || true
 } >> screenshots/dumpsys_media_screen_off.txt
 cat screenshots/dumpsys_media_screen_off.txt
+# Wake to Lockscreen and capture lockscreen media controls
 adb shell input keyevent 26
-sleep 1
+sleep 2
+adb shell screencap -p /data/local/tmp/07c_lockscreen_controls.png
+adb pull /data/local/tmp/07c_lockscreen_controls.png screenshots/07c_lockscreen_controls.png
 adb shell input swipe 540 1900 540 700 300
 sleep 1
+adb shell input text 1234
+sleep 1
+adb shell input keyevent 66
+sleep 1
+adb shell locksettings clear --old 1234 || true
 
 # 8b. Re-open Now Playing -> Cola and remove non-playing track (X)
 adb shell input tap 1015 2020
