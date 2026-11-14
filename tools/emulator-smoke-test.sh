@@ -172,7 +172,7 @@ adb shell input tap 1015 2020
 sleep 1
 adb shell input tap 556 266
 sleep 1
-adb shell input tap 990 675
+adb shell input tap 990 688
 sleep 1
 adb shell screencap -p /data/local/tmp/06c_queue_removed.png
 adb pull /data/local/tmp/06c_queue_removed.png screenshots/06c_queue_removed.png

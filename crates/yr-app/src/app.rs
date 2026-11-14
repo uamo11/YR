@@ -2007,15 +2007,34 @@ impl YrApp {
                                     self.play_current_queue_track(ctx);
                                 }
                                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                    if !is_curr && ui.small_button("X").clicked() {
+                                    if !is_curr
+                                        && ui
+                                            .add(
+                                                egui::Button::new("X")
+                                                    .min_size(Vec2::new(34.0, 32.0)),
+                                            )
+                                            .clicked()
+                                    {
                                         self.queue.lock().unwrap().remove_at(idx);
                                     }
                                     if order_pos + 1 < total_ordered
-                                        && ui.small_button("v").clicked()
+                                        && ui
+                                            .add(
+                                                egui::Button::new("v")
+                                                    .min_size(Vec2::new(34.0, 32.0)),
+                                            )
+                                            .clicked()
                                     {
                                         self.queue.lock().unwrap().move_in_order(order_pos, 1);
                                     }
-                                    if order_pos > 0 && ui.small_button("^").clicked() {
+                                    if order_pos > 0
+                                        && ui
+                                            .add(
+                                                egui::Button::new("^")
+                                                    .min_size(Vec2::new(34.0, 32.0)),
+                                            )
+                                            .clicked()
+                                    {
                                         self.queue.lock().unwrap().move_in_order(order_pos, -1);
                                     }
                                 });
