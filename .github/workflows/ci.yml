@@ -27,7 +27,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-linux-android,armv7-linux-androideabi
+          targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -45,6 +45,7 @@ jobs:
           echo "ANDROID_NDK_HOME=${NDK_DIR}" >> "$GITHUB_ENV"
           echo "BINDGEN_EXTRA_CLANG_ARGS_aarch64_linux_android=--target=aarch64-linux-android24 --sysroot=${NDK_DIR}/toolchains/llvm/prebuilt/linux-x86_64/sysroot" >> "$GITHUB_ENV"
           echo "BINDGEN_EXTRA_CLANG_ARGS_armv7_linux_androideabi=--target=armv7a-linux-androideabi24 --sysroot=${NDK_DIR}/toolchains/llvm/prebuilt/linux-x86_64/sysroot" >> "$GITHUB_ENV"
+          echo "BINDGEN_EXTRA_CLANG_ARGS_x86_64_linux_android=--target=x86_64-linux-android24 --sysroot=${NDK_DIR}/toolchains/llvm/prebuilt/linux-x86_64/sysroot" >> "$GITHUB_ENV"
 
       - name: Install cargo-apk
         run: cargo install cargo-apk --locked
@@ -67,3 +68,53 @@ jobs:
           name: yr-music-android-apk
           path: target/release/apk/*.apk
           if-no-files-found: error
+
+  emulator-test:
+    name: Android Emulator Smoke Test & Screenshots
+    needs: build-android
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download built APK
+        uses: actions/download-artifact@v4
+        with:
+          name: yr-music-android-apk
+          path: apk-to-test/
+
+      - name: Grant execute permission for smoke test script
+        run: chmod +x tools/emulator-smoke-test.sh
+
+      - name: Enable KVM group perms
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Ensure Android SDK permissions
+        run: |
+          sudo chown -R $USER:$USER "$ANDROID_HOME" 2>/dev/null || true
+          sudo chmod -R u+rwX "$ANDROID_HOME" 2>/dev/null || true
+          rm -rf "$ANDROID_HOME/.downloadIntermediates" 2>/dev/null || true
+
+      - name: Run YR Music on Android Emulator
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 29
+          target: default
+          arch: x86_64
+          profile: pixel_6
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio
+          script: ./tools/emulator-smoke-test.sh
+
+      - name: Upload Emulator Screenshots & Logcat
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: yr-emulator-results
+          path: |
+            screenshots/
+            emulator-logcat.log
+          retention-days: 10
