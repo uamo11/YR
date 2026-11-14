@@ -1697,7 +1697,7 @@ impl YrApp {
                     }
 
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if ui.button("⌃").clicked() {
+                        if ui.button("^").clicked() {
                             self.now_playing_open = true;
                         }
                         if ui.button("⏭").clicked() && self.queue.next_track(true).is_some() {
@@ -1870,15 +1870,15 @@ impl YrApp {
                                     self.play_current_queue_track(ctx);
                                 }
                                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                    if !is_curr && ui.small_button("✕").clicked() {
+                                    if !is_curr && ui.small_button("X").clicked() {
                                         self.queue.remove_at(idx);
                                     }
                                     if order_pos + 1 < total_ordered
-                                        && ui.small_button("↓").clicked()
+                                        && ui.small_button("v").clicked()
                                     {
                                         self.queue.move_in_order(order_pos, 1);
                                     }
-                                    if order_pos > 0 && ui.small_button("↑").clicked() {
+                                    if order_pos > 0 && ui.small_button("^").clicked() {
                                         self.queue.move_in_order(order_pos, -1);
                                     }
                                 });
