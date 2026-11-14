@@ -105,31 +105,30 @@ sleep 1
 adb shell screencap -p /data/local/tmp/07_mini_player.png
 adb pull /data/local/tmp/07_mini_player.png screenshots/07_mini_player.png
 
-# 8. Screen off: verify background service survives AND media_session next/pause work with screen OFF
+# 8. Screen off: verify background service survives AND media keyevents (NEXT/PAUSE) work with screen OFF
 adb shell input keyevent 26
 sleep 3
 adb shell dumpsys activity services com.yr.music | grep -q "YrPlaybackService" && echo "YrPlaybackService alive with screen off!"
 {
-    echo "=== BEFORE media_session dispatch (screen OFF) ==="
+    echo "=== BEFORE media keyevents (screen OFF) ==="
     adb shell dumpsys media_session | grep -A 25 "YrMusicSession" || true
-    echo "=== Dispatching NEXT via media_session (screen OFF) ==="
-    adb shell cmd media_session dispatch next || true
+    echo "=== Sending KEYCODE_MEDIA_NEXT (87) with screen OFF ==="
+    adb shell input keyevent 87
     sleep 2
     adb shell dumpsys media_session | grep -A 25 "YrMusicSession" || true
-    echo "=== Dispatching PAUSE via media_session (screen OFF) ==="
-    adb shell cmd media_session dispatch pause || true
-    sleep 2
-    adb shell dumpsys media_session | grep -A 25 "YrMusicSession" || true
-    echo "=== Dispatching Notification PendingIntent ACTION_NEXT (screen OFF) ==="
-    adb shell am start-foreground-service -n com.yr.music/.YrPlaybackService -a com.yr.music.ACTION_NEXT || true
+    echo "=== Sending KEYCODE_MEDIA_PAUSE (127) with screen OFF ==="
+    adb shell input keyevent 127
     sleep 2
     adb shell dumpsys media_session | grep -A 25 "YrMusicSession" || true
     echo "=== YrPlaybackService logcat ==="
     adb logcat -d -s YrPlaybackService:I || true
 } > screenshots/dumpsys_media_screen_off.txt
 cat screenshots/dumpsys_media_screen_off.txt
+# Wake to lockscreen (without unlocking) and capture lockscreen media controls
 adb shell input keyevent 26
-sleep 1
+sleep 2
+adb shell screencap -p /data/local/tmp/07b_lockscreen.png
+adb pull /data/local/tmp/07b_lockscreen.png screenshots/07b_lockscreen.png
 adb shell input swipe 540 1900 540 700 300
 sleep 1
 
