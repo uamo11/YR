@@ -1,0 +1,16 @@
+[package]
+name = "yr-provider"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+yr-core = { path = "../yr-core" }
+async-trait.workspace = true
+rustypipe.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[target.'cfg(target_os = "android")'.dependencies]
+rquickjs-sys = { version = "0.9", features = ["bindgen"] }
