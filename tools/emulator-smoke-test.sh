@@ -68,27 +68,33 @@ adb shell dumpsys media_session | grep -A 25 "YrMusicSession" > screenshots/dump
 adb shell dumpsys activity services com.yr.music > screenshots/dumpsys_service.txt || true
 cat screenshots/dumpsys_service.txt
 
-# 4. Seek on progress bar & Pause
-adb shell input tap 700 1565
+# 4. Seek on progress bar (swipe slider) & Pause
+adb shell input swipe 180 1490 700 1490 300
 sleep 1
-adb shell input tap 540 1810
+adb shell input tap 540 1700
 sleep 1
 adb shell screencap -p /data/local/tmp/04_seek_pause.png
 adb pull /data/local/tmp/04_seek_pause.png screenshots/04_seek_pause.png
 
 # 5. Next track (⏭)
-adb shell input tap 750 1810
+adb shell input tap 755 1700
 sleep 2
 adb shell screencap -p /data/local/tmp/05_next_track.png
 adb pull /data/local/tmp/05_next_track.png screenshots/05_next_track.png
 
 # 6. Open Queue tab (Cola)
-adb shell input tap 650 340
+adb shell input tap 556 266
 sleep 1
 adb shell screencap -p /data/local/tmp/06_queue_editable.png
 adb pull /data/local/tmp/06_queue_editable.png screenshots/06_queue_editable.png
 
-# 7. Screen off for 5s and verify background service survives, then wake
+# 7. Minimize Now Playing (v) to show Mini-Player with progress bar
+adb shell input tap 68 266
+sleep 1
+adb shell screencap -p /data/local/tmp/07_mini_player.png
+adb pull /data/local/tmp/07_mini_player.png screenshots/07_mini_player.png
+
+# 8. Screen off for 5s and verify background service survives, then wake
 adb shell input keyevent 26
 sleep 5
 adb shell dumpsys activity services com.yr.music | grep -q "YrPlaybackService" && echo "YrPlaybackService alive with screen off!"
@@ -97,11 +103,11 @@ sleep 1
 adb shell input swipe 540 1900 540 700 300
 sleep 1
 
-# 8. Stress test with Monkey (250 events)
-adb shell monkey -p com.yr.music --throttle 200 --pct-syskeys 0 250 || true
+# 9. 5-minute stress test with Monkey (1500 events * 200ms = 300s)
+adb shell monkey -p com.yr.music --throttle 200 --pct-syskeys 0 1500 || true
 sleep 2
-adb shell screencap -p /data/local/tmp/07_after_monkey.png
-adb pull /data/local/tmp/07_after_monkey.png screenshots/07_after_monkey.png
+adb shell screencap -p /data/local/tmp/08_after_monkey.png
+adb pull /data/local/tmp/08_after_monkey.png screenshots/08_after_monkey.png
 
 PID_AFTER=$(adb shell pidof com.yr.music | tr -d '\r' || true)
 adb logcat -d > emulator-logcat.log

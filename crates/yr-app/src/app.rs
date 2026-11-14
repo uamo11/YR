@@ -2093,14 +2093,14 @@ impl YrApp {
                     });
                     cols[4].vertical_centered(|ui| {
                         let rep_lbl = match self.queue.repeat {
-                            yr_core::queue::RepeatMode::Off => "Rep: Off",
-                            yr_core::queue::RepeatMode::All => "Rep: All",
-                            yr_core::queue::RepeatMode::One => "Rep: 1",
+                            yr_core::queue::RepeatMode::Off => "Off",
+                            yr_core::queue::RepeatMode::All => "Todo",
+                            yr_core::queue::RepeatMode::One => "1x",
                         };
                         if ui
                             .add(
-                                egui::Button::new(RichText::new(rep_lbl).size(13.0))
-                                    .min_size(Vec2::new(56.0, 44.0)),
+                                egui::Button::new(RichText::new(rep_lbl).size(14.0))
+                                    .min_size(Vec2::new(50.0, 44.0)),
                             )
                             .clicked()
                         {
@@ -2131,9 +2131,9 @@ impl YrApp {
 
                 ui.add_space(10.0);
                 let mut vol = self.store.data.config.volume;
-                ui.spacing_mut().slider_width = (ui.available_width() - 96.0).max(120.0);
+                ui.spacing_mut().slider_width = (ui.available_width() - 130.0).max(100.0);
                 if ui
-                    .add(egui::Slider::new(&mut vol, 0.0..=1.0).text("Volumen"))
+                    .add(egui::Slider::new(&mut vol, 0.0..=1.0).text("Vol"))
                     .changed()
                 {
                     self.store.data.config.volume = vol;
