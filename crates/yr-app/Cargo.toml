@@ -41,6 +41,10 @@ target_sdk_version = 34
 [package.metadata.android.application]
 label = "YR Music"
 
+[package.metadata.android.signing.release]
+path = "../../yr-release.keystore"
+keystore_password = "yr_ci_password"
+
 [[package.metadata.android.uses_permission]]
 name = "android.permission.INTERNET"
 
