@@ -54,18 +54,17 @@ sleep 5
 adb shell screencap -p /data/local/tmp/02_search.png
 adb pull /data/local/tmp/02_search.png screenshots/02_search.png
 
-# 3. Tap first search result to play & tap download button, then open Now Playing
+# 3. Tap first search result -> opens Now Playing full screen immediately
 adb shell input tap 300 520
 sleep 4
-adb shell input tap 980 520
-sleep 2
-# Tap mini-player above bottom nav to open full Now Playing screen
-adb shell input tap 350 2000
-sleep 2
 adb shell screencap -p /data/local/tmp/03_now_playing.png
 adb pull /data/local/tmp/03_now_playing.png screenshots/03_now_playing.png
 
-# 4. Downloads tab (fourth column)
+# 4. Return to Search, tap Download (⬇) on first result, then open Downloads tab
+adb shell input tap 405 2160
+sleep 1
+adb shell input tap 980 520
+sleep 2
 adb shell input tap 945 2160
 sleep 3
 adb shell screencap -p /data/local/tmp/04_downloads.png
