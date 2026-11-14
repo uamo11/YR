@@ -54,31 +54,54 @@ sleep 5
 adb shell screencap -p /data/local/tmp/02_search.png
 adb pull /data/local/tmp/02_search.png screenshots/02_search.png
 
-# 3. Tap first search result -> opens Now Playing full screen immediately
-adb shell input tap 300 520
-sleep 3
-adb shell screencap -p /data/local/tmp/03_now_playing.png
-adb pull /data/local/tmp/03_now_playing.png screenshots/03_now_playing.png
-
-# 4. Open Settings (top right gear), trigger local audio demo (2 tracks) and verify playback + queue
+# 3. Open Settings (top right gear), trigger local audio demo (2 tracks)
 adb shell input tap 1000 135
 sleep 1
-adb shell input tap 300 595
+adb shell input tap 300 1320
 sleep 4
-adb shell screencap -p /data/local/tmp/04_local_playing.png
-adb pull /data/local/tmp/04_local_playing.png screenshots/04_local_playing.png
+adb shell screencap -p /data/local/tmp/03_local_playing.png
+adb pull /data/local/tmp/03_local_playing.png screenshots/03_local_playing.png
 
-# 5. Open Queue tab inside Now Playing (approx x=460 y=150)
-adb shell input tap 460 150
+# Verify ForegroundService, Notification, and MediaSession
+adb shell dumpsys notification --noredact | grep -A 25 "com.yr.music" > screenshots/dumpsys_notif.txt || true
+adb shell dumpsys media_session | grep -A 25 "YrMusicSession" > screenshots/dumpsys_media.txt || true
+adb shell dumpsys activity services com.yr.music > screenshots/dumpsys_service.txt || true
+cat screenshots/dumpsys_service.txt
+
+# 4. Seek on progress bar & Pause
+adb shell input tap 700 1565
 sleep 1
-adb shell screencap -p /data/local/tmp/05_queue.png
-adb pull /data/local/tmp/05_queue.png screenshots/05_queue.png
+adb shell input tap 540 1810
+sleep 1
+adb shell screencap -p /data/local/tmp/04_seek_pause.png
+adb pull /data/local/tmp/04_seek_pause.png screenshots/04_seek_pause.png
 
-# 6. Return to Search, open Downloads tab (fourth column)
-adb shell input tap 945 2160
+# 5. Next track (⏭)
+adb shell input tap 750 1810
 sleep 2
-adb shell screencap -p /data/local/tmp/06_downloads.png
-adb pull /data/local/tmp/06_downloads.png screenshots/06_downloads.png
+adb shell screencap -p /data/local/tmp/05_next_track.png
+adb pull /data/local/tmp/05_next_track.png screenshots/05_next_track.png
+
+# 6. Open Queue tab (Cola)
+adb shell input tap 650 340
+sleep 1
+adb shell screencap -p /data/local/tmp/06_queue_editable.png
+adb pull /data/local/tmp/06_queue_editable.png screenshots/06_queue_editable.png
+
+# 7. Screen off for 5s and verify background service survives, then wake
+adb shell input keyevent 26
+sleep 5
+adb shell dumpsys activity services com.yr.music | grep -q "YrPlaybackService" && echo "YrPlaybackService alive with screen off!"
+adb shell input keyevent 26
+sleep 1
+adb shell input swipe 540 1900 540 700 300
+sleep 1
+
+# 8. Stress test with Monkey (250 events)
+adb shell monkey -p com.yr.music --throttle 200 --pct-syskeys 0 250 || true
+sleep 2
+adb shell screencap -p /data/local/tmp/07_after_monkey.png
+adb pull /data/local/tmp/07_after_monkey.png screenshots/07_after_monkey.png
 
 PID_AFTER=$(adb shell pidof com.yr.music | tr -d '\r' || true)
 adb logcat -d > emulator-logcat.log

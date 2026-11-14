@@ -47,8 +47,8 @@ jobs:
           echo "BINDGEN_EXTRA_CLANG_ARGS_armv7_linux_androideabi=--target=armv7a-linux-androideabi24 --sysroot=${NDK_DIR}/toolchains/llvm/prebuilt/linux-x86_64/sysroot" >> "$GITHUB_ENV"
           echo "BINDGEN_EXTRA_CLANG_ARGS_x86_64_linux_android=--target=x86_64-linux-android24 --sysroot=${NDK_DIR}/toolchains/llvm/prebuilt/linux-x86_64/sysroot" >> "$GITHUB_ENV"
 
-      - name: Install cargo-apk
-        run: cargo install cargo-apk --locked
+      - name: Install cargo-ndk
+        uses: taiki-e/install-action@cargo-ndk
 
       - name: Generate CI signing keystore
         run: |
@@ -59,8 +59,41 @@ jobs:
             -storepass yr_ci_password -keypass yr_ci_password \
             -dname "CN=YR Music, O=YR, C=US"
 
-      - name: Build release APK
-        run: cargo apk build --release -p yr-app --lib
+      - name: Build native libs & package signed Android APK with ForegroundService
+        run: |
+          set -e
+          mkdir -p android/jniLibs android/build/classes android/build/apk_root/lib target/release/apk
+          cargo ndk -t arm64-v8a -t armeabi-v7a -t x86_64 -o android/jniLibs build --release -p yr-app --lib
+
+          BUILD_TOOLS="$ANDROID_HOME/build-tools/34.0.0"
+          ANDROID_JAR="$ANDROID_HOME/platforms/android-34/android.jar"
+
+          "$BUILD_TOOLS/aapt2" compile --dir android/res -o android/build/res.zip
+          "$BUILD_TOOLS/aapt2" link -I "$ANDROID_JAR" \
+            --manifest android/AndroidManifest.xml \
+            -o android/build/base.apk \
+            android/build/res.zip
+
+          javac -source 11 -target 11 -classpath "$ANDROID_JAR" \
+            -d android/build/classes \
+            android/src/com/yr/music/YrPlaybackService.java
+
+          "$BUILD_TOOLS/d8" --min-api 24 --lib "$ANDROID_JAR" \
+            --output android/build \
+            android/build/classes/com/yr/music/*.class
+
+          cp -r android/jniLibs/* android/build/apk_root/lib/
+          cp android/build/classes.dex android/build/apk_root/
+          (cd android/build/apk_root && zip -r ../base.apk .)
+
+          "$BUILD_TOOLS/zipalign" -f -p 4 android/build/base.apk android/build/aligned.apk
+          "$BUILD_TOOLS/apksigner" sign \
+            --ks yr-release.keystore \
+            --ks-pass pass:yr_ci_password \
+            --key-pass pass:yr_ci_password \
+            --ks-key-alias yr \
+            --out target/release/apk/yr_app.apk \
+            android/build/aligned.apk
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4

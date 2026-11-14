@@ -71,6 +71,7 @@ enum AppEvent {
         tasks: Vec<DownloadTask>,
         total_bytes: u64,
     },
+    MediaAction(crate::android_media::MediaAction),
 }
 
 pub struct YrApp {
@@ -117,6 +118,7 @@ pub struct YrApp {
     playlist_picker_track: Option<Track>,
 
     last_finished_counter: u64,
+    last_media_sync: Option<(String, bool, Instant)>,
     status_banner: Option<(String, Instant)>,
     seeking_secs: Option<f64>,
 }
@@ -187,9 +189,37 @@ impl YrApp {
             sleep_after_track: false,
             playlist_picker_track: None,
             last_finished_counter: 0,
+            last_media_sync: None,
             status_banner: None,
             seeking_secs: None,
         };
+
+        let (media_tx, mut media_rx) = mpsc::unbounded_channel();
+        crate::android_media::set_action_sender(media_tx);
+        let audio_bg = app.audio.clone();
+        let ev_tx_bg = app.event_tx.clone();
+        let ctx_bg = cc.egui_ctx.clone();
+        app.runtime.spawn(async move {
+            use crate::android_media::MediaAction;
+            while let Some(act) = media_rx.recv().await {
+                match act {
+                    MediaAction::Play => audio_bg.resume(),
+                    MediaAction::Pause => audio_bg.pause(),
+                    MediaAction::Toggle => {
+                        if audio_bg.snapshot().status == PlaybackStatus::Playing {
+                            audio_bg.pause();
+                        } else {
+                            audio_bg.resume();
+                        }
+                    }
+                    MediaAction::SeekMs(ms) => audio_bg.seek(Duration::from_millis(ms)),
+                    MediaAction::Stop => audio_bg.stop(),
+                    MediaAction::Next | MediaAction::Prev => {}
+                }
+                let _ = ev_tx_bg.send(AppEvent::MediaAction(act));
+                ctx_bg.request_repaint();
+            }
+        });
 
         app.refresh_home(&cc.egui_ctx);
         app.refresh_downloads(&cc.egui_ctx);
@@ -547,6 +577,22 @@ impl YrApp {
                     self.downloads = tasks;
                     self.total_downloaded_bytes = total_bytes;
                 }
+                AppEvent::MediaAction(act) => {
+                    use crate::android_media::MediaAction;
+                    match act {
+                        MediaAction::Next => {
+                            if self.queue.next_track(true).is_some() {
+                                self.play_current_queue_track(ctx);
+                            }
+                        }
+                        MediaAction::Prev => {
+                            if self.queue.prev_track().is_some() {
+                                self.play_current_queue_track(ctx);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
             }
         }
 
@@ -595,6 +641,34 @@ impl YrApp {
             PlaybackStatus::Playing | PlaybackStatus::Buffering | PlaybackStatus::Loading
         ) {
             ctx.request_repaint_after(Duration::from_millis(250));
+        }
+
+        if let Some(track) = self.queue.current_track() {
+            let is_playing = snap.status == PlaybackStatus::Playing;
+            let should_sync = match &self.last_media_sync {
+                Some((id, prev_playing, at)) => {
+                    id != &track.id
+                        || *prev_playing != is_playing
+                        || (is_playing && at.elapsed() >= Duration::from_secs(2))
+                }
+                None => true,
+            };
+            if should_sync {
+                let pos_ms = (snap.position_secs * 1000.0).max(0.0) as u64;
+                let dur_ms = snap
+                    .duration_secs
+                    .or(track.duration_secs.map(|d| d as f64))
+                    .map(|d| (d * 1000.0).max(0.0) as u64)
+                    .unwrap_or(0);
+                crate::android_media::update_playback(
+                    &track.title,
+                    &track.artist,
+                    is_playing,
+                    pos_ms,
+                    dur_ms,
+                );
+                self.last_media_sync = Some((track.id.clone(), is_playing, Instant::now()));
+            }
         }
     }
 }
@@ -1525,7 +1599,7 @@ impl YrApp {
                     }
 
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        ui.menu_button(RichText::new("⋮").size(18.0), |ui| {
+                        ui.menu_button(RichText::new("...").size(16.0).strong(), |ui| {
                             if ui.button("▶ Reproducir").clicked() {
                                 self.play_track_in_list(list.to_vec(), index, ctx);
                                 ui.close_menu();
@@ -1667,7 +1741,7 @@ impl YrApp {
         ui.horizontal(|ui| {
             if ui
                 .add(
-                    egui::Button::new(RichText::new("⌄").size(18.0))
+                    egui::Button::new(RichText::new("v").size(16.0).strong())
                         .fill(BG_ELEVATED)
                         .corner_radius(CornerRadius::same(16)),
                 )
@@ -2018,10 +2092,15 @@ impl YrApp {
                         }
                     });
                     cols[4].vertical_centered(|ui| {
+                        let rep_lbl = match self.queue.repeat {
+                            yr_core::queue::RepeatMode::Off => "Rep: Off",
+                            yr_core::queue::RepeatMode::All => "Rep: All",
+                            yr_core::queue::RepeatMode::One => "Rep: 1",
+                        };
                         if ui
                             .add(
-                                egui::Button::new(RichText::new(self.queue.repeat.label()).size(16.0))
-                                    .min_size(Vec2::new(46.0, 44.0)),
+                                egui::Button::new(RichText::new(rep_lbl).size(13.0))
+                                    .min_size(Vec2::new(56.0, 44.0)),
                             )
                             .clicked()
                         {

@@ -1,3 +1,4 @@
+pub mod android_media;
 pub mod app;
 pub mod theme;
 
@@ -12,6 +13,10 @@ fn android_main(app: winit::platform::android::activity::AndroidApp) {
         android_logger::Config::default().with_max_level(log::LevelFilter::Info),
     );
     log::info!("Starting YR Music on Android");
+
+    unsafe {
+        android_media::init(app.vm_as_ptr(), app.activity_as_ptr());
+    }
 
     let data_dir = app
         .internal_data_path()
