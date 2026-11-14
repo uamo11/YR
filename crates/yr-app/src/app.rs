@@ -80,7 +80,7 @@ pub struct YrApp {
     downloader: Arc<DownloadManager>,
     audio: AudioEngine,
     store: LibraryStore,
-    queue: PlaybackQueue,
+    queue: Arc<std::sync::Mutex<PlaybackQueue>>,
     data_dir: PathBuf,
 
     event_tx: mpsc::UnboundedSender<AppEvent>,
@@ -123,6 +123,57 @@ pub struct YrApp {
     seeking_secs: Option<f64>,
 }
 
+async fn play_track_bg(
+    track: Track,
+    quality: AudioQuality,
+    dl: Arc<DownloadManager>,
+    provider: Arc<dyn MusicProvider>,
+    audio: AudioEngine,
+    tx: mpsc::UnboundedSender<AppEvent>,
+    ctx: egui::Context,
+) {
+    crate::android_media::update_playback(
+        &track.title,
+        &track.artist,
+        true,
+        0,
+        track.duration_secs.unwrap_or(0) * 1000,
+    );
+
+    if let Some(local) = &track.local_path {
+        let p = PathBuf::from(local);
+        if p.exists() {
+            audio.play_file(p, track.duration_secs);
+            ctx.request_repaint();
+            return;
+        }
+    }
+
+    if let Some(local_path) = dl.find_local_path(&track.id).await {
+        audio.play_file(local_path, track.duration_secs);
+        ctx.request_repaint();
+        return;
+    }
+
+    let res = provider
+        .resolve_audio_stream(&track.id, quality)
+        .await
+        .map(|s| s.url)
+        .map_err(|e| e.to_string());
+    match res {
+        Ok(url) => {
+            audio.play_url(url, track.id, track.duration_secs);
+        }
+        Err(e) => {
+            let _ = tx.send(AppEvent::StreamResolved {
+                track,
+                result: Err(e),
+            });
+        }
+    }
+    ctx.request_repaint();
+}
+
 impl YrApp {
     pub fn new(cc: &CreationContext<'_>, data_dir: PathBuf) -> Self {
         egui_extras::install_image_loaders(&cc.egui_ctx);
@@ -158,7 +209,7 @@ impl YrApp {
             downloader,
             audio,
             store,
-            queue: PlaybackQueue::new(),
+            queue: Arc::new(std::sync::Mutex::new(PlaybackQueue::new())),
             data_dir,
             event_tx,
             event_rx,
@@ -197,24 +248,92 @@ impl YrApp {
         let (media_tx, mut media_rx) = mpsc::unbounded_channel();
         crate::android_media::set_action_sender(media_tx);
         let audio_bg = app.audio.clone();
+        let queue_bg = Arc::clone(&app.queue);
+        let dl_bg = Arc::clone(&app.downloader);
+        let provider_bg = Arc::clone(&app.provider);
+        let quality_bg = app.store.data.config.stream_quality;
         let ev_tx_bg = app.event_tx.clone();
         let ctx_bg = cc.egui_ctx.clone();
         app.runtime.spawn(async move {
             use crate::android_media::MediaAction;
             while let Some(act) = media_rx.recv().await {
                 match act {
-                    MediaAction::Play => audio_bg.resume(),
-                    MediaAction::Pause => audio_bg.pause(),
+                    MediaAction::Play => {
+                        audio_bg.resume();
+                        if let Some(t) = queue_bg.lock().ok().and_then(|q| q.current_track().cloned()) {
+                            let snap = audio_bg.snapshot();
+                            crate::android_media::update_playback(
+                                &t.title,
+                                &t.artist,
+                                true,
+                                (snap.position_secs * 1000.0) as u64,
+                                t.duration_secs.unwrap_or(0) * 1000,
+                            );
+                        }
+                    }
+                    MediaAction::Pause => {
+                        audio_bg.pause();
+                        if let Some(t) = queue_bg.lock().ok().and_then(|q| q.current_track().cloned()) {
+                            let snap = audio_bg.snapshot();
+                            crate::android_media::update_playback(
+                                &t.title,
+                                &t.artist,
+                                false,
+                                (snap.position_secs * 1000.0) as u64,
+                                t.duration_secs.unwrap_or(0) * 1000,
+                            );
+                        }
+                    }
                     MediaAction::Toggle => {
-                        if audio_bg.snapshot().status == PlaybackStatus::Playing {
+                        let was_playing = audio_bg.snapshot().status == PlaybackStatus::Playing;
+                        if was_playing {
                             audio_bg.pause();
                         } else {
                             audio_bg.resume();
                         }
+                        if let Some(t) = queue_bg.lock().ok().and_then(|q| q.current_track().cloned()) {
+                            let snap = audio_bg.snapshot();
+                            crate::android_media::update_playback(
+                                &t.title,
+                                &t.artist,
+                                !was_playing,
+                                (snap.position_secs * 1000.0) as u64,
+                                t.duration_secs.unwrap_or(0) * 1000,
+                            );
+                        }
                     }
                     MediaAction::SeekMs(ms) => audio_bg.seek(Duration::from_millis(ms)),
                     MediaAction::Stop => audio_bg.stop(),
-                    MediaAction::Next | MediaAction::Prev => {}
+                    MediaAction::Next => {
+                        let next = queue_bg.lock().ok().and_then(|mut q| q.next_track(true).cloned());
+                        if let Some(track) = next {
+                            play_track_bg(
+                                track,
+                                quality_bg,
+                                Arc::clone(&dl_bg),
+                                Arc::clone(&provider_bg),
+                                audio_bg.clone(),
+                                ev_tx_bg.clone(),
+                                ctx_bg.clone(),
+                            )
+                            .await;
+                        }
+                    }
+                    MediaAction::Prev => {
+                        let prev = queue_bg.lock().ok().and_then(|mut q| q.prev_track().cloned());
+                        if let Some(track) = prev {
+                            play_track_bg(
+                                track,
+                                quality_bg,
+                                Arc::clone(&dl_bg),
+                                Arc::clone(&provider_bg),
+                                audio_bg.clone(),
+                                ev_tx_bg.clone(),
+                                ctx_bg.clone(),
+                            )
+                            .await;
+                        }
+                    }
                 }
                 let _ = ev_tx_bg.send(AppEvent::MediaAction(act));
                 ctx_bg.request_repaint();
@@ -405,7 +524,7 @@ impl YrApp {
         } else {
             None
         };
-        self.queue.set_queue(tracks, index);
+        self.queue.lock().unwrap().set_queue(tracks, index);
         self.now_playing_open = true;
         self.show_settings = false;
         self.play_current_queue_track(ctx);
@@ -417,7 +536,7 @@ impl YrApp {
     }
 
     fn play_current_queue_track(&mut self, ctx: &egui::Context) {
-        let Some(track) = self.queue.current_track().cloned() else {
+        let Some(track) = self.queue.lock().unwrap().current_track().cloned() else {
             return;
         };
         self.store.record_play(track.clone());
@@ -542,8 +661,11 @@ impl YrApp {
                 }
                 AppEvent::RadioLoaded(res) => match res {
                     Ok(tracks) if !tracks.is_empty() => {
-                        for t in tracks {
-                            self.queue.enqueue(t);
+                        {
+                            let mut q = self.queue.lock().unwrap();
+                            for t in tracks {
+                                q.enqueue(t);
+                            }
                         }
                         self.set_banner("Radio añadida a la cola");
                     }
@@ -562,7 +684,14 @@ impl YrApp {
                 }
                 AppEvent::StreamResolved { track, result } => match result {
                     Ok(url) => {
-                        if self.queue.current_track().map(|t| t.id.as_str()) == Some(&track.id) {
+                        let is_curr = self
+                            .queue
+                            .lock()
+                            .unwrap()
+                            .current_track()
+                            .map(|t| t.id.as_str())
+                            == Some(&track.id);
+                        if is_curr {
                             self.audio.play_url(url, track.id, track.duration_secs);
                         }
                     }
@@ -579,18 +708,17 @@ impl YrApp {
                 }
                 AppEvent::MediaAction(act) => {
                     use crate::android_media::MediaAction;
-                    match act {
-                        MediaAction::Next => {
-                            if self.queue.next_track(true).is_some() {
-                                self.play_current_queue_track(ctx);
+                    if matches!(act, MediaAction::Next | MediaAction::Prev) {
+                        let maybe_track = self.queue.lock().unwrap().current_track().cloned();
+                        if let Some(track) = maybe_track {
+                            self.store.record_play(track.clone());
+                            self.seeking_secs = None;
+                            self.lyrics_text = None;
+                            self.lyrics_track_id = None;
+                            if self.show_lyrics {
+                                self.load_lyrics(track.id, ctx);
                             }
                         }
-                        MediaAction::Prev => {
-                            if self.queue.prev_track().is_some() {
-                                self.play_current_queue_track(ctx);
-                            }
-                        }
-                        _ => {}
                     }
                 }
             }
@@ -632,7 +760,7 @@ impl YrApp {
                 self.sleep_after_track = false;
                 self.audio.pause();
                 self.set_banner("Temporizador: detenido al finalizar la canción");
-            } else if self.queue.next_track(false).is_some() {
+            } else if self.queue.lock().unwrap().next_track(false).is_some() {
                 self.play_current_queue_track(ctx);
             }
         }
@@ -643,7 +771,7 @@ impl YrApp {
             ctx.request_repaint_after(Duration::from_millis(250));
         }
 
-        if let Some(track) = self.queue.current_track() {
+        if let Some(track) = self.queue.lock().unwrap().current_track().cloned() {
             let is_playing = snap.status == PlaybackStatus::Playing;
             let should_sync = match &self.last_media_sync {
                 Some((id, prev_playing, at)) => {
@@ -717,7 +845,8 @@ impl eframe::App for YrApp {
             .frame(egui::Frame::new().fill(BG_SURFACE).inner_margin(8.0))
             .show(ctx, |ui| {
                 if !self.now_playing_open {
-                    if let Some(track) = self.queue.current_track().cloned() {
+                    let maybe_track = self.queue.lock().unwrap().current_track().cloned();
+                    if let Some(track) = maybe_track {
                         self.render_mini_player(ui, ctx, &track, &snap);
                         ui.add_space(4.0);
                     }
@@ -1531,6 +1660,8 @@ impl YrApp {
     ) {
         let is_current = self
             .queue
+            .lock()
+            .unwrap()
             .current_track()
             .map(|t| t.id == track.id)
             .unwrap_or(false);
@@ -1605,7 +1736,7 @@ impl YrApp {
                                 ui.close_menu();
                             }
                             if ui.button("⏭ Reproducir siguiente").clicked() {
-                                self.queue.enqueue_next(track.clone());
+                                self.queue.lock().unwrap().enqueue_next(track.clone());
                                 self.set_banner(format!("Siguiente: {}", track.title));
                                 ui.close_menu();
                             }
@@ -1700,7 +1831,9 @@ impl YrApp {
                         if ui.button("^").clicked() {
                             self.now_playing_open = true;
                         }
-                        if ui.button("⏭").clicked() && self.queue.next_track(true).is_some() {
+                        if ui.button("⏭").clicked()
+                            && self.queue.lock().unwrap().next_track(true).is_some()
+                        {
                             self.play_current_queue_track(ctx);
                         }
                         let play_icon = match snap.status {
@@ -1732,7 +1865,7 @@ impl YrApp {
         ctx: &egui::Context,
         snap: &AudioSnapshot,
     ) {
-        let Some(track) = self.queue.current_track().cloned() else {
+        let Some(track) = self.queue.lock().unwrap().current_track().cloned() else {
             self.now_playing_open = false;
             return;
         };
@@ -1814,21 +1947,23 @@ impl YrApp {
         ui.add_space(6.0);
 
         if self.show_queue {
+            let (queue_len, ordered, current_idx) = {
+                let q = self.queue.lock().unwrap();
+                let ordered: Vec<(usize, Track)> = q
+                    .ordered_tracks()
+                    .into_iter()
+                    .map(|(i, t)| (i, t.clone()))
+                    .collect();
+                (q.len(), ordered, q.current_index())
+            };
             ui.horizontal(|ui| {
-                ui.heading(format!("Cola ({})", self.queue.len()));
+                ui.heading(format!("Cola ({})", queue_len));
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     if ui.button("📻 Añadir similares").clicked() {
                         self.start_radio(track.id.clone(), ctx);
                     }
                 });
             });
-            let ordered: Vec<(usize, Track)> = self
-                .queue
-                .ordered_tracks()
-                .into_iter()
-                .map(|(i, t)| (i, t.clone()))
-                .collect();
-            let current_idx = self.queue.current_index();
             let total_ordered = ordered.len();
             egui::ScrollArea::vertical().show(ui, |ui| {
                 for (order_pos, (idx, t)) in ordered.into_iter().enumerate() {
@@ -1866,20 +2001,20 @@ impl YrApp {
                                     .response
                                     .interact(Sense::click());
                                 if resp.clicked() {
-                                    self.queue.jump_to(idx);
+                                    self.queue.lock().unwrap().jump_to(idx);
                                     self.play_current_queue_track(ctx);
                                 }
                                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                                     if !is_curr && ui.small_button("X").clicked() {
-                                        self.queue.remove_at(idx);
+                                        self.queue.lock().unwrap().remove_at(idx);
                                     }
                                     if order_pos + 1 < total_ordered
                                         && ui.small_button("v").clicked()
                                     {
-                                        self.queue.move_in_order(order_pos, 1);
+                                        self.queue.lock().unwrap().move_in_order(order_pos, 1);
                                     }
                                     if order_pos > 0 && ui.small_button("^").clicked() {
-                                        self.queue.move_in_order(order_pos, -1);
+                                        self.queue.lock().unwrap().move_in_order(order_pos, -1);
                                     }
                                 });
                             });
@@ -1932,9 +2067,10 @@ impl YrApp {
                     if let Some(d) = delta {
                         if d.y > 80.0 && d.y.abs() > d.x.abs() {
                             self.now_playing_open = false;
-                        } else if d.x < -60.0 && self.queue.next_track(true).is_some() {
+                        } else if d.x < -60.0 && self.queue.lock().unwrap().next_track(true).is_some()
+                        {
                             self.play_current_queue_track(ctx);
-                        } else if d.x > 60.0 && self.queue.prev_track().is_some() {
+                        } else if d.x > 60.0 && self.queue.lock().unwrap().prev_track().is_some() {
                             self.play_current_queue_track(ctx);
                         }
                     }
@@ -2024,13 +2160,17 @@ impl YrApp {
                     });
                 });
 
+                let (is_shuffle, repeat_mode) = {
+                    let q = self.queue.lock().unwrap();
+                    (q.shuffle, q.repeat)
+                };
                 ui.add_space(14.0);
                 ui.columns(5, |cols| {
                     cols[0].vertical_centered(|ui| {
                         if ui
                             .add(
                                 egui::Button::new(RichText::new("🔀").size(18.0).color(
-                                    if self.queue.shuffle {
+                                    if is_shuffle {
                                         ACCENT_RED
                                     } else {
                                         TEXT_SECONDARY
@@ -2040,7 +2180,7 @@ impl YrApp {
                             )
                             .clicked()
                         {
-                            self.queue.toggle_shuffle();
+                            self.queue.lock().unwrap().toggle_shuffle();
                         }
                     });
                     cols[1].vertical_centered(|ui| {
@@ -2050,7 +2190,7 @@ impl YrApp {
                                     .min_size(Vec2::new(48.0, 44.0)),
                             )
                             .clicked()
-                            && self.queue.prev_track().is_some()
+                            && self.queue.lock().unwrap().prev_track().is_some()
                         {
                             self.play_current_queue_track(ctx);
                         }
@@ -2086,13 +2226,13 @@ impl YrApp {
                                     .min_size(Vec2::new(48.0, 44.0)),
                             )
                             .clicked()
-                            && self.queue.next_track(true).is_some()
+                            && self.queue.lock().unwrap().next_track(true).is_some()
                         {
                             self.play_current_queue_track(ctx);
                         }
                     });
                     cols[4].vertical_centered(|ui| {
-                        let rep_lbl = match self.queue.repeat {
+                        let rep_lbl = match repeat_mode {
                             yr_core::queue::RepeatMode::Off => "Off",
                             yr_core::queue::RepeatMode::All => "Todo",
                             yr_core::queue::RepeatMode::One => "1x",
@@ -2104,7 +2244,8 @@ impl YrApp {
                             )
                             .clicked()
                         {
-                            self.queue.repeat = self.queue.repeat.cycle();
+                            let mut q = self.queue.lock().unwrap();
+                            q.repeat = q.repeat.cycle();
                         }
                     });
                 });

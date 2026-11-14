@@ -82,11 +82,22 @@ sleep 2
 adb shell screencap -p /data/local/tmp/05_next_track.png
 adb pull /data/local/tmp/05_next_track.png screenshots/05_next_track.png
 
-# 6. Open Queue tab (Cola)
+# 5b. Swipe gesture right on cover art (Prev -> back to Pista 1)
+adb shell input swipe 200 750 850 750 250
+sleep 2
+adb shell screencap -p /data/local/tmp/05b_swipe_prev.png
+adb pull /data/local/tmp/05b_swipe_prev.png screenshots/05b_swipe_prev.png
+
+# 6. Open Queue tab (Cola) & Letra tab
 adb shell input tap 556 266
 sleep 1
 adb shell screencap -p /data/local/tmp/06_queue_editable.png
 adb pull /data/local/tmp/06_queue_editable.png screenshots/06_queue_editable.png
+
+adb shell input tap 404 266
+sleep 2
+adb shell screencap -p /data/local/tmp/06b_lyrics.png
+adb pull /data/local/tmp/06b_lyrics.png screenshots/06b_lyrics.png
 
 # 7. Minimize Now Playing (v) to show Mini-Player with progress bar
 adb shell input tap 68 266
@@ -94,10 +105,23 @@ sleep 1
 adb shell screencap -p /data/local/tmp/07_mini_player.png
 adb pull /data/local/tmp/07_mini_player.png screenshots/07_mini_player.png
 
-# 8. Screen off for 5s and verify background service survives, then wake
+# 8. Screen off: verify background service survives AND media_session next/pause work with screen OFF
 adb shell input keyevent 26
-sleep 5
+sleep 3
 adb shell dumpsys activity services com.yr.music | grep -q "YrPlaybackService" && echo "YrPlaybackService alive with screen off!"
+{
+    echo "=== BEFORE media_session dispatch (screen OFF) ==="
+    adb shell dumpsys media_session | grep -A 25 "YrMusicSession" || true
+    echo "=== Dispatching NEXT with screen OFF ==="
+    adb shell cmd media_session dispatch next || true
+    sleep 2
+    adb shell dumpsys media_session | grep -A 25 "YrMusicSession" || true
+    echo "=== Dispatching PAUSE with screen OFF ==="
+    adb shell cmd media_session dispatch pause || true
+    sleep 2
+    adb shell dumpsys media_session | grep -A 25 "YrMusicSession" || true
+} > screenshots/dumpsys_media_screen_off.txt
+cat screenshots/dumpsys_media_screen_off.txt
 adb shell input keyevent 26
 sleep 1
 adb shell input swipe 540 1900 540 700 300
