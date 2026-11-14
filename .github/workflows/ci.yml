@@ -48,7 +48,9 @@ jobs:
           echo "BINDGEN_EXTRA_CLANG_ARGS_x86_64_linux_android=--target=x86_64-linux-android24 --sysroot=${NDK_DIR}/toolchains/llvm/prebuilt/linux-x86_64/sysroot" >> "$GITHUB_ENV"
 
       - name: Install cargo-ndk
-        uses: taiki-e/install-action@cargo-ndk
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-ndk
 
       - name: Generate CI signing keystore
         run: |
