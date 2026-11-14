@@ -1473,7 +1473,7 @@ impl YrApp {
                 ui.horizontal(|ui| {
                     render_thumb(ui, track.thumbnail_url.as_deref(), 48.0);
 
-                    let text_width = (ui.available_width() - 156.0).max(80.0);
+                    let text_width = (ui.available_width() - 215.0).max(80.0);
                     let info_resp = ui
                         .allocate_ui(Vec2::new(text_width, 46.0), |ui| {
                             ui.vertical(|ui| {
