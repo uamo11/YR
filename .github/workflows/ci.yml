@@ -76,7 +76,7 @@ jobs:
             -o android/build/base.apk \
             android/build/res.zip
 
-          javac -source 11 -target 11 -classpath "$ANDROID_JAR" \
+          javac -source 8 -target 8 -classpath "$ANDROID_JAR" \
             -d android/build/classes \
             android/src/com/yr/music/YrPlaybackService.java
 
