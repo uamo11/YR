@@ -102,7 +102,7 @@ sleep 1
 adb shell screencap -p /data/local/tmp/06_queue_editable.png
 adb pull /data/local/tmp/06_queue_editable.png screenshots/06_queue_editable.png
 
-adb shell input tap 880 675
+adb shell input swipe 875 678 875 678 120
 sleep 1
 adb shell screencap -p /data/local/tmp/06a_queue_reordered.png
 adb pull /data/local/tmp/06a_queue_reordered.png screenshots/06a_queue_reordered.png
@@ -172,7 +172,7 @@ adb shell input tap 1015 2020
 sleep 1
 adb shell input tap 556 266
 sleep 1
-adb shell input tap 985 678
+adb shell input swipe 990 678 990 678 120
 sleep 1
 adb shell screencap -p /data/local/tmp/06c_queue_removed.png
 adb pull /data/local/tmp/06c_queue_removed.png screenshots/06c_queue_removed.png
