@@ -135,6 +135,24 @@ impl PlaybackQueue {
         };
     }
 
+    /// Move an item up (-1) or down (+1) in the playback order while preserving `current_pos`.
+    pub fn move_in_order(&mut self, order_pos: usize, delta: isize) -> bool {
+        let target = order_pos as isize + delta;
+        if target < 0 || order_pos >= self.order.len() || (target as usize) >= self.order.len() {
+            return false;
+        }
+        let target = target as usize;
+        self.order.swap(order_pos, target);
+        if let Some(curr) = self.current_pos {
+            if curr == order_pos {
+                self.current_pos = Some(target);
+            } else if curr == target {
+                self.current_pos = Some(order_pos);
+            }
+        }
+        true
+    }
+
     pub fn jump_to(&mut self, track_index: usize) -> Option<&Track> {
         if track_index >= self.tracks.len() {
             return None;

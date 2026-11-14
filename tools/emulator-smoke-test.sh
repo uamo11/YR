@@ -56,19 +56,29 @@ adb pull /data/local/tmp/02_search.png screenshots/02_search.png
 
 # 3. Tap first search result -> opens Now Playing full screen immediately
 adb shell input tap 300 520
-sleep 4
+sleep 3
 adb shell screencap -p /data/local/tmp/03_now_playing.png
 adb pull /data/local/tmp/03_now_playing.png screenshots/03_now_playing.png
 
-# 4. Return to Search, tap Download (⬇) on first result, then open Downloads tab
-adb shell input tap 405 2160
+# 4. Open Settings (top right gear), trigger local audio demo (2 tracks) and verify playback + queue
+adb shell input tap 1000 135
 sleep 1
-adb shell input tap 980 520
-sleep 2
+adb shell input tap 300 595
+sleep 4
+adb shell screencap -p /data/local/tmp/04_local_playing.png
+adb pull /data/local/tmp/04_local_playing.png screenshots/04_local_playing.png
+
+# 5. Open Queue tab inside Now Playing (approx x=460 y=150)
+adb shell input tap 460 150
+sleep 1
+adb shell screencap -p /data/local/tmp/05_queue.png
+adb pull /data/local/tmp/05_queue.png screenshots/05_queue.png
+
+# 6. Return to Search, open Downloads tab (fourth column)
 adb shell input tap 945 2160
-sleep 3
-adb shell screencap -p /data/local/tmp/04_downloads.png
-adb pull /data/local/tmp/04_downloads.png screenshots/04_downloads.png
+sleep 2
+adb shell screencap -p /data/local/tmp/06_downloads.png
+adb pull /data/local/tmp/06_downloads.png screenshots/06_downloads.png
 
 PID_AFTER=$(adb shell pidof com.yr.music | tr -d '\r' || true)
 adb logcat -d > emulator-logcat.log
