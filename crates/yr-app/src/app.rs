@@ -105,6 +105,7 @@ pub struct YrApp {
     last_download_poll: Instant,
 
     now_playing_open: bool,
+    cover_drag_accum: Vec2,
     show_queue: bool,
     show_lyrics: bool,
     lyrics_track_id: Option<String>,
@@ -229,6 +230,7 @@ impl YrApp {
             total_downloaded_bytes: 0,
             last_download_poll: Instant::now() - Duration::from_secs(10),
             now_playing_open: false,
+            cover_drag_accum: Vec2::ZERO,
             show_queue: false,
             show_lyrics: false,
             lyrics_track_id: None,
@@ -2057,22 +2059,22 @@ impl YrApp {
                     })
                     .response
                     .interact(Sense::drag());
+                if art_resp.drag_started() {
+                    self.cover_drag_accum = Vec2::ZERO;
+                }
+                if art_resp.dragged() {
+                    self.cover_drag_accum += art_resp.drag_delta();
+                }
                 if art_resp.drag_stopped() {
-                    let delta = ui.input(|i| {
-                        i.pointer
-                            .press_origin()
-                            .zip(i.pointer.interact_pos())
-                            .map(|(a, b)| b - a)
-                    });
-                    if let Some(d) = delta {
-                        if d.y > 80.0 && d.y.abs() > d.x.abs() {
-                            self.now_playing_open = false;
-                        } else if d.x < -60.0 && self.queue.lock().unwrap().next_track(true).is_some()
-                        {
-                            self.play_current_queue_track(ctx);
-                        } else if d.x > 60.0 && self.queue.lock().unwrap().prev_track().is_some() {
-                            self.play_current_queue_track(ctx);
-                        }
+                    let d = self.cover_drag_accum;
+                    self.cover_drag_accum = Vec2::ZERO;
+                    if d.y > 80.0 && d.y.abs() > d.x.abs() {
+                        self.now_playing_open = false;
+                    } else if d.x < -60.0 && self.queue.lock().unwrap().next_track(true).is_some()
+                    {
+                        self.play_current_queue_track(ctx);
+                    } else if d.x > 60.0 && self.queue.lock().unwrap().prev_track().is_some() {
+                        self.play_current_queue_track(ctx);
                     }
                 }
 

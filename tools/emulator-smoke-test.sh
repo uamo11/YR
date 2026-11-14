@@ -112,14 +112,20 @@ adb shell dumpsys activity services com.yr.music | grep -q "YrPlaybackService" &
 {
     echo "=== BEFORE media_session dispatch (screen OFF) ==="
     adb shell dumpsys media_session | grep -A 25 "YrMusicSession" || true
-    echo "=== Dispatching NEXT with screen OFF ==="
+    echo "=== Dispatching NEXT via media_session (screen OFF) ==="
     adb shell cmd media_session dispatch next || true
     sleep 2
     adb shell dumpsys media_session | grep -A 25 "YrMusicSession" || true
-    echo "=== Dispatching PAUSE with screen OFF ==="
+    echo "=== Dispatching PAUSE via media_session (screen OFF) ==="
     adb shell cmd media_session dispatch pause || true
     sleep 2
     adb shell dumpsys media_session | grep -A 25 "YrMusicSession" || true
+    echo "=== Dispatching Notification PendingIntent ACTION_NEXT (screen OFF) ==="
+    adb shell am start-foreground-service -n com.yr.music/.YrPlaybackService -a com.yr.music.ACTION_NEXT || true
+    sleep 2
+    adb shell dumpsys media_session | grep -A 25 "YrMusicSession" || true
+    echo "=== YrPlaybackService logcat ==="
+    adb logcat -d -s YrPlaybackService:I || true
 } > screenshots/dumpsys_media_screen_off.txt
 cat screenshots/dumpsys_media_screen_off.txt
 adb shell input keyevent 26

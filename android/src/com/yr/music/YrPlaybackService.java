@@ -98,29 +98,44 @@ public class YrPlaybackService extends Service {
         }
 
         mediaSession = new MediaSession(this, "YrMusicSession");
+        mediaSession.setFlags(
+                MediaSession.FLAG_HANDLES_MEDIA_BUTTONS
+                        | MediaSession.FLAG_HANDLES_TRANSPORT_CONTROLS
+        );
         mediaSession.setCallback(new MediaSession.Callback() {
             @Override
+            public boolean onMediaButtonEvent(Intent mediaButtonIntent) {
+                android.util.Log.i("YrPlaybackService", "onMediaButtonEvent: " + mediaButtonIntent);
+                return super.onMediaButtonEvent(mediaButtonIntent);
+            }
+
+            @Override
             public void onPlay() {
+                android.util.Log.i("YrPlaybackService", "MediaSession.onPlay");
                 nativeOnMediaAction(NATIVE_PLAY, 0);
             }
 
             @Override
             public void onPause() {
+                android.util.Log.i("YrPlaybackService", "MediaSession.onPause");
                 nativeOnMediaAction(NATIVE_PAUSE, 0);
             }
 
             @Override
             public void onSkipToNext() {
+                android.util.Log.i("YrPlaybackService", "MediaSession.onSkipToNext");
                 nativeOnMediaAction(NATIVE_NEXT, 0);
             }
 
             @Override
             public void onSkipToPrevious() {
+                android.util.Log.i("YrPlaybackService", "MediaSession.onSkipToPrevious");
                 nativeOnMediaAction(NATIVE_PREV, 0);
             }
 
             @Override
             public void onStop() {
+                android.util.Log.i("YrPlaybackService", "MediaSession.onStop");
                 nativeOnMediaAction(NATIVE_STOP, 0);
                 stopSelf();
             }
