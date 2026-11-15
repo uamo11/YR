@@ -1964,27 +1964,29 @@ impl YrApp {
             .id_salt("home_vertical_scroll")
             .show(ui, |ui| {
                 if let Some(v_id) = expected_v_drag {
-                    let clip = ui.clip_rect();
-                    let stolen_vertical_dy = ui.input(|i| {
-                        let other_dragged = ctx.dragged_id().is_some_and(|id| id != v_id);
-                        let origin_inside =
-                            i.pointer.press_origin().is_some_and(|p| clip.contains(p));
-                        if other_dragged && origin_inside && i.pointer.any_down() {
-                            let d = i.pointer.delta();
-                            if d.y.abs() > d.x.abs() * 0.75 && d.y.abs() > 0.25 {
-                                Some(d.y)
+                    let other_dragged = ctx.dragged_id().is_some_and(|id| id != v_id);
+                    if other_dragged {
+                        let clip = ui.clip_rect();
+                        let stolen_vertical_dy = ui.input(|i| {
+                            let origin_inside =
+                                i.pointer.press_origin().is_some_and(|p| clip.contains(p));
+                            if origin_inside && i.pointer.any_down() {
+                                let d = i.pointer.delta();
+                                if d.y.abs() > d.x.abs() * 0.75 && d.y.abs() > 0.25 {
+                                    Some(d.y)
+                                } else {
+                                    None
+                                }
                             } else {
                                 None
                             }
-                        } else {
-                            None
+                        });
+                        if let Some(dy) = stolen_vertical_dy {
+                            ui.scroll_with_delta_animation(
+                                Vec2::new(0.0, dy),
+                                egui::style::ScrollAnimation::none(),
+                            );
                         }
-                    });
-                    if let Some(dy) = stolen_vertical_dy {
-                        ui.scroll_with_delta_animation(
-                            Vec2::new(0.0, dy),
-                            egui::style::ScrollAnimation::none(),
-                        );
                     }
                 }
                 // Mood / Genre Chips row (YT Music style)
