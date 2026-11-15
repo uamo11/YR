@@ -909,9 +909,10 @@ impl YrApp {
     fn nav_button(&mut self, ui: &mut egui::Ui, tab: NavTab, label: &str) {
         let selected = self.active_tab == tab && !self.now_playing_open && !self.show_settings;
         let text = RichText::new(label)
-            .size(13.0)
+            .size(11.5)
             .color(if selected { ACCENT_RED } else { TEXT_SECONDARY });
         let btn = egui::Button::new(text)
+            .wrap_mode(egui::TextWrapMode::Extend)
             .fill(if selected { BG_ELEVATED } else { Color32::TRANSPARENT })
             .min_size(Vec2::new(ui.available_width(), 38.0));
         if ui.add(btn).clicked() {
