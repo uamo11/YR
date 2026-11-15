@@ -1616,7 +1616,14 @@ impl YrApp {
     fn render_detail_if_active(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) -> bool {
         if self.detail_loading {
             ui.horizontal(|ui| {
-                if ui.button("← Volver").clicked() {
+                if icons::icon_pill_button(
+                    ui,
+                    icons::Icon::ArrowBack,
+                    "Volver",
+                    BG_ELEVATED,
+                    TEXT_PRIMARY,
+                )
+                .clicked() {
                     self.detail_loading = false;
                     self.detail_view = DetailView::None;
                 }
@@ -1631,7 +1638,14 @@ impl YrApp {
             DetailView::None => false,
             DetailView::Album(album) => {
                 ui.horizontal(|ui| {
-                    if ui.button("← Volver").clicked() {
+                    if icons::icon_pill_button(
+                    ui,
+                    icons::Icon::ArrowBack,
+                    "Volver",
+                    BG_ELEVATED,
+                    TEXT_PRIMARY,
+                )
+                .clicked() {
                         self.detail_view = DetailView::None;
                     }
                     ui.heading(&album.summary.title);
@@ -1641,17 +1655,28 @@ impl YrApp {
                     ui.vertical(|ui| {
                         ui.label(RichText::new(&album.summary.artist).color(TEXT_SECONDARY));
                         ui.horizontal(|ui| {
-                            if ui
-                                .add(
-                                    egui::Button::new(RichText::new("▶ Reproducir").color(Color32::WHITE))
-                                        .fill(ACCENT_RED),
-                                )
-                                .clicked()
+                            if icons::icon_pill_button(
+                                ui,
+                                icons::Icon::Play,
+                                "Reproducir",
+                                ACCENT_RED,
+                                Color32::WHITE,
+                            )
+                            .clicked()
                                 && !album.tracks.is_empty()
                             {
                                 self.play_track_in_list(album.tracks.clone(), 0, ctx);
                             }
-                            if ui.button("⬇ Descargar todo").clicked() && !album.tracks.is_empty() {
+                            if icons::icon_pill_button(
+                                ui,
+                                icons::Icon::Download,
+                                "Descargar todo",
+                                BG_ELEVATED,
+                                TEXT_PRIMARY,
+                            )
+                            .clicked()
+                                && !album.tracks.is_empty()
+                            {
                                 self.enqueue_download_all(album.tracks.clone(), ctx);
                             }
                         });
@@ -1667,23 +1692,41 @@ impl YrApp {
             }
             DetailView::Playlist(pl) => {
                 ui.horizontal(|ui| {
-                    if ui.button("← Volver").clicked() {
+                    if icons::icon_pill_button(
+                    ui,
+                    icons::Icon::ArrowBack,
+                    "Volver",
+                    BG_ELEVATED,
+                    TEXT_PRIMARY,
+                )
+                .clicked() {
                         self.detail_view = DetailView::None;
                     }
                     ui.heading(&pl.summary.title);
                 });
                 ui.horizontal(|ui| {
-                    if ui
-                        .add(
-                            egui::Button::new(RichText::new("▶ Reproducir").color(Color32::WHITE))
-                                .fill(ACCENT_RED),
-                        )
-                        .clicked()
+                    if icons::icon_pill_button(
+                        ui,
+                        icons::Icon::Play,
+                        "Reproducir",
+                        ACCENT_RED,
+                        Color32::WHITE,
+                    )
+                    .clicked()
                         && !pl.tracks.is_empty()
                     {
                         self.play_track_in_list(pl.tracks.clone(), 0, ctx);
                     }
-                    if ui.button("⬇ Descargar todo").clicked() && !pl.tracks.is_empty() {
+                    if icons::icon_pill_button(
+                        ui,
+                        icons::Icon::Download,
+                        "Descargar todo",
+                        BG_ELEVATED,
+                        TEXT_PRIMARY,
+                    )
+                    .clicked()
+                        && !pl.tracks.is_empty()
+                    {
                         self.enqueue_download_all(pl.tracks.clone(), ctx);
                     }
                 });
@@ -1697,7 +1740,14 @@ impl YrApp {
             }
             DetailView::Artist(artist) => {
                 ui.horizontal(|ui| {
-                    if ui.button("← Volver").clicked() {
+                    if icons::icon_pill_button(
+                    ui,
+                    icons::Icon::ArrowBack,
+                    "Volver",
+                    BG_ELEVATED,
+                    TEXT_PRIMARY,
+                )
+                .clicked() {
                         self.detail_view = DetailView::None;
                     }
                     ui.heading(&artist.summary.name);
@@ -1725,7 +1775,14 @@ impl YrApp {
             }
             DetailView::Mood { title, playlists } => {
                 ui.horizontal(|ui| {
-                    if ui.button("← Volver").clicked() {
+                    if icons::icon_pill_button(
+                    ui,
+                    icons::Icon::ArrowBack,
+                    "Volver",
+                    BG_ELEVATED,
+                    TEXT_PRIMARY,
+                )
+                .clicked() {
                         self.detail_view = DetailView::None;
                     }
                     ui.heading(&title);
@@ -3217,7 +3274,17 @@ impl YrApp {
                 );
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if ui.button("↻").clicked() {
+                if icons::icon_button(
+                    ui,
+                    icons::Icon::Refresh,
+                    32.0,
+                    16.0,
+                    BG_ELEVATED,
+                    TEXT_PRIMARY,
+                    16.0,
+                )
+                .clicked()
+                {
                     self.refresh_downloads(ctx);
                 }
             });
@@ -3230,7 +3297,16 @@ impl YrApp {
             .map(|d| d.track.clone())
             .collect();
 
-        if !completed.is_empty() && ui.button("▶ Reproducir todo offline").clicked() {
+        if !completed.is_empty()
+            && icons::icon_pill_button(
+                ui,
+                icons::Icon::Play,
+                "Reproducir todo offline",
+                BG_ELEVATED,
+                TEXT_PRIMARY,
+            )
+            .clicked()
+        {
             self.play_track_in_list(completed.clone(), 0, ctx);
         }
 
@@ -3238,7 +3314,7 @@ impl YrApp {
             if self.downloads.is_empty() {
                 ui.add_space(16.0);
                 ui.label(
-                    RichText::new("Aún no tienes descargas. Toca ⬇ en cualquier canción.")
+                    RichText::new("Aún no tienes descargas. Toca Descargar en cualquier canción.")
                         .color(TEXT_SECONDARY),
                 );
                 return;
@@ -3312,38 +3388,98 @@ impl YrApp {
                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                                 match &task.status {
                                     DownloadStatus::Downloading | DownloadStatus::Queued => {
-                                        if ui.button("✕").clicked() {
+                                        if icons::icon_button(
+                                            ui,
+                                            icons::Icon::Close,
+                                            30.0,
+                                            14.0,
+                                            BG_ELEVATED,
+                                            TEXT_PRIMARY,
+                                            15.0,
+                                        )
+                                        .clicked()
+                                        {
                                             let dl = Arc::clone(&self.downloader);
                                             let id = task.track.id.clone();
                                             self.runtime.spawn(async move { dl.cancel(&id).await });
                                         }
-                                        if ui.button("⏸").clicked() {
+                                        if icons::icon_button(
+                                            ui,
+                                            icons::Icon::Pause,
+                                            30.0,
+                                            14.0,
+                                            BG_ELEVATED,
+                                            TEXT_PRIMARY,
+                                            15.0,
+                                        )
+                                        .clicked()
+                                        {
                                             let dl = Arc::clone(&self.downloader);
                                             let id = task.track.id.clone();
                                             self.runtime.spawn(async move { dl.pause(&id).await });
                                         }
                                     }
                                     DownloadStatus::Paused | DownloadStatus::Failed(_) => {
-                                        if ui.button("✕").clicked() {
+                                        if icons::icon_button(
+                                            ui,
+                                            icons::Icon::Close,
+                                            30.0,
+                                            14.0,
+                                            BG_ELEVATED,
+                                            TEXT_PRIMARY,
+                                            15.0,
+                                        )
+                                        .clicked()
+                                        {
                                             let dl = Arc::clone(&self.downloader);
                                             let id = task.track.id.clone();
                                             self.runtime.spawn(async move { dl.cancel(&id).await });
                                         }
-                                        if ui.button("▶").clicked() {
+                                        if icons::icon_button(
+                                            ui,
+                                            icons::Icon::Play,
+                                            30.0,
+                                            14.0,
+                                            BG_ELEVATED,
+                                            TEXT_PRIMARY,
+                                            15.0,
+                                        )
+                                        .clicked()
+                                        {
                                             let dl = Arc::clone(&self.downloader);
                                             let id = task.track.id.clone();
                                             self.runtime.spawn(async move { dl.resume(&id).await });
                                         }
                                     }
                                     DownloadStatus::Completed => {
-                                        if ui.button("🗑").clicked() {
+                                        if icons::icon_button(
+                                            ui,
+                                            icons::Icon::Trash,
+                                            30.0,
+                                            14.0,
+                                            BG_ELEVATED,
+                                            TEXT_SECONDARY,
+                                            15.0,
+                                        )
+                                        .clicked()
+                                        {
                                             let dl = Arc::clone(&self.downloader);
                                             let id = task.track.id.clone();
                                             self.runtime.spawn(async move {
                                                 dl.delete_downloaded(&id).await;
                                             });
                                         }
-                                        if ui.button("▶").clicked() {
+                                        if icons::icon_button(
+                                            ui,
+                                            icons::Icon::Play,
+                                            30.0,
+                                            14.0,
+                                            ACCENT_RED,
+                                            Color32::WHITE,
+                                            15.0,
+                                        )
+                                        .clicked()
+                                        {
                                             if let Some(pos) = completed
                                                 .iter()
                                                 .position(|t| t.id == task.track.id)
@@ -3414,22 +3550,38 @@ impl YrApp {
                                 .filter(|&s| s > 0)
                                 .map(|s| format!(" • {}:{:02}", s / 60, s % 60))
                                 .unwrap_or_default();
-                            let sub = if offline_badge || is_downloaded {
-                                format!("✓ {}{}", track.artist, dur_part)
+                            let sub = format!("{}{}", track.artist, dur_part);
+                            let sub_color = if is_downloaded {
+                                GREEN_OK
                             } else {
-                                format!("{}{}", track.artist, dur_part)
+                                TEXT_SECONDARY
                             };
-                            ui.add(
-                                egui::Label::new(
-                                    RichText::new(sub).small().color(if is_downloaded {
-                                        GREEN_OK
-                                    } else {
-                                        TEXT_SECONDARY
-                                    }),
-                                )
-                                .truncate()
-                                .selectable(false),
-                            );
+                            if offline_badge || is_downloaded {
+                                ui.horizontal(|ui| {
+                                    ui.spacing_mut().item_spacing.x = 4.0;
+                                    let (icon_rect, _) =
+                                        ui.allocate_exact_size(Vec2::splat(13.0), Sense::hover());
+                                    icons::draw_icon(
+                                        ui.painter(),
+                                        icon_rect,
+                                        icons::Icon::Check,
+                                        GREEN_OK,
+                                    );
+                                    ui.add(
+                                        egui::Label::new(
+                                            RichText::new(sub).small().color(sub_color),
+                                        )
+                                        .truncate()
+                                        .selectable(false),
+                                    );
+                                });
+                            } else {
+                                ui.add(
+                                    egui::Label::new(RichText::new(sub).small().color(sub_color))
+                                        .truncate()
+                                        .selectable(false),
+                                );
+                            }
                         });
                     });
 
@@ -4042,7 +4194,7 @@ impl YrApp {
                                         for (i, line) in data.synced.iter().enumerate() {
                                             let is_active = active_idx == Some(i);
                                             let text = if line.text.is_empty() {
-                                                "♪"
+                                                "(Instrumental)"
                                             } else {
                                                 line.text.as_str()
                                             };
@@ -4776,7 +4928,15 @@ impl YrApp {
         }
 
         ui.add_space(10.0);
-        if ui.button("🔊 Probar audio local (2 pistas)").clicked() {
+        if icons::icon_pill_button(
+            ui,
+            icons::Icon::MusicNote,
+            "Probar audio local (2 pistas)",
+            BG_ELEVATED,
+            TEXT_PRIMARY,
+        )
+        .clicked()
+        {
             let p1 = self.data_dir.join("yr_demo_1.wav");
             let p2 = self.data_dir.join("yr_demo_2.wav");
             if generate_test_wav(&p1, 440.0, 25).is_ok()
@@ -5624,6 +5784,16 @@ fn render_thumb(ui: &mut egui::Ui, url: Option<&str>, size: f32) {
     if !ui.is_rect_visible(rect) {
         return;
     }
+    let note_rect = egui::Rect::from_center_size(
+        rect.center(),
+        Vec2::splat((size * 0.44).clamp(14.0, 44.0)),
+    );
+    icons::draw_icon(
+        ui.painter(),
+        note_rect,
+        icons::Icon::MusicNote,
+        Color32::from_white_alpha(95),
+    );
     if let Some(u) = url {
         let max_px = if size <= 72.0 {
             160

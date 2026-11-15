@@ -544,7 +544,13 @@ fn parse_responsive_track(r: &Value) -> Option<(Track, String)> {
         })
         .unwrap_or((None, None));
 
+    let fixed_dur = r
+        .pointer("/fixedColumns/0/musicResponsiveListItemFixedColumnRenderer/text")
+        .map(|v| runs_text(Some(v)))
+        .and_then(|s| parse_duration_text(&s));
+
     let thumbnail_url = best_thumb(r.pointer("/thumbnail/musicThumbnailRenderer/thumbnail/thumbnails"));
+    let duration_secs = fixed_dur.or_else(|| parse_duration_text(&subtitle_full));
 
     let track = Track {
         id: video_id,
@@ -553,7 +559,7 @@ fn parse_responsive_track(r: &Value) -> Option<(Track, String)> {
         artist_id,
         album,
         album_id,
-        duration_secs: None,
+        duration_secs,
         thumbnail_url,
         local_path: None,
     };
@@ -673,6 +679,36 @@ fn runs_text(val: Option<&Value>) -> String {
                 .collect::<String>()
         })
         .unwrap_or_default()
+}
+
+/// Parses `"M:SS"`, `"H:MM:SS"`, or bullet-delimited subtitles like `"Artist • 3:44"` into seconds.
+fn parse_duration_text(text: &str) -> Option<u64> {
+    text.split('•').rev().find_map(|segment| {
+        let s = segment.trim();
+        let parts: Vec<&str> = s.split(':').collect();
+        match parts.as_slice() {
+            [m, sec] => {
+                let mins: u64 = m.trim().parse().ok()?;
+                let secs: u64 = sec.trim().parse().ok()?;
+                if secs < 60 {
+                    Some(mins * 60 + secs)
+                } else {
+                    None
+                }
+            }
+            [h, m, sec] => {
+                let hrs: u64 = h.trim().parse().ok()?;
+                let mins: u64 = m.trim().parse().ok()?;
+                let secs: u64 = sec.trim().parse().ok()?;
+                if mins < 60 && secs < 60 {
+                    Some(hrs * 3600 + mins * 60 + secs)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    })
 }
 
 fn best_thumb(thumbs: Option<&Value>) -> Option<String> {
@@ -1069,6 +1105,8 @@ pub async fn fetch_related_tracks(
                         }
                         let title = runs_text(vid.get("title"));
                         let artist = runs_text(vid.get("shortBylineText"));
+                        let dur_secs = parse_duration_text(&runs_text(vid.get("lengthText")))
+                            .or_else(|| parse_duration_text(&runs_text(vid.get("longBylineText"))));
                         let thumb = best_thumb(vid.pointer("/thumbnail/thumbnails"));
                         if !title.is_empty() {
                             tracks.push(Track {
@@ -1082,7 +1120,7 @@ pub async fn fetch_related_tracks(
                                 artist_id: None,
                                 album: None,
                                 album_id: None,
-                                duration_secs: None,
+                                duration_secs: dur_secs,
                                 thumbnail_url: thumb,
                                 local_path: None,
                             });
@@ -1295,6 +1333,19 @@ mod tests {
                 || !feed.new_albums.is_empty(),
             "expected home music items"
         );
+    }
+
+    #[test]
+    fn parse_duration_text_handles_short_long_and_subtitles() {
+        assert_eq!(parse_duration_text("3:29"), Some(209));
+        assert_eq!(parse_duration_text("0:05"), Some(5));
+        assert_eq!(parse_duration_text("1:02:05"), Some(3725));
+        assert_eq!(
+            parse_duration_text("Mon Laferte • 4:38"),
+            Some(278)
+        );
+        assert_eq!(parse_duration_text("2.8 M de vistas"), None);
+        assert_eq!(parse_duration_text(""), None);
     }
 
     #[test]

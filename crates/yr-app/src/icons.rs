@@ -43,6 +43,8 @@ pub enum Icon {
     NewReleases,
     Mood,
     Trash,
+    ArrowBack,
+    MusicNote,
 }
 
 /// Renders a crisp vector icon centered inside `rect`.
@@ -393,6 +395,18 @@ pub fn draw_icon(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32
             painter.line_segment([pt(-0.26, -0.26), pt(-0.22, 0.40)], stroke);
             painter.line_segment([pt(0.26, -0.26), pt(0.22, 0.40)], stroke);
             painter.line_segment([pt(-0.22, 0.40), pt(0.22, 0.40)], stroke);
+        }
+        Icon::ArrowBack => {
+            painter.line_segment([pt(-0.42, 0.0), pt(0.44, 0.0)], stroke);
+            painter.line_segment([pt(-0.42, 0.0), pt(-0.08, -0.34)], stroke);
+            painter.line_segment([pt(-0.42, 0.0), pt(-0.08, 0.34)], stroke);
+        }
+        Icon::MusicNote => {
+            painter.circle_filled(pt(-0.24, 0.34), s * 0.17, color);
+            painter.circle_filled(pt(0.24, 0.24), s * 0.17, color);
+            painter.line_segment([pt(-0.09, 0.34), pt(-0.09, -0.32)], stroke);
+            painter.line_segment([pt(0.39, 0.24), pt(0.39, -0.42)], stroke);
+            painter.line_segment([pt(-0.09, -0.32), pt(0.39, -0.42)], stroke);
         }
     }
 }
