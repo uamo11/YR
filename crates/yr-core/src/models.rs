@@ -229,3 +229,36 @@ pub enum PlaybackStatus {
     Buffering,
     Error(String),
 }
+
+/// Single timestamped line for synchronized lyrics (LRC / LRCLIB).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LyricLine {
+    pub time_secs: f64,
+    pub text: String,
+}
+
+/// Resolved lyrics payload supporting both plain text and synced LRC lines.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct LyricsData {
+    pub plain: String,
+    #[serde(default)]
+    pub synced: Vec<LyricLine>,
+    #[serde(default)]
+    pub source: String,
+}
+
+/// SponsorBlock non-music / intro / sponsor segment interval in seconds.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SponsorSegment {
+    pub start_secs: f64,
+    pub end_secs: f64,
+    pub category: String,
+}
+
+/// Explore feed sections (New Releases, Charts/Rankings, Moods & Genres).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ExploreFeed {
+    pub new_albums: Vec<AlbumSummary>,
+    pub trending_tracks: Vec<Track>,
+    pub moods: Vec<MoodGenre>,
+}

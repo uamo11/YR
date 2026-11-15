@@ -1,5 +1,6 @@
 pub mod android_media;
 pub mod app;
+pub mod color_extract;
 pub mod icons;
 pub mod theme;
 

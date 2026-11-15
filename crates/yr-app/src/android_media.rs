@@ -214,6 +214,35 @@ mod imp {
         }
     }
 
+    pub fn share_text(title: &str, text: &str) {
+        let Some(bridge) = BRIDGE.get() else {
+            return;
+        };
+        let Ok(mut env) = bridge.vm.attach_current_thread() else {
+            return;
+        };
+        let Ok(j_title) = env.new_string(title) else {
+            return;
+        };
+        let Ok(j_text) = env.new_string(text) else {
+            return;
+        };
+        let service_cls: &JClass = bridge.service_class.as_obj().into();
+        if let Err(e) = env.call_static_method(
+            service_cls,
+            "shareText",
+            "(Landroid/content/Context;Ljava/lang/String;Ljava/lang/String;)V",
+            &[
+                JValue::Object(bridge.app_ctx.as_obj()),
+                JValue::Object(&j_title),
+                JValue::Object(&j_text),
+            ],
+        ) {
+            log::warn!("android_media: shareText failed: {e:?}");
+            let _ = env.exception_clear();
+        }
+    }
+
     #[no_mangle]
     pub extern "system" fn Java_com_yr_music_YrPlaybackService_nativeOnGoogleCookie(
         mut env: JNIEnv,
@@ -237,6 +266,7 @@ mod imp {
     pub fn set_action_sender(_tx: mpsc::UnboundedSender<MediaAction>) {}
     pub fn set_cookie_sender(_tx: mpsc::UnboundedSender<String>) {}
     pub fn open_google_login() {}
+    pub fn share_text(_title: &str, _text: &str) {}
     pub fn update_playback(_title: &str, _artist: &str, _playing: bool, _pos_ms: u64, _dur_ms: u64) {
     }
     pub fn stop_service() {}
@@ -248,6 +278,6 @@ mod imp {
 #[cfg(target_os = "android")]
 pub use imp::init;
 pub use imp::{
-    open_google_login, resolve_audio_url, set_action_sender, set_cookie_sender, stop_service,
-    update_playback,
+    open_google_login, resolve_audio_url, set_action_sender, set_cookie_sender, share_text,
+    stop_service, update_playback,
 };

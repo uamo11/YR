@@ -5,14 +5,17 @@ use innertube::GoogleSession;
 use rustypipe::client::{OauthDeviceCode, RustyPipe};
 use rustypipe::model::{AlbumItem, ArtistItem, MusicPlaylistItem, TrackItem};
 use rustypipe::param::Country;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use thiserror::Error;
 use tokio::sync::Mutex;
 use yr_core::{
-    AlbumDetail, AlbumSummary, ArtistDetail, ArtistSummary, AudioQuality, GoogleDeviceAuth,
-    HomeFeed, HomeShelf, HomeShelfCard, HomeShelfLayout, MoodGenre, PlaylistDetail,
-    PlaylistSummary, SearchResults, ShelfCardKind, StreamInfo, Track,
+    AlbumDetail, AlbumSummary, ArtistDetail, ArtistSummary, AudioQuality, ExploreFeed,
+    GoogleDeviceAuth, HomeFeed, HomeShelf, HomeShelfCard, HomeShelfLayout, LyricsData, MoodGenre,
+    PlaylistDetail, PlaylistSummary, SearchResults, ShelfCardKind, SponsorSegment, StreamInfo,
+    Track,
 };
 
 #[derive(Debug, Error)]
@@ -36,13 +39,18 @@ pub trait MusicProvider: Send + Sync {
     async fn get_playlist(&self, playlist_id: &str) -> Result<PlaylistDetail, ProviderError>;
     async fn get_artist(&self, artist_id: &str) -> Result<ArtistDetail, ProviderError>;
     async fn get_mood_playlists(&self, genre_id: &str) -> Result<Vec<PlaylistSummary>, ProviderError>;
+    async fn get_explore_feed(&self) -> Result<ExploreFeed, ProviderError>;
     async fn get_radio(&self, track_id: &str) -> Result<Vec<Track>, ProviderError>;
+    async fn get_related_tracks(&self, track_id: &str) -> Result<Vec<Track>, ProviderError>;
     async fn get_lyrics(&self, track_id: &str) -> Result<Option<String>, ProviderError>;
+    async fn get_synced_lyrics(&self, track: &Track) -> Result<Option<LyricsData>, ProviderError>;
+    async fn get_sponsor_segments(&self, track_id: &str) -> Result<Vec<SponsorSegment>, ProviderError>;
     async fn resolve_audio_stream(
         &self,
         track_id: &str,
         quality: AudioQuality,
     ) -> Result<StreamInfo, ProviderError>;
+    async fn fetch_bytes(&self, url: &str) -> Result<Vec<u8>, ProviderError>;
     async fn is_logged_in(&self) -> bool;
     async fn start_google_device_login(&self) -> Result<GoogleDeviceAuth, ProviderError>;
     async fn poll_google_device_login(&self) -> Result<bool, ProviderError>;
@@ -58,6 +66,7 @@ pub struct YtMusicProvider {
     cache_dir: Option<PathBuf>,
     google_session: Arc<Mutex<Option<GoogleSession>>>,
     pending_oauth: Arc<Mutex<Option<OauthDeviceCode>>>,
+    stream_cache: Arc<std::sync::Mutex<HashMap<(String, u32), (StreamInfo, Instant)>>>,
 }
 
 impl Default for YtMusicProvider {
@@ -70,10 +79,15 @@ impl YtMusicProvider {
     pub fn new() -> Self {
         Self {
             client: RustyPipe::new(),
-            http: reqwest::Client::new(),
+            http: reqwest::Client::builder()
+                .connect_timeout(Duration::from_secs(10))
+                .tcp_nodelay(true)
+                .build()
+                .unwrap_or_else(|_| reqwest::Client::new()),
             cache_dir: None,
             google_session: Arc::new(Mutex::new(None)),
             pending_oauth: Arc::new(Mutex::new(None)),
+            stream_cache: Arc::new(std::sync::Mutex::new(HashMap::new())),
         }
     }
 
@@ -86,10 +100,15 @@ impl YtMusicProvider {
             .unwrap_or_else(|_| RustyPipe::new());
         Self {
             client,
-            http: reqwest::Client::new(),
+            http: reqwest::Client::builder()
+                .connect_timeout(Duration::from_secs(10))
+                .tcp_nodelay(true)
+                .build()
+                .unwrap_or_else(|_| reqwest::Client::new()),
             cache_dir: Some(cache_dir),
             google_session: Arc::new(Mutex::new(session)),
             pending_oauth: Arc::new(Mutex::new(None)),
+            stream_cache: Arc::new(std::sync::Mutex::new(HashMap::new())),
         }
     }
 
@@ -442,6 +461,40 @@ impl MusicProvider for YtMusicProvider {
         Ok(playlists)
     }
 
+    async fn get_explore_feed(&self) -> Result<ExploreFeed, ProviderError> {
+        let session = self.google_session.lock().await.clone();
+        if let Ok(feed) = innertube::fetch_explore_feed(&self.http, session.as_ref()).await {
+            if !feed.new_albums.is_empty() || !feed.trending_tracks.is_empty() || !feed.moods.is_empty() {
+                return Ok(feed);
+            }
+        }
+        let q = self.client.query();
+        let (charts_res, albums_res, genres_res) = tokio::join!(
+            q.music_charts(Some(Country::Us)),
+            q.music_new_albums(),
+            q.music_genres()
+        );
+        Ok(ExploreFeed {
+            new_albums: albums_res
+                .map(|a| a.into_iter().map(Self::map_album).collect())
+                .unwrap_or_default(),
+            trending_tracks: charts_res
+                .map(|c| c.top_tracks.into_iter().map(Self::map_track).collect())
+                .unwrap_or_default(),
+            moods: genres_res
+                .map(|gs| {
+                    gs.into_iter()
+                        .map(|g| MoodGenre {
+                            id: g.id,
+                            title: g.name,
+                            params: None,
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+        })
+    }
+
     async fn get_radio(&self, track_id: &str) -> Result<Vec<Track>, ProviderError> {
         let radio = self
             .client
@@ -450,6 +503,14 @@ impl MusicProvider for YtMusicProvider {
             .await
             .map_err(|e| ProviderError::Api(e.to_string()))?;
         Ok(radio.items.into_iter().map(Self::map_track).collect())
+    }
+
+    async fn get_related_tracks(&self, track_id: &str) -> Result<Vec<Track>, ProviderError> {
+        let session = self.google_session.lock().await.clone();
+        match innertube::fetch_related_tracks(&self.http, session.as_ref(), track_id).await {
+            Ok(tracks) if !tracks.is_empty() => Ok(tracks),
+            _ => self.get_radio(track_id).await,
+        }
     }
 
     async fn get_lyrics(&self, track_id: &str) -> Result<Option<String>, ProviderError> {
@@ -473,11 +534,51 @@ impl MusicProvider for YtMusicProvider {
         Ok(Some(format!("{}\n\n{}", lyrics.body, lyrics.footer)))
     }
 
+    async fn get_synced_lyrics(&self, track: &Track) -> Result<Option<LyricsData>, ProviderError> {
+        if let Some(lrc) = innertube::fetch_lrclib_lyrics(&self.http, track).await {
+            return Ok(Some(lrc));
+        }
+        match self.get_lyrics(&track.id).await? {
+            Some(plain) => Ok(Some(LyricsData {
+                plain,
+                synced: Vec::new(),
+                source: "YouTube Music".to_string(),
+            })),
+            None => Ok(None),
+        }
+    }
+
+    async fn get_sponsor_segments(
+        &self,
+        track_id: &str,
+    ) -> Result<Vec<SponsorSegment>, ProviderError> {
+        Ok(innertube::fetch_sponsor_segments(&self.http, track_id).await)
+    }
+
     async fn resolve_audio_stream(
         &self,
         track_id: &str,
         quality: AudioQuality,
     ) -> Result<StreamInfo, ProviderError> {
+        let cache_key = (track_id.to_string(), quality.target_bitrate_kbps());
+        if let Ok(guard) = self.stream_cache.lock() {
+            if let Some((cached, fetched_at)) = guard.get(&cache_key) {
+                if fetched_at.elapsed() < Duration::from_secs(4 * 3600) {
+                    return Ok(cached.clone());
+                }
+            }
+        }
+
+        if let Ok(info) = innertube::fetch_player_stream(&self.http, track_id, quality).await {
+            if let Ok(mut guard) = self.stream_cache.lock() {
+                if guard.len() > 200 {
+                    guard.clear();
+                }
+                guard.insert(cache_key, (info.clone(), Instant::now()));
+            }
+            return Ok(info);
+        }
+
         let player = self
             .client
             .query()
@@ -507,7 +608,7 @@ impl MusicProvider for YtMusicProvider {
             "audio"
         };
 
-        Ok(StreamInfo {
+        let info = StreamInfo {
             track_id: track_id.to_string(),
             url: chosen.url,
             mime_type: chosen.mime,
@@ -518,7 +619,28 @@ impl MusicProvider for YtMusicProvider {
             } else {
                 None
             },
-        })
+        };
+        if let Ok(mut guard) = self.stream_cache.lock() {
+            guard.insert(cache_key, (info.clone(), Instant::now()));
+        }
+        Ok(info)
+    }
+
+    async fn fetch_bytes(&self, url: &str) -> Result<Vec<u8>, ProviderError> {
+        let resp = self
+            .http
+            .get(url)
+            .timeout(Duration::from_secs(6))
+            .send()
+            .await
+            .map_err(|e| ProviderError::Api(e.to_string()))?;
+        if !resp.status().is_success() {
+            return Err(ProviderError::Api(format!("HTTP {}", resp.status())));
+        }
+        resp.bytes()
+            .await
+            .map(|b| b.to_vec())
+            .map_err(|e| ProviderError::Api(e.to_string()))
     }
 
     async fn is_logged_in(&self) -> bool {

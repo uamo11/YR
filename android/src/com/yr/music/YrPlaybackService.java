@@ -255,6 +255,22 @@ public class YrPlaybackService extends Service {
         return hasSapi && hasSid;
     }
 
+    public static void shareText(final Context ctx, final String title, final String text) {
+        if (ctx == null || text == null) return;
+        new Handler(Looper.getMainLooper()).post(() -> {
+            try {
+                Intent send = new Intent(Intent.ACTION_SEND);
+                send.setType("text/plain");
+                send.putExtra(Intent.EXTRA_SUBJECT, title != null ? title : "YR Music");
+                send.putExtra(Intent.EXTRA_TEXT, text);
+                Intent chooser = Intent.createChooser(send, "Compartir canción");
+                chooser.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                ctx.startActivity(chooser);
+            } catch (Throwable ignored) {
+            }
+        });
+    }
+
     public static void openGoogleLogin(final Context ctx) {
         Log.i("YR_LOGIN", "openGoogleLogin called");
         if (ctx == null) return;

@@ -28,6 +28,21 @@ pub enum Icon {
     Moon,
     Refresh,
     Plus,
+    Share,
+    Album,
+    Artist,
+    Pin,
+    ThumbUp,
+    ThumbDown,
+    Lyrics,
+    QueueNext,
+    QueueAdd,
+    History,
+    ArrowUpLeft,
+    Trending,
+    NewReleases,
+    Mood,
+    Trash,
 }
 
 /// Renders a crisp vector icon centered inside `rect`.
@@ -238,6 +253,146 @@ pub fn draw_icon(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32
             painter.add(egui::Shape::line(pts, stroke));
             painter.line_segment([pt(0.22, -0.34), pt(0.42, -0.14)], stroke);
             painter.line_segment([pt(0.42, -0.38), pt(0.42, -0.14)], stroke);
+        }
+        Icon::Share => {
+            // Curved right-pointing share arrow
+            painter.line_segment([pt(-0.42, 0.34), pt(-0.34, 0.04)], stroke);
+            painter.line_segment([pt(-0.34, 0.04), pt(0.06, -0.10)], stroke);
+            painter.line_segment([pt(0.06, -0.10), pt(0.42, -0.10)], stroke);
+            painter.line_segment([pt(0.16, -0.34), pt(0.44, -0.10)], stroke);
+            painter.line_segment([pt(0.16, 0.14), pt(0.44, -0.10)], stroke);
+        }
+        Icon::Album => {
+            painter.circle_stroke(c, s * 0.46, stroke);
+            painter.circle_stroke(c, s * 0.15, stroke);
+        }
+        Icon::Artist => {
+            painter.circle_stroke(pt(-0.10, -0.18), s * 0.19, stroke);
+            painter.line_segment([pt(-0.40, 0.36), pt(-0.28, 0.12)], stroke);
+            painter.line_segment([pt(-0.28, 0.12), pt(0.08, 0.12)], stroke);
+            painter.line_segment([pt(0.08, 0.12), pt(0.18, 0.36)], stroke);
+            // small note on right
+            painter.line_segment([pt(0.32, -0.32), pt(0.32, 0.22)], stroke);
+            painter.line_segment([pt(0.32, -0.32), pt(0.50, -0.24)], stroke);
+            painter.circle_filled(pt(0.24, 0.24), s * 0.11, color);
+        }
+        Icon::Pin => {
+            painter.line_segment([pt(-0.22, -0.38), pt(0.36, -0.38)], stroke);
+            painter.line_segment([pt(-0.12, -0.38), pt(-0.18, -0.02)], stroke);
+            painter.line_segment([pt(0.26, -0.38), pt(0.20, -0.02)], stroke);
+            painter.line_segment([pt(-0.32, 0.02), pt(0.36, 0.02)], stroke);
+            painter.line_segment([pt(0.02, 0.02), pt(0.02, 0.48)], stroke);
+        }
+        Icon::ThumbUp => {
+            let pts = vec![
+                pt(-0.20, 0.34),
+                pt(0.30, 0.34),
+                pt(0.44, -0.08),
+                pt(0.10, -0.08),
+                pt(0.16, -0.40),
+                pt(0.0, -0.44),
+                pt(-0.20, -0.06),
+            ];
+            painter.add(egui::Shape::closed_line(pts, stroke));
+            painter.rect_stroke(
+                Rect::from_min_max(pt(-0.44, -0.06), pt(-0.22, 0.34)),
+                1.0,
+                stroke,
+                egui::StrokeKind::Middle,
+            );
+        }
+        Icon::ThumbDown => {
+            let pts = vec![
+                pt(-0.20, -0.34),
+                pt(0.30, -0.34),
+                pt(0.44, 0.08),
+                pt(0.10, 0.08),
+                pt(0.16, 0.40),
+                pt(0.0, 0.44),
+                pt(-0.20, 0.06),
+            ];
+            painter.add(egui::Shape::closed_line(pts, stroke));
+            painter.rect_stroke(
+                Rect::from_min_max(pt(-0.44, -0.34), pt(-0.22, 0.06)),
+                1.0,
+                stroke,
+                egui::StrokeKind::Middle,
+            );
+        }
+        Icon::Lyrics => {
+            for dx in [-0.22_f32, 0.16_f32] {
+                painter.rect_stroke(
+                    Rect::from_center_size(pt(dx, -0.06), Vec2::splat(s * 0.24)),
+                    1.0,
+                    stroke,
+                    egui::StrokeKind::Middle,
+                );
+                painter.line_segment([pt(dx + 0.06, 0.08), pt(dx - 0.04, 0.30)], stroke);
+            }
+        }
+        Icon::QueueNext => {
+            painter.line_segment([pt(-0.44, -0.26), pt(0.16, -0.26)], stroke);
+            painter.line_segment([pt(-0.44, 0.02), pt(0.44, 0.02)], stroke);
+            painter.line_segment([pt(-0.44, 0.30), pt(0.44, 0.30)], stroke);
+            let tri = vec![pt(0.24, -0.44), pt(0.48, -0.26), pt(0.24, -0.08)];
+            painter.add(egui::Shape::convex_polygon(tri, color, Stroke::NONE));
+        }
+        Icon::QueueAdd => {
+            painter.line_segment([pt(-0.44, -0.26), pt(0.44, -0.26)], stroke);
+            painter.line_segment([pt(-0.44, 0.02), pt(0.44, 0.02)], stroke);
+            painter.line_segment([pt(-0.44, 0.30), pt(0.04, 0.30)], stroke);
+            let tri = vec![pt(0.18, 0.14), pt(0.46, 0.30), pt(0.18, 0.46)];
+            painter.add(egui::Shape::convex_polygon(tri, color, Stroke::NONE));
+        }
+        Icon::History => {
+            let mut pts = Vec::new();
+            for i in 0..=11 {
+                let a = -2.4 + (i as f32) * 0.46;
+                pts.push(pt(a.cos() * 0.42, a.sin() * 0.42));
+            }
+            painter.add(egui::Shape::line(pts, stroke));
+            painter.line_segment([pt(-0.42, -0.10), pt(-0.42, -0.34)], stroke);
+            painter.line_segment([pt(-0.42, -0.10), pt(-0.18, -0.14)], stroke);
+            painter.line_segment([pt(0.0, -0.22), pt(0.0, 0.04)], stroke);
+            painter.line_segment([pt(0.0, 0.04), pt(0.18, 0.16)], stroke);
+        }
+        Icon::ArrowUpLeft => {
+            painter.line_segment([pt(-0.34, -0.34), pt(0.36, 0.36)], stroke);
+            painter.line_segment([pt(-0.34, -0.34), pt(0.06, -0.34)], stroke);
+            painter.line_segment([pt(-0.34, -0.34), pt(-0.34, 0.06)], stroke);
+        }
+        Icon::Trending => {
+            let pts = vec![
+                pt(-0.46, 0.28),
+                pt(-0.10, -0.06),
+                pt(0.10, 0.12),
+                pt(0.44, -0.26),
+            ];
+            painter.add(egui::Shape::line(pts, stroke));
+            painter.line_segment([pt(0.20, -0.26), pt(0.44, -0.26)], stroke);
+            painter.line_segment([pt(0.44, -0.26), pt(0.44, -0.02)], stroke);
+        }
+        Icon::NewReleases => {
+            painter.circle_stroke(c, s * 0.36, stroke);
+            for i in 0..8 {
+                let a = (i as f32) * std::f32::consts::FRAC_PI_4;
+                let (sn, cs) = a.sin_cos();
+                painter.line_segment([pt(cs * 0.36, sn * 0.36), pt(cs * 0.50, sn * 0.50)], stroke);
+            }
+        }
+        Icon::Mood => {
+            painter.circle_stroke(c, s * 0.44, stroke);
+            painter.circle_filled(pt(-0.15, -0.10), s * 0.07, color);
+            painter.circle_filled(pt(0.15, -0.10), s * 0.07, color);
+            let smile = vec![pt(-0.18, 0.12), pt(0.0, 0.24), pt(0.18, 0.12)];
+            painter.add(egui::Shape::line(smile, stroke));
+        }
+        Icon::Trash => {
+            painter.line_segment([pt(-0.36, -0.26), pt(0.36, -0.26)], stroke);
+            painter.line_segment([pt(-0.14, -0.40), pt(0.14, -0.40)], stroke);
+            painter.line_segment([pt(-0.26, -0.26), pt(-0.22, 0.40)], stroke);
+            painter.line_segment([pt(0.26, -0.26), pt(0.22, 0.40)], stroke);
+            painter.line_segment([pt(-0.22, 0.40), pt(0.22, 0.40)], stroke);
         }
     }
 }

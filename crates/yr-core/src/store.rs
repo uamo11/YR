@@ -1,8 +1,15 @@
-use crate::models::{AudioQuality, LocalPlaylist, Track};
+use crate::models::{AudioQuality, HomeShelfCard, LocalPlaylist, Track};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SearchHistoryItem {
+    pub query: String,
+    #[serde(default)]
+    pub thumbnail_url: Option<String>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
@@ -12,6 +19,8 @@ pub struct AppConfig {
     pub volume: f32,
     #[serde(default = "default_true")]
     pub autoplay_radio: bool,
+    #[serde(default = "default_true")]
+    pub sponsorblock_enabled: bool,
 }
 
 fn default_true() -> bool {
@@ -26,6 +35,7 @@ impl Default for AppConfig {
             max_concurrent_downloads: 3,
             volume: 0.85,
             autoplay_radio: true,
+            sponsorblock_enabled: true,
         }
     }
 }
@@ -37,6 +47,12 @@ pub struct LibraryData {
     pub playlists: Vec<LocalPlaylist>,
     #[serde(default)]
     pub search_history: Vec<String>,
+    #[serde(default)]
+    pub search_history_items: Vec<SearchHistoryItem>,
+    #[serde(default)]
+    pub pinned_cards: Vec<HomeShelfCard>,
+    #[serde(default)]
+    pub disliked_ids: Vec<String>,
     pub config: AppConfig,
 }
 
@@ -121,6 +137,10 @@ impl LibraryStore {
     }
 
     pub fn record_search(&mut self, query: &str) {
+        self.record_search_with_thumb(query, None);
+    }
+
+    pub fn record_search_with_thumb(&mut self, query: &str, thumb: Option<String>) {
         let q = query.trim();
         if q.is_empty() {
             return;
@@ -130,12 +150,83 @@ impl LibraryStore {
         if self.data.search_history.len() > 15 {
             self.data.search_history.truncate(15);
         }
+
+        let existing_thumb = thumb.or_else(|| {
+            self.data
+                .search_history_items
+                .iter()
+                .find(|i| i.query.eq_ignore_ascii_case(q))
+                .and_then(|i| i.thumbnail_url.clone())
+        });
+        self.data
+            .search_history_items
+            .retain(|i| !i.query.eq_ignore_ascii_case(q));
+        self.data.search_history_items.insert(
+            0,
+            SearchHistoryItem {
+                query: q.to_string(),
+                thumbnail_url: existing_thumb,
+            },
+        );
+        if self.data.search_history_items.len() > 20 {
+            self.data.search_history_items.truncate(20);
+        }
         let _ = self.save();
     }
 
     pub fn remove_search_history(&mut self, query: &str) {
         self.data.search_history.retain(|s| s != query);
+        self.data
+            .search_history_items
+            .retain(|i| !i.query.eq_ignore_ascii_case(query));
         let _ = self.save();
+    }
+
+    pub fn is_pinned_speed_dial(&self, title: &str) -> bool {
+        self.data
+            .pinned_cards
+            .iter()
+            .any(|c| c.title.eq_ignore_ascii_case(title))
+    }
+
+    pub fn toggle_pin_speed_dial(&mut self, card: HomeShelfCard) -> bool {
+        if let Some(pos) = self
+            .data
+            .pinned_cards
+            .iter()
+            .position(|c| c.title.eq_ignore_ascii_case(&card.title))
+        {
+            self.data.pinned_cards.remove(pos);
+            let _ = self.save();
+            false
+        } else {
+            self.data.pinned_cards.insert(0, card);
+            if self.data.pinned_cards.len() > 18 {
+                self.data.pinned_cards.truncate(18);
+            }
+            let _ = self.save();
+            true
+        }
+    }
+
+    pub fn is_disliked(&self, track_id: &str) -> bool {
+        self.data.disliked_ids.iter().any(|id| id == track_id)
+    }
+
+    pub fn toggle_dislike(&mut self, track_id: &str) -> bool {
+        if let Some(pos) = self.data.disliked_ids.iter().position(|id| id == track_id) {
+            self.data.disliked_ids.remove(pos);
+            let _ = self.save();
+            false
+        } else {
+            self.data.liked_tracks.retain(|t| t.id != track_id);
+            self.data.disliked_ids.insert(0, track_id.to_string());
+            if self.data.disliked_ids.len() > 200 {
+                self.data.disliked_ids.truncate(200);
+            }
+            let _ = self.save();
+            true
+        }
     }
 }
 

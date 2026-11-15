@@ -4,16 +4,28 @@ use std::fs::{File, OpenOptions};
 use std::io::{self, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc, Condvar, Mutex};
+use std::sync::{mpsc, Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use symphonia::core::audio::{SampleBuffer, SignalSpec};
 use symphonia::core::codecs::{DecoderOptions, CODEC_TYPE_NULL};
 use symphonia::core::errors::Error as SymphoniaError;
-use symphonia::core::formats::{FormatOptions, FormatReader};
+use symphonia::core::formats::{FormatOptions, FormatReader, SeekMode, SeekTo};
 use symphonia::core::io::{MediaSource, MediaSourceStream};
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
+use symphonia::core::units::Time;
 use yr_core::PlaybackStatus;
+
+fn shared_http_client() -> &'static reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(10))
+            .tcp_nodelay(true)
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new())
+    })
+}
 
 #[derive(Debug, Clone)]
 pub struct AudioSnapshot {
@@ -446,11 +458,15 @@ impl Seek for ProgressiveFileReader {
 
 impl MediaSource for ProgressiveFileReader {
     fn is_seekable(&self) -> bool {
-        false
+        let (lock, _) = &*self.state;
+        lock.lock()
+            .map(|g| g.total.is_some() || g.finished)
+            .unwrap_or(false)
     }
 
     fn byte_len(&self) -> Option<u64> {
-        None
+        let (lock, _) = &*self.state;
+        lock.lock().ok().and_then(|g| g.total)
     }
 }
 
@@ -595,6 +611,27 @@ impl Source for SymphoniaStreamDecoder {
     fn total_duration(&self) -> Option<Duration> {
         self.total_duration
     }
+
+    fn try_seek(&mut self, pos: Duration) -> Result<(), rodio::source::SeekError> {
+        let target = Time::new(pos.as_secs(), f64::from(pos.subsec_nanos()) / 1_000_000_000.0);
+        self.format
+            .seek(
+                SeekMode::Coarse,
+                SeekTo::Time {
+                    time: target,
+                    track_id: Some(self.track_id),
+                },
+            )
+            .map_err(|e| {
+                rodio::source::SeekError::Other(Box::new(io::Error::other(e.to_string())))
+            })?;
+        self.decoder.reset();
+        self.samples.clear();
+        self.sample_idx = 0;
+        self.eof = false;
+        self.decode_next_packet();
+        Ok(())
+    }
 }
 
 fn open_progressive_stream(
@@ -626,8 +663,8 @@ fn open_progressive_stream(
     let cancel_bg = Arc::clone(&cancel);
 
     runtime.spawn(async move {
-        const CHUNK_SIZE: u64 = 262_144;
-        let client = reqwest::Client::new();
+        const CHUNK_SIZE: u64 = 1_048_576;
+        let client = shared_http_client();
 
         let set_err = |msg: String| {
             let (lock, cvar) = &*state_bg;
