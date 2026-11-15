@@ -1536,21 +1536,28 @@ impl YrApp {
                     .corner_radius(CornerRadius::same(12))
                     .inner_margin(12.0)
                     .show(ui, |ui| {
+                        let text_w = (ui.available_width() - 126.0).max(140.0);
                         ui.horizontal(|ui| {
-                            ui.vertical(|ui| {
-                                ui.label(
-                                    RichText::new("Conecta tu cuenta de Google")
-                                        .strong()
-                                        .size(14.5)
-                                        .color(TEXT_PRIMARY),
-                                );
-                                ui.label(
-                                    RichText::new(
-                                        "Sincroniza tus listas, historial y recomendaciones personalizadas",
-                                    )
-                                    .size(11.5)
-                                    .color(TEXT_SECONDARY),
-                                );
+                            ui.allocate_ui(Vec2::new(text_w, 44.0), |ui| {
+                                ui.vertical(|ui| {
+                                    ui.set_max_width(text_w);
+                                    ui.label(
+                                        RichText::new("Conecta tu cuenta de Google")
+                                            .strong()
+                                            .size(14.5)
+                                            .color(TEXT_PRIMARY),
+                                    );
+                                    ui.add(
+                                        egui::Label::new(
+                                            RichText::new(
+                                                "Sincroniza tus listas, historial y recomendaciones personalizadas",
+                                            )
+                                            .size(11.5)
+                                            .color(TEXT_SECONDARY),
+                                        )
+                                        .wrap(),
+                                    );
+                                });
                             });
                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                                 if icons::icon_pill_button(
