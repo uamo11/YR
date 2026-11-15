@@ -149,6 +149,7 @@ pub struct YrApp {
     lyrics_track_id: Option<String>,
     lyrics_data: Option<LyricsData>,
     lyrics_loading: bool,
+    lyrics_last_scrolled_idx: Option<usize>,
     related_track_id: Option<String>,
     related_tracks: Vec<Track>,
     related_loading: bool,
@@ -197,6 +198,7 @@ async fn play_track_bg(
         0,
         track.duration_secs.unwrap_or(0) * 1000,
     );
+    crate::android_media::set_artwork_url(track.thumbnail_url.as_deref().unwrap_or(""));
 
     if let Some(local) = &track.local_path {
         let p = PathBuf::from(local);
@@ -307,6 +309,7 @@ impl YrApp {
             lyrics_track_id: None,
             lyrics_data: None,
             lyrics_loading: false,
+            lyrics_last_scrolled_idx: None,
             related_track_id: None,
             related_tracks: Vec::new(),
             related_loading: false,
@@ -825,6 +828,7 @@ impl YrApp {
         self.seeking_secs = None;
         self.lyrics_data = None;
         self.lyrics_track_id = None;
+        self.lyrics_last_scrolled_idx = None;
         self.related_tracks.clear();
         self.related_track_id = None;
         self.sponsor_track_id = Some(track.id.clone());
@@ -832,9 +836,8 @@ impl YrApp {
         self.sponsor_skipped_idx = None;
         self.ensure_cover_color(track.thumbnail_url.as_deref(), ctx);
 
-        if self.show_lyrics {
-            self.load_lyrics(track.clone(), ctx);
-        }
+        // Preload synced lyrics immediately when a track starts so LETRA opens ready.
+        self.load_lyrics(track.clone(), ctx);
         if self.show_related {
             self.load_related(track.id.clone(), ctx);
         }
@@ -846,6 +849,7 @@ impl YrApp {
             0,
             track.duration_secs.unwrap_or(0) * 1000,
         );
+        crate::android_media::set_artwork_url(track.thumbnail_url.as_deref().unwrap_or(""));
 
         if self.store.data.config.sponsorblock_enabled {
             let prov_sb = Arc::clone(&self.provider);
@@ -1091,15 +1095,17 @@ impl YrApp {
                             self.seeking_secs = None;
                             self.lyrics_data = None;
                             self.lyrics_track_id = None;
+                            self.lyrics_last_scrolled_idx = None;
                             self.related_tracks.clear();
                             self.related_track_id = None;
                             self.sponsor_track_id = Some(track.id.clone());
                             self.sponsor_segments.clear();
                             self.sponsor_skipped_idx = None;
                             self.ensure_cover_color(track.thumbnail_url.as_deref(), ctx);
-                            if self.show_lyrics {
-                                self.load_lyrics(track.clone(), ctx);
-                            }
+                            crate::android_media::set_artwork_url(
+                                track.thumbnail_url.as_deref().unwrap_or(""),
+                            );
+                            self.load_lyrics(track.clone(), ctx);
                             if self.show_related {
                                 self.load_related(track.id, ctx);
                             }
@@ -1791,26 +1797,16 @@ impl YrApp {
                 ui.set_width(col_width);
                 ui.horizontal(|ui| {
                     let row_start = ui.cursor().min;
-                    render_thumb(ui, track.thumbnail_url.as_deref(), 46.0);
-                    let text_w = (col_width - 94.0).max(110.0);
-                    ui.allocate_ui(Vec2::new(text_w, 46.0), |ui| {
+                    let thumb_sz = 48.0;
+                    let row_h = 54.0;
+                    render_thumb(ui, track.thumbnail_url.as_deref(), thumb_sz);
+                    let text_w = (col_width - (thumb_sz + 48.0)).max(115.0);
+                    let title_color = if is_current { ACCENT_RED } else { TEXT_PRIMARY };
+                    ui.allocate_ui(Vec2::new(text_w, row_h), |ui| {
                         ui.vertical(|ui| {
                             ui.spacing_mut().item_spacing.y = 2.0;
                             ui.set_max_width(text_w);
-                            ui.add(
-                                egui::Label::new(
-                                    RichText::new(&track.title)
-                                        .size(14.0)
-                                        .strong()
-                                        .color(if is_current {
-                                            ACCENT_RED
-                                        } else {
-                                            TEXT_PRIMARY
-                                        }),
-                                )
-                                .truncate()
-                                .selectable(false),
-                            );
+                            render_clamped_label(ui, &track.title, 13.8, title_color, text_w, 2);
                             let sub_txt = if subtitle.is_empty() {
                                 track.artist.clone()
                             } else {
@@ -1834,7 +1830,7 @@ impl YrApp {
 
                     let hit_rect = egui::Rect::from_min_size(
                         row_start,
-                        Vec2::new(46.0 + 8.0 + text_w, 46.0),
+                        Vec2::new(thumb_sz + 8.0 + text_w, row_h),
                     );
                     let row_hit = ui.interact(
                         hit_rect,
@@ -2835,24 +2831,15 @@ impl YrApp {
         ctx: &egui::Context,
         album: &yr_core::AlbumSummary,
     ) {
-        egui::Frame::new()
-            .fill(BG_SURFACE)
-            .corner_radius(CornerRadius::same(10))
-            .inner_margin(10.0)
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    render_thumb(ui, album.thumbnail_url.as_deref(), 48.0);
-                    ui.vertical(|ui| {
-                        ui.label(RichText::new(&album.title).strong());
-                        ui.label(RichText::new(&album.artist).small().color(TEXT_SECONDARY));
-                    });
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if ui.button("Abrir").clicked() {
-                            self.open_album(album.id.clone(), ctx);
-                        }
-                    });
-                });
-            });
+        if render_collection_row(
+            ui,
+            ("album_row", &album.id),
+            album.thumbnail_url.as_deref(),
+            &album.title,
+            Some(album.artist.as_str()),
+        ) {
+            self.open_album(album.id.clone(), ctx);
+        }
     }
 
     fn render_playlist_row(
@@ -2861,26 +2848,15 @@ impl YrApp {
         ctx: &egui::Context,
         pl: &PlaylistSummary,
     ) {
-        egui::Frame::new()
-            .fill(BG_SURFACE)
-            .corner_radius(CornerRadius::same(10))
-            .inner_margin(10.0)
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    render_thumb(ui, pl.thumbnail_url.as_deref(), 48.0);
-                    ui.vertical(|ui| {
-                        ui.label(RichText::new(&pl.title).strong());
-                        if let Some(author) = &pl.author {
-                            ui.label(RichText::new(author).small().color(TEXT_SECONDARY));
-                        }
-                    });
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if ui.button("Abrir").clicked() {
-                            self.open_playlist(pl.id.clone(), ctx);
-                        }
-                    });
-                });
-            });
+        if render_collection_row(
+            ui,
+            ("playlist_row", &pl.id),
+            pl.thumbnail_url.as_deref(),
+            &pl.title,
+            pl.author.as_deref(),
+        ) {
+            self.open_playlist(pl.id.clone(), ctx);
+        }
     }
 
     fn render_library(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
@@ -3362,30 +3338,17 @@ impl YrApp {
                     render_thumb(ui, track.thumbnail_url.as_deref(), 48.0);
 
                     let text_width = (ui.available_width() - 42.0).max(120.0);
-                    let display_title = if track.title.chars().count() > 78 {
-                        let clipped: String = track.title.chars().take(75).collect();
-                        format!("{clipped}...")
-                    } else {
-                        track.title.clone()
-                    };
                     let is_downloaded = self.downloads.iter().any(|d| {
                         d.track.id == track.id && d.status == DownloadStatus::Completed
                     });
+                    let title_color = if is_current { ACCENT_RED } else { TEXT_PRIMARY };
+                    let row_h = 56.0;
 
-                    ui.allocate_ui(Vec2::new(text_width, 50.0), |ui| {
+                    ui.allocate_ui(Vec2::new(text_width, row_h), |ui| {
                         ui.vertical(|ui| {
+                            ui.spacing_mut().item_spacing.y = 2.0;
                             ui.set_max_width(text_width);
-                            ui.add(
-                                egui::Label::new(
-                                    RichText::new(display_title).strong().color(if is_current {
-                                        ACCENT_RED
-                                    } else {
-                                        TEXT_PRIMARY
-                                    }),
-                                )
-                                .wrap()
-                                .selectable(false),
-                            );
+                            render_clamped_label(ui, &track.title, 14.5, title_color, text_width, 2);
                             let sub = if offline_badge || is_downloaded {
                                 format!("✓ {} • {}", track.artist, track.formatted_duration())
                             } else {
@@ -3407,7 +3370,7 @@ impl YrApp {
 
                     let hit_rect = egui::Rect::from_min_size(
                         row_start,
-                        Vec2::new(48.0 + 8.0 + text_width, 50.0),
+                        Vec2::new(48.0 + 8.0 + text_width, row_h),
                     );
                     let info_resp = ui.interact(
                         hit_rect,
@@ -3985,6 +3948,12 @@ impl YrApp {
                                                 .wrap()
                                                 .sense(Sense::click()),
                                             );
+                                            if is_active
+                                                && self.lyrics_last_scrolled_idx != active_idx
+                                            {
+                                                self.lyrics_last_scrolled_idx = active_idx;
+                                                resp.scroll_to_me(Some(Align::Center));
+                                            }
                                             if resp.clicked() {
                                                 self.audio.seek(Duration::from_secs_f64(
                                                     line.time_secs,
@@ -4210,8 +4179,8 @@ impl YrApp {
                                             if icons::icon_button(
                                                 ui,
                                                 icons::Icon::ThumbUp,
-                                                26.0,
-                                                13.0,
+                                                30.0,
+                                                19.0,
                                                 Color32::TRANSPARENT,
                                                 if liked { ACCENT_RED } else { Color32::WHITE },
                                                 17.0,
@@ -4239,8 +4208,8 @@ impl YrApp {
                                             if icons::icon_button(
                                                 ui,
                                                 icons::Icon::ThumbDown,
-                                                26.0,
-                                                13.0,
+                                                30.0,
+                                                19.0,
                                                 Color32::TRANSPARENT,
                                                 if disliked { ACCENT_RED } else { Color32::WHITE },
                                                 17.0,
@@ -4276,6 +4245,7 @@ impl YrApp {
                                     self.show_lyrics = true;
                                     self.show_queue = false;
                                     self.show_related = false;
+                                    self.lyrics_last_scrolled_idx = None;
                                     if self.lyrics_track_id.as_deref() != Some(&track.id) {
                                         self.load_lyrics(track.clone(), ctx);
                                     }
@@ -4557,10 +4527,11 @@ impl YrApp {
                                 self.show_queue = mode == 0;
                                 self.show_lyrics = mode == 1;
                                 self.show_related = mode == 2;
-                                if self.show_lyrics
-                                    && self.lyrics_track_id.as_deref() != Some(&track.id)
-                                {
-                                    self.load_lyrics(track.clone(), ctx);
+                                if self.show_lyrics {
+                                    self.lyrics_last_scrolled_idx = None;
+                                    if self.lyrics_track_id.as_deref() != Some(&track.id) {
+                                        self.load_lyrics(track.clone(), ctx);
+                                    }
                                 }
                                 if self.show_related
                                     && self.related_track_id.as_deref() != Some(&track.id)
@@ -4728,27 +4699,36 @@ impl YrApp {
                 ui.horizontal(|ui| {
                     render_thumb(ui, track.thumbnail_url.as_deref(), 46.0);
                     let tw = (ui.available_width() - 90.0).max(120.0);
-                    ui.allocate_ui(Vec2::new(tw, 46.0), |ui| {
+                    let dur_secs = track.duration_secs.or_else(|| {
+                        let cur = self
+                            .queue
+                            .lock()
+                            .unwrap()
+                            .current_track()
+                            .map(|t| t.id.clone());
+                        if cur.as_deref() == Some(track.id.as_str()) {
+                            self.audio
+                                .snapshot()
+                                .duration_secs
+                                .map(|d| d.round().max(0.0) as u64)
+                        } else {
+                            None
+                        }
+                    });
+                    let dur_str = match dur_secs {
+                        Some(s) if s > 0 => format!("{}:{:02}", s / 60, s % 60),
+                        _ => track.formatted_duration(),
+                    };
+                    ui.allocate_ui(Vec2::new(tw, 52.0), |ui| {
                         ui.vertical(|ui| {
+                            ui.spacing_mut().item_spacing.y = 2.0;
                             ui.set_max_width(tw);
+                            render_clamped_label(ui, &track.title, 15.0, Color32::WHITE, tw, 2);
                             ui.add(
                                 egui::Label::new(
-                                    RichText::new(&track.title)
-                                        .strong()
-                                        .size(15.0)
-                                        .color(Color32::WHITE),
-                                )
-                                .truncate(),
-                            );
-                            ui.add(
-                                egui::Label::new(
-                                    RichText::new(format!(
-                                        "{} • {}",
-                                        track.artist,
-                                        track.formatted_duration()
-                                    ))
-                                    .size(12.5)
-                                    .color(TEXT_SECONDARY),
+                                    RichText::new(format!("{} • {}", track.artist, dur_str))
+                                        .size(12.5)
+                                        .color(TEXT_SECONDARY),
                                 )
                                 .truncate(),
                             );
@@ -4808,7 +4788,7 @@ impl YrApp {
                                     ui.painter(),
                                     egui::Rect::from_center_size(
                                         egui::pos2(r.center().x, r.top() + 26.0),
-                                        Vec2::splat(20.0),
+                                        Vec2::splat(24.0),
                                     ),
                                     ic,
                                     Color32::WHITE,
@@ -5182,6 +5162,72 @@ impl YrApp {
             self.show_google_login = false;
         }
     }
+}
+
+fn render_clamped_label(
+    ui: &mut egui::Ui,
+    text: &str,
+    size: f32,
+    color: Color32,
+    max_width: f32,
+    max_rows: usize,
+) {
+    let mut job = egui::text::LayoutJob::simple(
+        text.to_string(),
+        egui::FontId::proportional(size),
+        color,
+        max_width,
+    );
+    job.wrap.max_rows = max_rows;
+    job.wrap.overflow_character = Some('…');
+    ui.add(egui::Label::new(job).selectable(false));
+}
+
+fn render_collection_row(
+    ui: &mut egui::Ui,
+    id_salt: (&str, &str),
+    thumb_url: Option<&str>,
+    title: &str,
+    subtitle: Option<&str>,
+) -> bool {
+    let mut clicked = false;
+    egui::Frame::new()
+        .fill(BG_SURFACE)
+        .corner_radius(CornerRadius::same(10))
+        .inner_margin(10.0)
+        .show(ui, |ui| {
+            let row_start = ui.cursor().min;
+            let row_w = ui.available_width();
+            ui.horizontal(|ui| {
+                render_thumb(ui, thumb_url, 48.0);
+                let text_w = (row_w - 86.0).max(110.0);
+                ui.allocate_ui(Vec2::new(text_w, 48.0), |ui| {
+                    ui.vertical(|ui| {
+                        ui.spacing_mut().item_spacing.y = 2.0;
+                        ui.set_max_width(text_w);
+                        render_clamped_label(ui, title, 14.5, TEXT_PRIMARY, text_w, 2);
+                        if let Some(sub) = subtitle {
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(sub).small().color(TEXT_SECONDARY),
+                                )
+                                .truncate()
+                                .selectable(false),
+                            );
+                        }
+                    });
+                });
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    ui.label(RichText::new("›").size(20.0).color(TEXT_SECONDARY));
+                });
+            });
+            let hit_rect = egui::Rect::from_min_size(row_start, Vec2::new(row_w, 48.0));
+            let resp = ui.interact(hit_rect, ui.id().with(id_salt), Sense::click());
+            if resp.clicked() {
+                clicked = true;
+            }
+        });
+    clicked
 }
 
 fn render_thumb(ui: &mut egui::Ui, url: Option<&str>, size: f32) {

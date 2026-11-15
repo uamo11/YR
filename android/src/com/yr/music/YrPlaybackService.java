@@ -9,6 +9,8 @@ import android.app.Service;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.ServiceInfo;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
 import android.media.MediaMetadata;
 import android.media.session.MediaSession;
 import android.media.session.PlaybackState;
@@ -26,6 +28,9 @@ import android.webkit.WebViewClient;
 import android.widget.Button;
 import android.widget.LinearLayout;
 import android.widget.TextView;
+import java.io.InputStream;
+import java.net.HttpURLConnection;
+import java.net.URL;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
@@ -53,6 +58,8 @@ public class YrPlaybackService extends Service {
     private static volatile boolean currentPlaying = false;
     private static volatile long currentPosMs = 0;
     private static volatile long currentDurMs = 0;
+    private static volatile String currentArtworkUrl = "";
+    private static volatile Bitmap currentArtworkBitmap = null;
 
     static {
         try {
@@ -92,6 +99,68 @@ public class YrPlaybackService extends Service {
             }
         } catch (Throwable ignored) {
         }
+    }
+
+    public static void setArtworkUrl(final Context ctx, final String url) {
+        if (ctx == null) return;
+        final String normalized = url != null ? url.trim() : "";
+        if (normalized.equals(currentArtworkUrl)
+                && (normalized.isEmpty() || currentArtworkBitmap != null)) {
+            return;
+        }
+        currentArtworkUrl = normalized;
+        if (normalized.isEmpty()) {
+            currentArtworkBitmap = null;
+            return;
+        }
+        new Thread(() -> {
+            HttpURLConnection conn = null;
+            try {
+                URL u = new URL(normalized);
+                conn = (HttpURLConnection) u.openConnection();
+                conn.setConnectTimeout(6000);
+                conn.setReadTimeout(8000);
+                conn.setInstanceFollowRedirects(true);
+                try (InputStream is = conn.getInputStream()) {
+                    Bitmap raw = BitmapFactory.decodeStream(is);
+                    if (raw != null && normalized.equals(currentArtworkUrl)) {
+                        int w = raw.getWidth();
+                        int h = raw.getHeight();
+                        int maxDim = Math.max(w, h);
+                        Bitmap scaled = raw;
+                        if (maxDim > 512) {
+                            float ratio = 512.0f / maxDim;
+                            scaled = Bitmap.createScaledBitmap(
+                                    raw,
+                                    Math.max(1, Math.round(w * ratio)),
+                                    Math.max(1, Math.round(h * ratio)),
+                                    true
+                            );
+                            if (scaled != raw) {
+                                raw.recycle();
+                            }
+                        }
+                        currentArtworkBitmap = scaled;
+                        Intent intent = new Intent(ctx, YrPlaybackService.class);
+                        intent.setAction(ACTION_UPDATE);
+                        try {
+                            if (Build.VERSION.SDK_INT >= 26) {
+                                ctx.startForegroundService(intent);
+                            } else {
+                                ctx.startService(intent);
+                            }
+                        } catch (Throwable ignored) {
+                        }
+                    }
+                }
+            } catch (Throwable t) {
+                Log.w("YrPlaybackService", "setArtworkUrl failed: " + t);
+            } finally {
+                if (conn != null) {
+                    conn.disconnect();
+                }
+            }
+        }, "yr-artwork-loader").start();
     }
 
     public static void stopService(Context ctx) {
@@ -506,6 +575,12 @@ public class YrPlaybackService extends Service {
             if (currentDurMs > 0) {
                 meta.putLong(MediaMetadata.METADATA_KEY_DURATION, currentDurMs);
             }
+            Bitmap art = currentArtworkBitmap;
+            if (art != null && !art.isRecycled()) {
+                meta.putBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART, art);
+                meta.putBitmap(MediaMetadata.METADATA_KEY_ART, art);
+                meta.putBitmap(MediaMetadata.METADATA_KEY_DISPLAY_ICON, art);
+            }
             mediaSession.setMetadata(meta.build());
 
             long actions = PlaybackState.ACTION_PLAY
@@ -561,8 +636,14 @@ public class YrPlaybackService extends Service {
                 .setContentText(currentArtist)
                 .setContentIntent(contentPi)
                 .setOngoing(currentPlaying)
-                .setVisibility(Notification.VISIBILITY_PUBLIC)
-                .addAction(android.R.drawable.ic_media_previous, "Anterior", prevPi)
+                .setVisibility(Notification.VISIBILITY_PUBLIC);
+
+        Bitmap art = currentArtworkBitmap;
+        if (art != null && !art.isRecycled()) {
+            builder.setLargeIcon(art);
+        }
+
+        builder.addAction(android.R.drawable.ic_media_previous, "Anterior", prevPi)
                 .addAction(
                         currentPlaying ? android.R.drawable.ic_media_pause : android.R.drawable.ic_media_play,
                         currentPlaying ? "Pausar" : "Reproducir",

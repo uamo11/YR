@@ -116,6 +116,32 @@ mod imp {
         }
     }
 
+    pub fn set_artwork_url(url: &str) {
+        let Some(bridge) = BRIDGE.get() else {
+            return;
+        };
+        let Ok(mut env) = bridge.vm.attach_current_thread() else {
+            return;
+        };
+        let Ok(j_url) = env.new_string(url) else {
+            return;
+        };
+        let service_cls: &JClass = bridge.service_class.as_obj().into();
+        let res = env.call_static_method(
+            service_cls,
+            "setArtworkUrl",
+            "(Landroid/content/Context;Ljava/lang/String;)V",
+            &[
+                JValue::Object(bridge.app_ctx.as_obj()),
+                JValue::Object(&j_url),
+            ],
+        );
+        if let Err(e) = res {
+            log::warn!("android_media: setArtworkUrl failed: {e:?}");
+            let _ = env.exception_clear();
+        }
+    }
+
     pub fn stop_service() {
         let Some(bridge) = BRIDGE.get() else {
             return;
@@ -269,6 +295,7 @@ mod imp {
     pub fn share_text(_title: &str, _text: &str) {}
     pub fn update_playback(_title: &str, _artist: &str, _playing: bool, _pos_ms: u64, _dur_ms: u64) {
     }
+    pub fn set_artwork_url(_url: &str) {}
     pub fn stop_service() {}
     pub fn resolve_audio_url(_video_id: &str) -> Option<String> {
         None
@@ -278,6 +305,6 @@ mod imp {
 #[cfg(target_os = "android")]
 pub use imp::init;
 pub use imp::{
-    open_google_login, resolve_audio_url, set_action_sender, set_cookie_sender, share_text,
-    stop_service, update_playback,
+    open_google_login, resolve_audio_url, set_action_sender, set_artwork_url, set_cookie_sender,
+    share_text, stop_service, update_playback,
 };
