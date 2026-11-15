@@ -2013,34 +2013,34 @@ impl YrApp {
                                     CornerRadius::same(8),
                                     BG_SURFACE,
                                 );
-                                if ui.is_rect_visible(rect) {
-                                    if let Some(url) = &card.thumbnail_url {
-                                        let thumb_uri = tracked_thumb_uri(url, 224);
-                                        ui.put(
-                                            rect,
-                                            Image::new(thumb_uri)
-                                                .fit_to_exact_size(Vec2::splat(tile_size))
-                                                .corner_radius(CornerRadius::same(8))
-                                                .sense(Sense::hover()),
-                                        );
-                                    }
+                                if let Some(url) = &card.thumbnail_url {
+                                    let thumb_uri = tracked_thumb_uri(url, 224);
+                                    ui.put(
+                                        rect,
+                                        Image::new(thumb_uri)
+                                            .fit_to_exact_size(Vec2::splat(tile_size))
+                                            .corner_radius(CornerRadius::same(8))
+                                            .sense(Sense::hover()),
+                                    );
                                 }
-                                let galley = ui.painter().layout(
-                                    card.title.clone(),
-                                    egui::FontId::proportional(11.0),
+                                let title_job = clamped_layout_job(
+                                    &card.title,
+                                    11.0,
                                     Color32::WHITE,
                                     tile_size - 12.0,
+                                    2,
                                 );
+                                let galley = ui.painter().layout_job(title_job);
                                 let overlay_h =
-                                    (galley.size().y + 12.0).clamp(30.0, tile_size * 0.48);
+                                    (galley.size().y + 13.0).clamp(32.0, tile_size * 0.46);
                                 let overlay_rect = egui::Rect::from_min_max(
                                     egui::pos2(rect.left(), rect.bottom() - overlay_h),
                                     rect.max,
                                 );
-                                // Smooth multi-band bottom gradient into rounded card floor.
-                                let band_h = 7.0;
-                                for (idx, alpha) in [28_u8, 68, 125].into_iter().enumerate() {
-                                    let band_bottom = overlay_rect.top() - (2 - idx) as f32 * band_h;
+                                // Smooth multi-band bottom scrim so cover artwork text never clashes.
+                                let band_h = 6.5;
+                                for (idx, alpha) in [32_u8, 84, 145, 200].into_iter().enumerate() {
+                                    let band_bottom = overlay_rect.top() - (3 - idx) as f32 * band_h;
                                     let band_top = (band_bottom - band_h).max(rect.top());
                                     if band_bottom > band_top {
                                         ui.painter().rect_filled(
@@ -2061,7 +2061,7 @@ impl YrApp {
                                         sw: 8,
                                         se: 8,
                                     },
-                                    Color32::from_rgba_unmultiplied(0, 0, 0, 198),
+                                    Color32::from_rgba_unmultiplied(0, 0, 0, 232),
                                 );
                                 let clipped_painter = ui.painter().with_clip_rect(overlay_rect);
                                 clipped_painter.galley(
@@ -3835,7 +3835,7 @@ impl YrApp {
                                             ui.horizontal(|ui| {
                                                 let (grip_rect, grip_resp) =
                                                     ui.allocate_exact_size(
-                                                        Vec2::new(20.0, 44.0),
+                                                        Vec2::new(20.0, 48.0),
                                                         Sense::drag(),
                                                     );
                                                 let grip_color = if is_dragging {
@@ -3868,28 +3868,28 @@ impl YrApp {
                                                 let row_start = ui.next_widget_position();
                                                 render_thumb(ui, t.thumbnail_url.as_deref(), 44.0);
                                                 ui.add_space(6.0);
-                                                let tw = (ui.available_width() - 96.0).max(70.0);
-                                                ui.allocate_ui(Vec2::new(tw, 44.0), |ui| {
+                                                let right_reserve = if is_curr { 56.0 } else { 88.0 };
+                                                let tw = (ui.available_width() - right_reserve - 6.0).max(70.0);
+                                                ui.allocate_ui(Vec2::new(tw, 48.0), |ui| {
                                                     ui.vertical(|ui| {
+                                                        ui.spacing_mut().item_spacing.y = 1.5;
                                                         ui.set_max_width(tw);
-                                                        ui.add(
-                                                            egui::Label::new(
-                                                                RichText::new(&t.title)
-                                                                    .size(14.5)
-                                                                    .strong()
-                                                                    .color(if is_curr {
-                                                                        Color32::WHITE
-                                                                    } else {
-                                                                        TEXT_PRIMARY
-                                                                    }),
-                                                            )
-                                                            .truncate()
-                                                            .selectable(false),
+                                                        render_clamped_label(
+                                                            ui,
+                                                            &t.title,
+                                                            13.5,
+                                                            if is_curr {
+                                                                Color32::WHITE
+                                                            } else {
+                                                                TEXT_PRIMARY
+                                                            },
+                                                            tw,
+                                                            2,
                                                         );
                                                         ui.add(
                                                             egui::Label::new(
                                                                 RichText::new(&t.artist)
-                                                                    .size(12.5)
+                                                                    .size(12.0)
                                                                     .color(Color32::from_white_alpha(175)),
                                                             )
                                                             .truncate()
@@ -3899,7 +3899,7 @@ impl YrApp {
                                                 });
                                                 let hit_rect = egui::Rect::from_min_size(
                                                     row_start,
-                                                    Vec2::new(44.0 + 6.0 + tw, 44.0),
+                                                    Vec2::new(44.0 + 6.0 + tw, 48.0),
                                                 );
                                                 if ui
                                                     .interact(
@@ -3915,15 +3915,16 @@ impl YrApp {
                                                 ui.with_layout(
                                                     Layout::right_to_left(Align::Center),
                                                     |ui| {
+                                                        ui.spacing_mut().item_spacing.x = 4.0;
                                                         if !is_curr
                                                             && icons::icon_button(
                                                                 ui,
                                                                 icons::Icon::Close,
-                                                                28.0,
-                                                                14.0,
+                                                                24.0,
+                                                                12.0,
                                                                 Color32::TRANSPARENT,
                                                                 TEXT_SECONDARY,
-                                                                14.0,
+                                                                12.0,
                                                             )
                                                             .clicked()
                                                         {
@@ -3933,11 +3934,11 @@ impl YrApp {
                                                             && icons::icon_button(
                                                                 ui,
                                                                 icons::Icon::ChevronDown,
-                                                                28.0,
-                                                                14.0,
+                                                                24.0,
+                                                                12.0,
                                                                 Color32::from_white_alpha(20),
                                                                 Color32::WHITE,
-                                                                14.0,
+                                                                12.0,
                                                             )
                                                             .clicked()
                                                         {
@@ -3950,11 +3951,11 @@ impl YrApp {
                                                             && icons::icon_button(
                                                                 ui,
                                                                 icons::Icon::ChevronUp,
-                                                                28.0,
-                                                                14.0,
+                                                                24.0,
+                                                                12.0,
                                                                 Color32::from_white_alpha(20),
                                                                 Color32::WHITE,
-                                                                14.0,
+                                                                12.0,
                                                             )
                                                             .clicked()
                                                         {
@@ -5514,14 +5515,13 @@ fn render_modal_scrim(ctx: &egui::Context, id_salt: &str) -> bool {
     dismissed
 }
 
-fn render_clamped_label(
-    ui: &mut egui::Ui,
+fn clamped_layout_job(
     text: &str,
     size: f32,
     color: Color32,
     max_width: f32,
     max_rows: usize,
-) {
+) -> egui::text::LayoutJob {
     let mut job = egui::text::LayoutJob::simple(
         text.to_string(),
         egui::FontId::proportional(size),
@@ -5530,6 +5530,18 @@ fn render_clamped_label(
     );
     job.wrap.max_rows = max_rows;
     job.wrap.overflow_character = Some('…');
+    job
+}
+
+fn render_clamped_label(
+    ui: &mut egui::Ui,
+    text: &str,
+    size: f32,
+    color: Color32,
+    max_width: f32,
+    max_rows: usize,
+) {
+    let job = clamped_layout_job(text, size, color, max_width, max_rows);
     ui.add(egui::Label::new(job).selectable(false));
 }
 

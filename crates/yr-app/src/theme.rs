@@ -20,19 +20,23 @@ pub fn apply_ytm_theme(ctx: &egui::Context) {
     visuals.faint_bg_color = BG_ELEVATED;
 
     visuals.widgets.noninteractive.bg_fill = BG_SURFACE;
+    visuals.widgets.noninteractive.bg_stroke = Stroke::NONE;
     visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0_f32, TEXT_PRIMARY);
     visuals.widgets.noninteractive.corner_radius = CornerRadius::same(10);
 
     visuals.widgets.inactive.bg_fill = BG_ELEVATED;
+    visuals.widgets.inactive.bg_stroke = Stroke::new(0.8_f32, Color32::from_white_alpha(26));
     visuals.widgets.inactive.fg_stroke = Stroke::new(1.0_f32, TEXT_PRIMARY);
     visuals.widgets.inactive.corner_radius = CornerRadius::same(10);
 
     visuals.widgets.hovered.bg_fill = BG_HIGHLIGHT;
-    visuals.widgets.hovered.fg_stroke = Stroke::new(1.2_f32, Color32::WHITE);
+    visuals.widgets.hovered.bg_stroke = Stroke::new(0.8_f32, Color32::from_white_alpha(48));
+    visuals.widgets.hovered.fg_stroke = Stroke::new(1.0_f32, Color32::WHITE);
     visuals.widgets.hovered.corner_radius = CornerRadius::same(10);
 
     visuals.widgets.active.bg_fill = ACCENT_RED;
-    visuals.widgets.active.fg_stroke = Stroke::new(1.5_f32, Color32::WHITE);
+    visuals.widgets.active.bg_stroke = Stroke::NONE;
+    visuals.widgets.active.fg_stroke = Stroke::new(1.2_f32, Color32::WHITE);
     visuals.widgets.active.corner_radius = CornerRadius::same(10);
 
     visuals.selection.bg_fill = ACCENT_RED;
