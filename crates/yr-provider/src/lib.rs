@@ -1,4 +1,7 @@
+pub mod innertube;
+
 use async_trait::async_trait;
+use innertube::GoogleSession;
 use rustypipe::client::{OauthDeviceCode, RustyPipe};
 use rustypipe::model::{AlbumItem, ArtistItem, MusicPlaylistItem, TrackItem};
 use rustypipe::param::Country;
@@ -8,7 +11,8 @@ use thiserror::Error;
 use tokio::sync::Mutex;
 use yr_core::{
     AlbumDetail, AlbumSummary, ArtistDetail, ArtistSummary, AudioQuality, GoogleDeviceAuth,
-    HomeFeed, MoodGenre, PlaylistDetail, PlaylistSummary, SearchResults, StreamInfo, Track,
+    HomeFeed, HomeShelf, HomeShelfCard, HomeShelfLayout, MoodGenre, PlaylistDetail,
+    PlaylistSummary, SearchResults, ShelfCardKind, StreamInfo, Track,
 };
 
 #[derive(Debug, Error)]
@@ -22,6 +26,10 @@ pub enum ProviderError {
 #[async_trait]
 pub trait MusicProvider: Send + Sync {
     async fn get_home_feed(&self) -> Result<HomeFeed, ProviderError>;
+    async fn get_home_feed_with_params(
+        &self,
+        mood_params: Option<&str>,
+    ) -> Result<HomeFeed, ProviderError>;
     async fn search(&self, query: &str) -> Result<SearchResults, ProviderError>;
     async fn search_suggestions(&self, query: &str) -> Result<Vec<String>, ProviderError>;
     async fn get_album(&self, album_id: &str) -> Result<AlbumDetail, ProviderError>;
@@ -42,10 +50,13 @@ pub trait MusicProvider: Send + Sync {
     async fn logout(&self) -> Result<(), ProviderError>;
 }
 
-/// YouTube Music provider backed by `rustypipe` (pure Rust + rustls).
+/// YouTube Music provider backed by `rustypipe` + direct InnerTube WEB_REMIX.
 #[derive(Clone)]
 pub struct YtMusicProvider {
     client: RustyPipe,
+    http: reqwest::Client,
+    cache_dir: Option<PathBuf>,
+    google_session: Arc<Mutex<Option<GoogleSession>>>,
     pending_oauth: Arc<Mutex<Option<OauthDeviceCode>>>,
 }
 
@@ -59,18 +70,25 @@ impl YtMusicProvider {
     pub fn new() -> Self {
         Self {
             client: RustyPipe::new(),
+            http: reqwest::Client::new(),
+            cache_dir: None,
+            google_session: Arc::new(Mutex::new(None)),
             pending_oauth: Arc::new(Mutex::new(None)),
         }
     }
 
     pub fn with_cache_dir(cache_dir: PathBuf) -> Self {
         let _ = std::fs::create_dir_all(&cache_dir);
+        let session = GoogleSession::load(&GoogleSession::session_file(&cache_dir));
         let client = RustyPipe::builder()
-            .storage_dir(cache_dir)
+            .storage_dir(cache_dir.clone())
             .build()
             .unwrap_or_else(|_| RustyPipe::new());
         Self {
             client,
+            http: reqwest::Client::new(),
+            cache_dir: Some(cache_dir),
+            google_session: Arc::new(Mutex::new(session)),
             pending_oauth: Arc::new(Mutex::new(None)),
         }
     }
@@ -153,43 +171,81 @@ impl YtMusicProvider {
 #[async_trait]
 impl MusicProvider for YtMusicProvider {
     async fn get_home_feed(&self) -> Result<HomeFeed, ProviderError> {
-        let q = self.client.query();
-        let logged_in = self.is_logged_in().await;
+        self.get_home_feed_with_params(None).await
+    }
 
-        let (charts_res, new_videos_res, new_albums_res, genres_res) = tokio::join!(
-            q.music_charts(Some(Country::Us)),
-            q.music_new_videos(),
-            q.music_new_albums(),
-            q.music_genres()
-        );
+    async fn get_home_feed_with_params(
+        &self,
+        mood_params: Option<&str>,
+    ) -> Result<HomeFeed, ProviderError> {
+        let session = self.google_session.lock().await.clone();
+        let has_cookie_session = session.as_ref().is_some_and(|s| s.has_auth_cookies());
+        let logged_in = has_cookie_session || self.is_logged_in().await;
 
-        let mut quick_picks: Vec<Track> = Vec::new();
-        let mut trending_tracks: Vec<Track> = Vec::new();
-        let mut recommended_playlists: Vec<PlaylistSummary> = Vec::new();
+        let mut feed = match innertube::fetch_home_feed(&self.http, session.as_ref(), mood_params).await {
+            Ok(f) => f,
+            Err(_) => {
+                // Fallback to rustypipe charts + new releases
+                let q = self.client.query();
+                let (charts_res, new_videos_res, new_albums_res, genres_res) = tokio::join!(
+                    q.music_charts(Some(Country::Us)),
+                    q.music_new_videos(),
+                    q.music_new_albums(),
+                    q.music_genres()
+                );
 
-        if let Ok(charts) = charts_res {
-            quick_picks.extend(charts.top_tracks.into_iter().map(Self::map_track));
-            trending_tracks.extend(charts.trending_tracks.into_iter().map(Self::map_track));
-            recommended_playlists.extend(charts.playlists.into_iter().map(Self::map_playlist));
-            if quick_picks.is_empty() {
-                quick_picks.extend(trending_tracks.iter().cloned());
+                let mut quick_picks: Vec<Track> = Vec::new();
+                let mut trending_tracks: Vec<Track> = Vec::new();
+                let mut recommended_playlists: Vec<PlaylistSummary> = Vec::new();
+                if let Ok(charts) = charts_res {
+                    quick_picks.extend(charts.top_tracks.into_iter().map(Self::map_track));
+                    trending_tracks.extend(charts.trending_tracks.into_iter().map(Self::map_track));
+                    recommended_playlists.extend(charts.playlists.into_iter().map(Self::map_playlist));
+                }
+                let recommended_tracks: Vec<Track> = new_videos_res
+                    .map(|v| v.into_iter().map(Self::map_track).collect())
+                    .unwrap_or_default();
+                let new_albums: Vec<AlbumSummary> = new_albums_res
+                    .map(|a| a.into_iter().map(Self::map_album).collect())
+                    .unwrap_or_default();
+                let moods = genres_res
+                    .map(|g| {
+                        g.into_iter()
+                            .take(14)
+                            .map(|g| MoodGenre {
+                                id: g.id,
+                                title: g.name,
+                                params: None,
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if quick_picks.is_empty() && recommended_tracks.is_empty() && new_albums.is_empty() {
+                    return Err(ProviderError::Api(
+                        "No se pudo cargar el feed de YT Music".into(),
+                    ));
+                }
+                HomeFeed {
+                    quick_picks,
+                    recommended_tracks,
+                    trending_tracks,
+                    new_albums,
+                    recommended_playlists,
+                    moods,
+                    is_logged_in: logged_in,
+                    account: session.as_ref().and_then(|s| s.account.clone()),
+                    ..Default::default()
+                }
             }
-        }
-        let mut recommended_tracks: Vec<Track> = new_videos_res
-            .map(|videos| videos.into_iter().map(Self::map_track).collect())
-            .unwrap_or_default();
-        if quick_picks.is_empty() {
-            quick_picks.extend(recommended_tracks.iter().cloned());
-        }
-        if quick_picks.is_empty() {
-            if let Ok(tracks_page) = q.music_search_tracks("top hits").await {
-                quick_picks.extend(tracks_page.items.items.into_iter().map(Self::map_track));
-            }
+        };
+
+        feed.is_logged_in = logged_in;
+        if feed.account.is_none() {
+            feed.account = session.as_ref().and_then(|s| s.account.clone());
         }
 
-        let mut listen_again: Vec<Track> = Vec::new();
-        let mut user_playlists: Vec<PlaylistSummary> = Vec::new();
-        if logged_in {
+        // Hydrate authenticated personal playlists & history when logged in
+        if logged_in && mood_params.is_none() {
             let qa = self.client.query().authenticated();
             let (hist_res, pl_res, liked_res) = tokio::join!(
                 qa.music_history(),
@@ -197,7 +253,8 @@ impl MusicProvider for YtMusicProvider {
                 qa.music_liked_tracks(),
             );
             if let Ok(hist) = hist_res {
-                listen_again.extend(hist.items.into_iter().map(|h| Self::map_track(h.item)));
+                feed.listen_again
+                    .extend(hist.items.into_iter().map(|h| Self::map_track(h.item)));
             }
             if let Ok(liked) = liked_res {
                 let liked_count = liked.tracks.items.len() as u32;
@@ -206,70 +263,43 @@ impl MusicProvider for YtMusicProvider {
                     .last()
                     .or_else(|| liked.thumbnail.first())
                     .map(|t| t.url.clone());
-                user_playlists.push(PlaylistSummary {
+                feed.user_playlists.push(PlaylistSummary {
                     id: liked.id,
-                    title: "Tus Me gusta".to_string(),
+                    title: "Música que te gusta".to_string(),
                     author: Some("YouTube Music".to_string()),
                     track_count: Some(liked_count),
                     thumbnail_url: thumb,
                 });
-                if let Some(first_liked) = liked.tracks.items.first() {
-                    if let Ok(rel) = q.music_related(&first_liked.id).await {
-                        let mut rel_tracks: Vec<Track> =
-                            rel.tracks.into_iter().map(Self::map_track).collect();
-                        if !rel_tracks.is_empty() {
-                            rel_tracks.truncate(20);
-                            recommended_tracks = rel_tracks;
-                        }
-                    }
-                }
             }
             if let Ok(pls) = pl_res {
-                user_playlists.extend(pls.items.into_iter().map(Self::map_playlist));
+                feed.user_playlists
+                    .extend(pls.items.into_iter().map(Self::map_playlist));
             }
-            if recommended_tracks.is_empty() {
-                if let Some(seed) = listen_again.first() {
-                    if let Ok(rel) = q.music_related(&seed.id).await {
-                        recommended_tracks = rel.tracks.into_iter().map(Self::map_track).collect();
-                    }
-                }
-            }
-        }
-
-        let new_albums: Vec<AlbumSummary> = new_albums_res
-            .map(|albums| albums.into_iter().map(Self::map_album).collect())
-            .unwrap_or_default();
-
-        let moods = genres_res
-            .map(|genres| {
-                genres
-                    .into_iter()
-                    .take(14)
-                    .map(|g| MoodGenre {
-                        id: g.id,
-                        title: g.name,
+            if !feed.user_playlists.is_empty() {
+                let cards: Vec<HomeShelfCard> = feed
+                    .user_playlists
+                    .iter()
+                    .map(|p| HomeShelfCard {
+                        title: p.title.clone(),
+                        subtitle: p
+                            .author
+                            .clone()
+                            .unwrap_or_else(|| "Lista".to_string()),
+                        thumbnail_url: p.thumbnail_url.clone(),
+                        kind: ShelfCardKind::Playlist(p.clone()),
                     })
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        if quick_picks.is_empty() && new_albums.is_empty() && listen_again.is_empty() {
-            return Err(ProviderError::Api(
-                "No se pudo cargar el feed de YT Music".into(),
-            ));
+                    .collect();
+                feed.shelves.push(HomeShelf {
+                    title: "Tus listas".to_string(),
+                    eyebrow: feed.account.as_ref().map(|a| a.name.to_uppercase()),
+                    layout: HomeShelfLayout::CarouselCards,
+                    tracks: Vec::new(),
+                    cards,
+                });
+            }
         }
 
-        Ok(HomeFeed {
-            quick_picks,
-            listen_again,
-            recommended_tracks,
-            trending_tracks,
-            new_albums,
-            user_playlists,
-            recommended_playlists,
-            moods,
-            is_logged_in: logged_in,
-        })
+        Ok(feed)
     }
 
     async fn search(&self, query: &str) -> Result<SearchResults, ProviderError> {
@@ -492,6 +522,15 @@ impl MusicProvider for YtMusicProvider {
     }
 
     async fn is_logged_in(&self) -> bool {
+        if self
+            .google_session
+            .lock()
+            .await
+            .as_ref()
+            .is_some_and(|s| s.has_auth_cookies())
+        {
+            return true;
+        }
         self.client.user_auth_check_cookie().await.is_ok()
             || self.client.user_auth_check_login().await.is_ok()
     }
@@ -531,14 +570,24 @@ impl MusicProvider for YtMusicProvider {
     }
 
     async fn login_with_cookie(&self, cookie: &str) -> Result<(), ProviderError> {
-        self.client
-            .user_auth_set_cookie(cookie.trim())
+        let session = innertube::validate_and_hydrate_session(&self.http, cookie)
             .await
-            .map_err(|e| ProviderError::Api(e.to_string()))
+            .map_err(ProviderError::Api)?;
+        if let Some(dir) = &self.cache_dir {
+            session.save(&GoogleSession::session_file(dir));
+        }
+        *self.google_session.lock().await = Some(session);
+        // Best-effort sync to rustypipe so authenticated rustypipe queries work too
+        let _ = self.client.user_auth_set_cookie(cookie.trim()).await;
+        Ok(())
     }
 
     async fn logout(&self) -> Result<(), ProviderError> {
         *self.pending_oauth.lock().await = None;
+        *self.google_session.lock().await = None;
+        if let Some(dir) = &self.cache_dir {
+            let _ = std::fs::remove_file(GoogleSession::session_file(dir));
+        }
         let _ = self.client.user_auth_remove_cookie().await;
         let _ = self.client.user_auth_logout().await;
         Ok(())

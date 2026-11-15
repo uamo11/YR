@@ -186,14 +186,14 @@ pub fn draw_icon(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32
             painter.line_segment([pt(0.14, 0.14), pt(0.46, 0.46)], stroke);
         }
         Icon::Library => {
-            painter.rect_stroke(
-                Rect::from_min_max(pt(-0.44, -0.18), pt(0.22, 0.46)),
-                2.0,
-                stroke,
-                egui::StrokeKind::Middle,
-            );
-            painter.line_segment([pt(-0.22, -0.34), pt(0.38, -0.34)], stroke);
-            painter.line_segment([pt(0.38, -0.34), pt(0.38, 0.26)], stroke);
+            let pts = vec![
+                pt(-0.34, -0.46),
+                pt(0.34, -0.46),
+                pt(0.34, 0.46),
+                pt(0.0, 0.22),
+                pt(-0.34, 0.46),
+            ];
+            painter.add(egui::Shape::closed_line(pts, stroke));
         }
         Icon::DownloadsNav => {
             painter.circle_stroke(c, s * 0.48, stroke);

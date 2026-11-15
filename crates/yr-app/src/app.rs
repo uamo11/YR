@@ -12,8 +12,8 @@ use tokio::sync::mpsc;
 use yr_audio::{AudioEngine, AudioSnapshot};
 use yr_core::{
     format_seconds, AlbumDetail, ArtistDetail, AudioQuality, GoogleDeviceAuth, HomeFeed,
-    LibraryStore, PlaybackQueue, PlaybackStatus, PlaylistDetail, PlaylistSummary, SearchResults,
-    Track,
+    HomeShelf, HomeShelfCard, HomeShelfLayout, LibraryStore, PlaybackQueue, PlaybackStatus,
+    PlaylistDetail, PlaylistSummary, SearchResults, ShelfCardKind, Track,
 };
 use yr_download::{DownloadManager, DownloadStatus, DownloadTask};
 use yr_provider::{MusicProvider, YtMusicProvider};
@@ -102,6 +102,7 @@ pub struct YrApp {
 
     home_feed: HomeFeed,
     home_loading: bool,
+    active_mood_title: Option<String>,
     detail_view: DetailView,
     detail_loading: bool,
 
@@ -245,6 +246,7 @@ impl YrApp {
             suggestions_last_query: String::new(),
             home_feed: HomeFeed::default(),
             home_loading: false,
+            active_mood_title: None,
             detail_view: DetailView::None,
             detail_loading: false,
             downloads: Vec::new(),
@@ -488,12 +490,20 @@ impl YrApp {
     }
 
     fn refresh_home(&mut self, ctx: &egui::Context) {
+        self.active_mood_title = None;
+        self.refresh_home_with_params(None, ctx);
+    }
+
+    fn refresh_home_with_params(&mut self, mood_params: Option<String>, ctx: &egui::Context) {
         self.home_loading = true;
         let provider = Arc::clone(&self.provider);
         let tx = self.event_tx.clone();
         let ctx = ctx.clone();
         self.runtime.spawn(async move {
-            let res = provider.get_home_feed().await.map_err(|e| e.to_string());
+            let res = provider
+                .get_home_feed_with_params(mood_params.as_deref())
+                .await
+                .map_err(|e| e.to_string());
             let _ = tx.send(AppEvent::HomeLoaded(res));
             ctx.request_repaint();
         });
@@ -1000,25 +1010,18 @@ impl eframe::App for YrApp {
                 ui.add_space(20.0);
 
                 ui.horizontal(|ui| {
+                    let badge_center = ui.cursor().min + Vec2::new(13.0, 13.0);
+                    ui.painter().circle_filled(badge_center, 12.0, ACCENT_RED);
                     icons::draw_icon(
                         ui.painter(),
-                        egui::Rect::from_center_size(
-                            ui.cursor().min + Vec2::new(11.0, 12.0),
-                            Vec2::splat(16.0),
-                        ),
+                        egui::Rect::from_center_size(badge_center + Vec2::new(1.0, 0.0), Vec2::splat(11.0)),
                         icons::Icon::Play,
-                        ACCENT_RED,
+                        Color32::WHITE,
                     );
-                    ui.add_space(20.0);
-                    ui.label(
-                        RichText::new("YR")
-                            .size(21.0)
-                            .strong()
-                            .color(ACCENT_RED),
-                    );
+                    ui.add_space(28.0);
                     ui.label(
                         RichText::new("Music")
-                            .size(19.0)
+                            .size(21.0)
                             .strong()
                             .color(TEXT_PRIMARY),
                     );
@@ -1026,33 +1029,62 @@ impl eframe::App for YrApp {
                         if icons::icon_button(
                             ui,
                             icons::Icon::Settings,
-                            34.0,
+                            32.0,
                             18.0,
                             if self.show_settings { BG_ELEVATED } else { Color32::TRANSPARENT },
                             if self.show_settings { ACCENT_RED } else { TEXT_PRIMARY },
-                            17.0,
+                            16.0,
                         )
                         .clicked()
                         {
                             self.show_settings = !self.show_settings;
                         }
-                        let acc_fill = if self.home_feed.is_logged_in {
-                            Color32::from_rgb(26, 62, 38)
-                        } else {
-                            BG_ELEVATED
-                        };
-                        let acc_fg = if self.home_feed.is_logged_in {
-                            Color32::from_rgb(130, 235, 160)
-                        } else {
-                            TEXT_PRIMARY
-                        };
-                        let acc_label = if self.home_feed.is_logged_in { "Google" } else { "Acceder" };
-                        if icons::icon_pill_button(
+                        if self.home_feed.is_logged_in {
+                            let avatar_url = self
+                                .home_feed
+                                .account
+                                .as_ref()
+                                .and_then(|a| a.avatar_url.as_deref());
+                            if let Some(url) = avatar_url {
+                                let av = ui
+                                    .add(
+                                        Image::new(url)
+                                            .fit_to_exact_size(Vec2::splat(28.0))
+                                            .corner_radius(CornerRadius::same(14))
+                                            .sense(Sense::click()),
+                                    );
+                                if av.clicked() {
+                                    self.show_google_login = true;
+                                }
+                            } else {
+                                let initial = self
+                                    .home_feed
+                                    .account
+                                    .as_ref()
+                                    .and_then(|a| a.name.chars().next())
+                                    .unwrap_or('G')
+                                    .to_uppercase()
+                                    .to_string();
+                                if ui
+                                    .add(
+                                        egui::Button::new(
+                                            RichText::new(initial).strong().size(13.0).color(Color32::WHITE),
+                                        )
+                                        .fill(Color32::from_rgb(40, 120, 90))
+                                        .corner_radius(CornerRadius::same(14))
+                                        .min_size(Vec2::splat(28.0)),
+                                    )
+                                    .clicked()
+                                {
+                                    self.show_google_login = true;
+                                }
+                            }
+                        } else if icons::icon_pill_button(
                             ui,
                             icons::Icon::Account,
-                            acc_label,
-                            acc_fill,
-                            acc_fg,
+                            "Acceder",
+                            BG_ELEVATED,
+                            TEXT_PRIMARY,
                         )
                         .clicked()
                         {
@@ -1369,140 +1401,515 @@ impl YrApp {
         }
     }
 
-    fn render_horizontal_track_cards(
+    fn render_shelf_header(
+        &mut self,
+        ui: &mut egui::Ui,
+        ctx: &egui::Context,
+        title: &str,
+        eyebrow: Option<&str>,
+        show_avatar: bool,
+        play_tracks: Option<&[Track]>,
+    ) {
+        ui.add_space(14.0);
+        ui.horizontal(|ui| {
+            if show_avatar {
+                let avatar_url = self
+                    .home_feed
+                    .account
+                    .as_ref()
+                    .and_then(|a| a.avatar_url.as_deref());
+                if let Some(url) = avatar_url {
+                    ui.add(
+                        Image::new(url)
+                            .fit_to_exact_size(Vec2::splat(30.0))
+                            .corner_radius(CornerRadius::same(15)),
+                    );
+                } else {
+                    let (av_rect, _) = ui.allocate_exact_size(Vec2::splat(30.0), Sense::hover());
+                    ui.painter()
+                        .circle_filled(av_rect.center(), 15.0, BG_ELEVATED);
+                    icons::draw_icon(
+                        ui.painter(),
+                        egui::Rect::from_center_size(av_rect.center(), Vec2::splat(16.0)),
+                        icons::Icon::Account,
+                        TEXT_SECONDARY,
+                    );
+                }
+                ui.add_space(4.0);
+            }
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = 1.0;
+                if let Some(eb) = eyebrow {
+                    ui.label(
+                        RichText::new(eb.to_uppercase())
+                            .size(11.0)
+                            .color(TEXT_SECONDARY),
+                    );
+                }
+                ui.label(
+                    RichText::new(title)
+                        .size(19.5)
+                        .strong()
+                        .color(TEXT_PRIMARY),
+                );
+            });
+            if let Some(tracks) = play_tracks.filter(|t| !t.is_empty()) {
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    let btn = egui::Button::new(
+                        RichText::new("Reproducir todo")
+                            .size(12.0)
+                            .color(TEXT_PRIMARY),
+                    )
+                    .fill(Color32::TRANSPARENT)
+                    .stroke(Stroke::new(1.0_f32, Color32::from_rgb(72, 72, 76)))
+                    .corner_radius(CornerRadius::same(16));
+                    if ui.add(btn).clicked() {
+                        self.play_track_in_list(tracks.to_vec(), 0, ctx);
+                    }
+                });
+            }
+        });
+        ui.add_space(6.0);
+    }
+
+    fn render_compact_ytm_row(
+        &mut self,
+        ui: &mut egui::Ui,
+        ctx: &egui::Context,
+        track: &Track,
+        subtitle: &str,
+        list: &[Track],
+        index: usize,
+        col_width: f32,
+    ) {
+        let is_current = self
+            .queue
+            .lock()
+            .unwrap()
+            .current_track()
+            .map(|t| t.id == track.id)
+            .unwrap_or(false);
+        let row_bg = if is_current {
+            Color32::from_rgb(26, 26, 28)
+        } else {
+            Color32::TRANSPARENT
+        };
+        let is_downloaded = self
+            .downloads
+            .iter()
+            .any(|d| d.track.id == track.id && d.status == DownloadStatus::Completed);
+
+        egui::Frame::new()
+            .fill(row_bg)
+            .corner_radius(CornerRadius::same(8))
+            .inner_margin(egui::Margin::symmetric(4, 4))
+            .show(ui, |ui| {
+                ui.set_width(col_width);
+                ui.horizontal(|ui| {
+                    render_thumb(ui, track.thumbnail_url.as_deref(), 46.0);
+                    let text_w = (col_width - 90.0).max(110.0);
+                    let resp = ui
+                        .allocate_ui(Vec2::new(text_w, 46.0), |ui| {
+                            ui.vertical(|ui| {
+                                ui.spacing_mut().item_spacing.y = 2.0;
+                                ui.set_max_width(text_w);
+                                ui.add(
+                                    egui::Label::new(
+                                        RichText::new(&track.title)
+                                            .size(14.0)
+                                            .strong()
+                                            .color(if is_current {
+                                                ACCENT_RED
+                                            } else {
+                                                TEXT_PRIMARY
+                                            }),
+                                    )
+                                    .truncate(),
+                                );
+                                let sub_txt = if subtitle.is_empty() {
+                                    track.artist.clone()
+                                } else {
+                                    subtitle.to_string()
+                                };
+                                ui.add(
+                                    egui::Label::new(
+                                        RichText::new(sub_txt)
+                                            .size(12.0)
+                                            .color(if is_downloaded {
+                                                GREEN_OK
+                                            } else {
+                                                TEXT_SECONDARY
+                                            }),
+                                    )
+                                    .truncate(),
+                                );
+                            });
+                        })
+                        .response
+                        .interact(Sense::click());
+
+                    if resp.clicked() {
+                        self.play_track_in_list(list.to_vec(), index, ctx);
+                    }
+
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        let menu_resp = ui.menu_button("   ", |ui| {
+                            if ui.button("Reproducir ahora").clicked() {
+                                self.play_track_in_list(list.to_vec(), index, ctx);
+                                ui.close_menu();
+                            }
+                            if ui.button("Reproducir siguiente").clicked() {
+                                self.queue.lock().unwrap().enqueue_next(track.clone());
+                                self.set_banner(format!("Siguiente: {}", track.title));
+                                ui.close_menu();
+                            }
+                            let liked = self.store.is_liked(&track.id);
+                            if ui
+                                .button(if liked {
+                                    "Quitar de Me gusta"
+                                } else {
+                                    "Me gusta"
+                                })
+                                .clicked()
+                            {
+                                self.store.toggle_like(track.clone());
+                                ui.close_menu();
+                            }
+                            if ui.button("Añadir a playlist").clicked() {
+                                self.playlist_picker_track = Some(track.clone());
+                                ui.close_menu();
+                            }
+                            if !is_downloaded && ui.button("Descargar").clicked() {
+                                self.enqueue_download(track.clone(), ctx);
+                                ui.close_menu();
+                            }
+                            if ui.button("Iniciar radio").clicked() {
+                                self.start_radio(track.id.clone(), ctx);
+                                ui.close_menu();
+                            }
+                        });
+                        icons::draw_icon(
+                            ui.painter(),
+                            egui::Rect::from_center_size(
+                                menu_resp.response.rect.center(),
+                                Vec2::splat(16.0),
+                            ),
+                            icons::Icon::MoreVert,
+                            TEXT_SECONDARY,
+                        );
+                    });
+                });
+            });
+    }
+
+    fn activate_shelf_card(
+        &mut self,
+        card: &HomeShelfCard,
+        sibling_tracks: &[Track],
+        ctx: &egui::Context,
+    ) {
+        match &card.kind {
+            ShelfCardKind::Track(track) => {
+                if let Some(pos) = sibling_tracks.iter().position(|t| t.id == track.id) {
+                    self.play_track_in_list(sibling_tracks.to_vec(), pos, ctx);
+                } else {
+                    self.play_track_in_list(vec![track.clone()], 0, ctx);
+                }
+            }
+            ShelfCardKind::Album(album) => {
+                self.open_album(album.id.clone(), ctx);
+            }
+            ShelfCardKind::Playlist(pl) => {
+                self.open_playlist(pl.id.clone(), ctx);
+            }
+        }
+    }
+
+    fn render_quick_picks_4row_shelf(
         &mut self,
         ui: &mut egui::Ui,
         ctx: &egui::Context,
         salt: &str,
-        title: &str,
-        tracks: &[Track],
+        shelf: &HomeShelf,
     ) {
-        if tracks.is_empty() {
+        if shelf.tracks.is_empty() {
             return;
         }
-        ui.add_space(10.0);
-        ui.label(
-            RichText::new(title)
-                .size(18.0)
-                .strong()
-                .color(TEXT_PRIMARY),
+        self.render_shelf_header(
+            ui,
+            ctx,
+            &shelf.title,
+            shelf.eyebrow.as_deref(),
+            false,
+            Some(&shelf.tracks),
         );
-        ui.add_space(4.0);
-        let list = tracks.to_vec();
+
+        let col_width = (ui.available_width() - 48.0).clamp(248.0, 330.0);
+        let all_tracks = shelf.tracks.clone();
+        let all_cards = shelf.cards.clone();
+
         egui::ScrollArea::horizontal()
             .id_salt(salt)
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    for (idx, track) in list.iter().take(15).enumerate() {
-                        egui::Frame::new()
-                            .fill(BG_SURFACE)
-                            .corner_radius(CornerRadius::same(12))
-                            .inner_margin(8.0)
-                            .show(ui, |ui| {
-                                ui.set_width(120.0);
-                                ui.vertical(|ui| {
-                                    render_thumb(
-                                        ui,
-                                        track.thumbnail_url.as_deref(),
-                                        104.0,
-                                    );
-                                    ui.add_space(5.0);
-                                    if ui
-                                        .add(
-                                            egui::Label::new(
-                                                RichText::new(&track.title)
-                                                    .strong()
-                                                    .size(12.5)
-                                                    .color(TEXT_PRIMARY),
-                                            )
-                                            .truncate()
-                                            .sense(Sense::click()),
-                                        )
-                                        .clicked()
-                                    {
-                                        self.play_track_in_list(list.clone(), idx, ctx);
-                                    }
-                                    ui.add(
-                                        egui::Label::new(
-                                            RichText::new(&track.artist)
-                                                .size(11.0)
-                                                .color(TEXT_SECONDARY),
-                                        )
-                                        .truncate(),
-                                    );
-                                });
-                            });
+                    ui.spacing_mut().item_spacing.x = 10.0;
+                    for (chunk_idx, chunk) in all_tracks.chunks(4).enumerate() {
+                        ui.vertical(|ui| {
+                            ui.set_width(col_width);
+                            ui.spacing_mut().item_spacing.y = 2.0;
+                            for (row_i, track) in chunk.iter().enumerate() {
+                                let abs_idx = chunk_idx * 4 + row_i;
+                                let subtitle = all_cards
+                                    .get(abs_idx)
+                                    .map(|c| c.subtitle.as_str())
+                                    .unwrap_or(&track.artist);
+                                self.render_compact_ytm_row(
+                                    ui,
+                                    ctx,
+                                    track,
+                                    subtitle,
+                                    &all_tracks,
+                                    abs_idx,
+                                    col_width,
+                                );
+                            }
+                        });
                     }
                 });
             });
     }
 
-    fn render_horizontal_playlist_cards(
+    fn render_speed_dial_grid_shelf(
         &mut self,
         ui: &mut egui::Ui,
         ctx: &egui::Context,
         salt: &str,
-        title: &str,
-        playlists: &[PlaylistSummary],
+        shelf: &HomeShelf,
     ) {
-        if playlists.is_empty() {
+        if shelf.cards.is_empty() {
             return;
         }
-        ui.add_space(10.0);
-        ui.label(
-            RichText::new(title)
-                .size(18.0)
-                .strong()
-                .color(TEXT_PRIMARY),
-        );
-        ui.add_space(4.0);
+        let eyebrow: Option<String> = shelf
+            .eyebrow
+            .clone()
+            .or_else(|| self.home_feed.account.as_ref().map(|a| a.name.clone()))
+            .or_else(|| Some("PARA TI".to_string()));
+
+        self.render_shelf_header(ui, ctx, &shelf.title, eyebrow.as_deref(), true, None);
+
+        let avail = ui.available_width();
+        let gap = 8.0_f32;
+        let tile_size = ((avail - gap * 2.0 - 8.0) / 3.0).clamp(90.0, 140.0);
+        let page_width = tile_size * 3.0 + gap * 2.0;
+        let sibling_tracks = shelf.tracks.clone();
+        let pages: Vec<&[HomeShelfCard]> = shelf.cards.chunks(9).collect();
+
         egui::ScrollArea::horizontal()
             .id_salt(salt)
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    for pl in playlists.iter().take(15) {
-                        egui::Frame::new()
-                            .fill(BG_SURFACE)
-                            .corner_radius(CornerRadius::same(12))
-                            .inner_margin(8.0)
-                            .show(ui, |ui| {
-                                ui.set_width(132.0);
-                                ui.vertical(|ui| {
-                                    render_thumb(ui, pl.thumbnail_url.as_deref(), 116.0);
-                                    ui.add_space(5.0);
-                                    if ui
-                                        .add(
-                                            egui::Label::new(
-                                                RichText::new(&pl.title)
-                                                    .strong()
-                                                    .size(12.5)
-                                                    .color(TEXT_PRIMARY),
-                                            )
-                                            .truncate()
-                                            .sense(Sense::click()),
-                                        )
-                                        .clicked()
-                                    {
-                                        self.open_playlist(pl.id.clone(), ctx);
+                    ui.spacing_mut().item_spacing.x = 12.0;
+                    for page in &pages {
+                        ui.vertical(|ui| {
+                            ui.set_width(page_width);
+                            ui.spacing_mut().item_spacing.y = gap;
+                            for row in page.chunks(3) {
+                                ui.horizontal(|ui| {
+                                    ui.spacing_mut().item_spacing.x = gap;
+                                    for card in row {
+                                        let (rect, resp) = ui.allocate_exact_size(
+                                            Vec2::splat(tile_size),
+                                            Sense::click(),
+                                        );
+                                        if ui.is_rect_visible(rect) {
+                                            ui.painter().rect_filled(
+                                                rect,
+                                                CornerRadius::same(8),
+                                                BG_SURFACE,
+                                            );
+                                            if let Some(url) = &card.thumbnail_url {
+                                                ui.put(
+                                                    rect,
+                                                    Image::new(url.as_str())
+                                                        .fit_to_exact_size(Vec2::splat(tile_size))
+                                                        .corner_radius(CornerRadius::same(8)),
+                                                );
+                                            }
+                                            let overlay_rect = egui::Rect::from_min_max(
+                                                egui::pos2(rect.left(), rect.bottom() - 34.0),
+                                                rect.max,
+                                            );
+                                            ui.painter().rect_filled(
+                                                overlay_rect,
+                                                CornerRadius {
+                                                    nw: 0,
+                                                    ne: 0,
+                                                    sw: 8,
+                                                    se: 8,
+                                                },
+                                                Color32::from_rgba_unmultiplied(0, 0, 0, 175),
+                                            );
+                                            let galley = ui.painter().layout(
+                                                card.title.clone(),
+                                                egui::FontId::proportional(11.5),
+                                                Color32::WHITE,
+                                                tile_size - 12.0,
+                                            );
+                                            ui.painter().galley(
+                                                egui::pos2(
+                                                    rect.left() + 6.0,
+                                                    (rect.bottom() - galley.size().y - 5.0)
+                                                        .max(overlay_rect.top()),
+                                                ),
+                                                galley,
+                                                Color32::WHITE,
+                                            );
+                                        }
+                                        if resp.clicked() {
+                                            self.activate_shelf_card(card, &sibling_tracks, ctx);
+                                        }
                                     }
-                                    let sub = pl
-                                        .author
-                                        .clone()
-                                        .or_else(|| pl.track_count.map(|c| format!("{} canciones", c)))
-                                        .unwrap_or_else(|| "Lista".to_string());
-                                    ui.add(
-                                        egui::Label::new(
-                                            RichText::new(sub)
-                                                .size(11.0)
-                                                .color(TEXT_SECONDARY),
-                                        )
-                                        .truncate(),
-                                    );
                                 });
-                            });
+                            }
+                        });
                     }
                 });
             });
+
+        if pages.len() > 1 {
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.add_space((avail - 24.0) * 0.5);
+                for i in 0..pages.len().min(4) {
+                    let (dot_r, _) = ui.allocate_exact_size(Vec2::splat(8.0), Sense::hover());
+                    ui.painter().circle_filled(
+                        dot_r.center(),
+                        3.0,
+                        if i == 0 { Color32::WHITE } else { TEXT_SECONDARY },
+                    );
+                }
+            });
+        }
+    }
+
+    fn render_carousel_cards_shelf(
+        &mut self,
+        ui: &mut egui::Ui,
+        ctx: &egui::Context,
+        salt: &str,
+        shelf: &HomeShelf,
+    ) {
+        if shelf.cards.is_empty() {
+            return;
+        }
+        let play_tracks = if !shelf.tracks.is_empty() {
+            Some(shelf.tracks.as_slice())
+        } else {
+            None
+        };
+        self.render_shelf_header(
+            ui,
+            ctx,
+            &shelf.title,
+            shelf.eyebrow.as_deref(),
+            false,
+            play_tracks,
+        );
+
+        let card_w = 148.0_f32;
+        let sibling_tracks = shelf.tracks.clone();
+        egui::ScrollArea::horizontal()
+            .id_salt(salt)
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 12.0;
+                    for card in shelf.cards.iter().take(16) {
+                        ui.vertical(|ui| {
+                            ui.set_width(card_w);
+                            ui.spacing_mut().item_spacing.y = 4.0;
+                            let img_resp = ui
+                                .allocate_ui(Vec2::splat(card_w), |ui| {
+                                    render_thumb(ui, card.thumbnail_url.as_deref(), card_w);
+                                })
+                                .response
+                                .interact(Sense::click());
+                            if img_resp.clicked() {
+                                self.activate_shelf_card(card, &sibling_tracks, ctx);
+                            }
+                            if ui
+                                .add(
+                                    egui::Label::new(
+                                        RichText::new(&card.title)
+                                            .strong()
+                                            .size(13.5)
+                                            .color(TEXT_PRIMARY),
+                                    )
+                                    .truncate()
+                                    .sense(Sense::click()),
+                                )
+                                .clicked()
+                            {
+                                self.activate_shelf_card(card, &sibling_tracks, ctx);
+                            }
+                            if !card.subtitle.is_empty() {
+                                ui.add(
+                                    egui::Label::new(
+                                        RichText::new(&card.subtitle)
+                                            .size(11.5)
+                                            .color(TEXT_SECONDARY),
+                                    )
+                                    .truncate(),
+                                );
+                            }
+                        });
+                    }
+                });
+            });
+    }
+
+    fn synthesize_speed_dial_cards(&self) -> Vec<HomeShelfCard> {
+        let mut cards = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        if let Some(liked_pl) = self.home_feed.user_playlists.first() {
+            seen.insert(liked_pl.id.clone());
+            cards.push(HomeShelfCard {
+                title: liked_pl.title.clone(),
+                subtitle: "Lista".to_string(),
+                thumbnail_url: liked_pl.thumbnail_url.clone(),
+                kind: ShelfCardKind::Playlist(liked_pl.clone()),
+            });
+        }
+        for pl in self.home_feed.user_playlists.iter().skip(1) {
+            if seen.insert(pl.id.clone()) {
+                cards.push(HomeShelfCard {
+                    title: pl.title.clone(),
+                    subtitle: pl.author.clone().unwrap_or_default(),
+                    thumbnail_url: pl.thumbnail_url.clone(),
+                    kind: ShelfCardKind::Playlist(pl.clone()),
+                });
+            }
+        }
+        for t in self
+            .home_feed
+            .listen_again
+            .iter()
+            .chain(self.store.data.recent_tracks.iter())
+            .chain(self.home_feed.recommended_tracks.iter())
+            .chain(self.home_feed.quick_picks.iter().skip(4))
+        {
+            if cards.len() >= 18 {
+                break;
+            }
+            if seen.insert(t.id.clone()) {
+                cards.push(HomeShelfCard {
+                    title: t.title.clone(),
+                    subtitle: t.artist.clone(),
+                    thumbnail_url: t.thumbnail_url.clone(),
+                    kind: ShelfCardKind::Track(t.clone()),
+                });
+            }
+        }
+        cards
     }
 
     fn render_home(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
@@ -1514,45 +1921,65 @@ impl YrApp {
                     .id_salt("home_moods")
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 8.0;
                             for mood in moods {
+                                let is_selected =
+                                    self.active_mood_title.as_deref() == Some(mood.title.as_str());
                                 let btn = egui::Button::new(
-                                    RichText::new(&mood.title).size(13.0).color(TEXT_PRIMARY),
+                                    RichText::new(&mood.title).size(13.0).color(if is_selected {
+                                        Color32::BLACK
+                                    } else {
+                                        TEXT_PRIMARY
+                                    }),
                                 )
-                                .fill(BG_ELEVATED)
-                                .corner_radius(CornerRadius::same(16));
+                                .fill(if is_selected {
+                                    Color32::WHITE
+                                } else {
+                                    Color32::from_rgb(32, 32, 35)
+                                })
+                                .stroke(Stroke::new(1.0_f32, Color32::from_rgb(55, 55, 60)))
+                                .corner_radius(CornerRadius::same(8));
                                 if ui.add(btn).clicked() {
-                                    self.open_mood(mood.id, mood.title, ctx);
+                                    if is_selected {
+                                        self.active_mood_title = None;
+                                        self.refresh_home(ctx);
+                                    } else if mood.params.is_some() {
+                                        self.active_mood_title = Some(mood.title);
+                                        self.refresh_home_with_params(mood.params, ctx);
+                                    } else {
+                                        self.open_mood(mood.id, mood.title, ctx);
+                                    }
                                 }
                             }
                         });
                     });
-                ui.add_space(8.0);
+                ui.add_space(6.0);
             }
 
             if !self.home_feed.is_logged_in {
                 egui::Frame::new()
                     .fill(BG_SURFACE)
-                    .stroke(egui::Stroke::new(1.0_f32, Color32::from_rgb(55, 55, 60)))
-                    .corner_radius(CornerRadius::same(12))
-                    .inner_margin(12.0)
+                    .stroke(Stroke::new(1.0_f32, Color32::from_rgb(48, 48, 54)))
+                    .corner_radius(CornerRadius::same(10))
+                    .inner_margin(egui::Margin::symmetric(10, 8))
                     .show(ui, |ui| {
-                        let text_w = (ui.available_width() - 126.0).max(140.0);
+                        let text_w = (ui.available_width() - 122.0).max(140.0);
                         ui.horizontal(|ui| {
-                            ui.allocate_ui(Vec2::new(text_w, 44.0), |ui| {
+                            ui.allocate_ui(Vec2::new(text_w, 38.0), |ui| {
                                 ui.vertical(|ui| {
                                     ui.set_max_width(text_w);
                                     ui.label(
                                         RichText::new("Conecta tu cuenta de Google")
                                             .strong()
-                                            .size(14.5)
+                                            .size(13.5)
                                             .color(TEXT_PRIMARY),
                                     );
                                     ui.add(
                                         egui::Label::new(
                                             RichText::new(
-                                                "Sincroniza tus listas, historial y recomendaciones personalizadas",
+                                                "Carga tus mixes, accesos directos y listas",
                                             )
-                                            .size(11.5)
+                                            .size(11.0)
                                             .color(TEXT_SECONDARY),
                                         )
                                         .wrap(),
@@ -1574,157 +2001,69 @@ impl YrApp {
                             });
                         });
                     });
-                ui.add_space(6.0);
             }
-
-            // 1. Escuchar de nuevo (YT Music history + local recents)
-            let mut listen_again = self.home_feed.listen_again.clone();
-            for r in &self.store.data.recent_tracks {
-                if !listen_again.iter().any(|t| t.id == r.id) {
-                    listen_again.push(r.clone());
-                }
-            }
-            self.render_horizontal_track_cards(
-                ui,
-                ctx,
-                "home_listen_again",
-                "Escuchar de nuevo",
-                &listen_again,
-            );
-
-            // 2. Tus listas (YT Music saved playlists)
-            let user_playlists = self.home_feed.user_playlists.clone();
-            self.render_horizontal_playlist_cards(
-                ui,
-                ctx,
-                "home_user_playlists",
-                "Tus listas",
-                &user_playlists,
-            );
-
-            // 3. Selección rápida
-            ui.add_space(10.0);
-            ui.horizontal(|ui| {
-                ui.heading(RichText::new("Selección rápida").color(TEXT_PRIMARY));
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if icons::icon_pill_button(
-                        ui,
-                        icons::Icon::Refresh,
-                        "Actualizar",
-                        BG_ELEVATED,
-                        TEXT_PRIMARY,
-                    )
-                    .clicked()
-                    {
-                        self.refresh_home(ctx);
-                    }
-                });
-            });
 
             if self.home_loading {
+                ui.add_space(6.0);
                 ui.horizontal(|ui| {
                     ui.spinner();
-                    ui.label(RichText::new("Cargando música de YT Music...").color(TEXT_SECONDARY));
+                    ui.label(RichText::new("Cargando YouTube Music...").color(TEXT_SECONDARY));
                 });
             }
 
-            if !self.home_feed.quick_picks.is_empty() {
-                let picks = self.home_feed.quick_picks.clone();
-                for (idx, track) in picks.iter().take(12).enumerate() {
-                    self.render_track_row(ui, ctx, track, &picks, idx, false);
+            let mut shelves = self.home_feed.shelves.clone();
+            if shelves.is_empty() && !self.home_feed.quick_picks.is_empty() {
+                shelves.push(HomeShelf {
+                    title: "Selección rápida".to_string(),
+                    eyebrow: None,
+                    layout: HomeShelfLayout::QuickPicks4Row,
+                    tracks: self.home_feed.quick_picks.clone(),
+                    cards: Vec::new(),
+                });
+            }
+
+            let has_speed_dial = shelves
+                .iter()
+                .any(|s| s.layout == HomeShelfLayout::SpeedDialGrid && !s.cards.is_empty());
+
+            let mut injected_speed_dial = false;
+            for (i, shelf) in shelves.iter().enumerate() {
+                let salt = format!("home_shelf_{i}");
+                match shelf.layout {
+                    HomeShelfLayout::QuickPicks4Row => {
+                        self.render_quick_picks_4row_shelf(ui, ctx, &salt, shelf);
+                    }
+                    HomeShelfLayout::SpeedDialGrid => {
+                        self.render_speed_dial_grid_shelf(ui, ctx, &salt, shelf);
+                    }
+                    HomeShelfLayout::CarouselCards => {
+                        self.render_carousel_cards_shelf(ui, ctx, &salt, shelf);
+                    }
                 }
-            }
-
-            // 4. Recomendaciones para ti
-            let recommended = self.home_feed.recommended_tracks.clone();
-            self.render_horizontal_track_cards(
-                ui,
-                ctx,
-                "home_recommended_tracks",
-                "Recomendaciones para ti",
-                &recommended,
-            );
-
-            // 5. Listas recomendadas
-            let rec_playlists = self.home_feed.recommended_playlists.clone();
-            self.render_horizontal_playlist_cards(
-                ui,
-                ctx,
-                "home_rec_playlists",
-                "Listas recomendadas",
-                &rec_playlists,
-            );
-
-            // 6. Nuevos álbumes y sencillos
-            if !self.home_feed.new_albums.is_empty() {
-                ui.add_space(12.0);
-                ui.label(
-                    RichText::new("Nuevos álbumes y sencillos")
-                        .size(18.0)
-                        .strong()
-                        .color(TEXT_PRIMARY),
-                );
-                ui.add_space(4.0);
-                let albums = self.home_feed.new_albums.clone();
-                egui::ScrollArea::horizontal()
-                    .id_salt("home_new_albums")
-                    .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            for album in albums.iter().take(12) {
-                                egui::Frame::new()
-                                    .fill(BG_SURFACE)
-                                    .corner_radius(CornerRadius::same(12))
-                                    .inner_margin(8.0)
-                                    .show(ui, |ui| {
-                                        ui.set_width(126.0);
-                                        ui.vertical(|ui| {
-                                            render_thumb(
-                                                ui,
-                                                album.thumbnail_url.as_deref(),
-                                                110.0,
-                                            );
-                                            ui.add_space(4.0);
-                                            if ui
-                                                .add(
-                                                    egui::Label::new(
-                                                        RichText::new(&album.title)
-                                                            .strong()
-                                                            .size(13.0),
-                                                    )
-                                                    .truncate()
-                                                    .sense(Sense::click()),
-                                                )
-                                                .clicked()
-                                            {
-                                                self.open_album(album.id.clone(), ctx);
-                                            }
-                                            ui.add(
-                                                egui::Label::new(
-                                                    RichText::new(&album.artist)
-                                                        .small()
-                                                        .color(TEXT_SECONDARY),
-                                                )
-                                                .truncate(),
-                                            );
-                                        });
-                                    });
-                            }
-                        });
-                    });
-            }
-
-            // 7. Tendencias
-            if !self.home_feed.trending_tracks.is_empty() {
-                ui.add_space(12.0);
-                ui.label(
-                    RichText::new("Tendencias")
-                        .size(18.0)
-                        .strong()
-                        .color(TEXT_PRIMARY),
-                );
-                let trending = self.home_feed.trending_tracks.clone();
-                for (idx, track) in trending.iter().take(10).enumerate() {
-                    self.render_track_row(ui, ctx, track, &trending, idx, false);
+                if !has_speed_dial && !injected_speed_dial && i == 0 {
+                    injected_speed_dial = true;
+                    let sd_cards = self.synthesize_speed_dial_cards();
+                    if !sd_cards.is_empty() {
+                        let sd_shelf = HomeShelf {
+                            title: "Accesos directos".to_string(),
+                            eyebrow: self
+                                .home_feed
+                                .account
+                                .as_ref()
+                                .map(|a| a.name.to_uppercase())
+                                .or_else(|| Some("PARA TI".to_string())),
+                            layout: HomeShelfLayout::SpeedDialGrid,
+                            tracks: sd_cards
+                                .iter()
+                                .filter_map(|c| match &c.kind {
+                                    ShelfCardKind::Track(t) => Some(t.clone()),
+                                    _ => None,
+                                })
+                                .collect(),
+                            cards: sd_cards,
+                        };
+                        self.render_speed_dial_grid_shelf(ui, ctx, "home_synth_sd", &sd_shelf);
+                    }
                 }
             }
 
@@ -2363,19 +2702,6 @@ impl YrApp {
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if icons::icon_button(
                             ui,
-                            icons::Icon::ChevronUp,
-                            32.0,
-                            16.0,
-                            Color32::TRANSPARENT,
-                            TEXT_SECONDARY,
-                            16.0,
-                        )
-                        .clicked()
-                        {
-                            self.now_playing_open = true;
-                        }
-                        if icons::icon_button(
-                            ui,
                             icons::Icon::SkipNext,
                             34.0,
                             18.0,
@@ -2397,8 +2723,8 @@ impl YrApp {
                             play_icon,
                             36.0,
                             18.0,
-                            ACCENT_RED,
-                            Color32::WHITE,
+                            Color32::TRANSPARENT,
+                            TEXT_PRIMARY,
                             18.0,
                         )
                         .clicked()
@@ -2408,6 +2734,20 @@ impl YrApp {
                                 PlaybackStatus::Paused => self.audio.resume(),
                                 _ => self.play_current_queue_track(ctx),
                             }
+                        }
+                        if icons::icon_button(
+                            ui,
+                            icons::Icon::SkipPrev,
+                            34.0,
+                            18.0,
+                            Color32::TRANSPARENT,
+                            TEXT_PRIMARY,
+                            17.0,
+                        )
+                        .clicked()
+                            && self.queue.lock().unwrap().prev_track().is_some()
+                        {
+                            self.play_current_queue_track(ctx);
                         }
                     });
                 });
@@ -3298,6 +3638,13 @@ impl YrApp {
                     ui.add_space(6.0);
                     ui.label(RichText::new(err).small().color(ACCENT_RED));
                 }
+
+                ui.add_space(6.0);
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if ui.button("Cerrar").clicked() {
+                        self.show_google_login = false;
+                    }
+                });
             });
         if !open {
             self.show_google_login = false;

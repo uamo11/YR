@@ -37,9 +37,37 @@ if [ -z "$PID" ]; then
 fi
 echo "YR Music running with PID: $PID"
 
-# 1. Home tab (with moods, quick picks, new albums)
+# 1. Home tab (with moods, 4-row quick picks, Accesos directos grid, carousels)
 adb shell screencap -p /data/local/tmp/01_home.png
 adb pull /data/local/tmp/01_home.png screenshots/01_home.png
+
+# 1a. Scroll Home down to capture Accesos directos grid + personalized sections
+adb shell input swipe 540 1650 540 650 350
+sleep 2
+adb shell screencap -p /data/local/tmp/01a_home_scrolled.png
+adb pull /data/local/tmp/01a_home_scrolled.png screenshots/01a_home_scrolled.png
+adb shell input swipe 540 650 540 1650 350
+sleep 1
+
+# 1b. Open Google Login modal and WebView
+adb shell input tap 820 135
+sleep 1
+adb shell screencap -p /data/local/tmp/01b_google_login_modal.png
+adb pull /data/local/tmp/01b_google_login_modal.png screenshots/01b_google_login_modal.png
+# Tap "Iniciar sesión con Google" inside modal
+adb shell input tap 450 1120
+sleep 5
+adb shell screencap -p /data/local/tmp/01c_google_webview.png
+adb pull /data/local/tmp/01c_google_webview.png screenshots/01c_google_webview.png
+adb logcat -d | grep -i "YR_LOGIN" || true
+# Close WebView dialog via hardware BACK (or top-right Cerrar fallback) and close modal
+adb shell input keyevent 4
+sleep 1
+adb shell input tap 960 155 || true
+sleep 1
+# Tap modal close X button (centered 280..320dp dialog -> top-right X)
+adb shell input tap 890 830 || true
+sleep 1
 
 # 2. Search tab (second column at bottom nav)
 adb shell input tap 405 2160

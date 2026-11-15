@@ -124,6 +124,8 @@ pub struct ArtistDetail {
 pub struct MoodGenre {
     pub id: String,
     pub title: String,
+    #[serde(default)]
+    pub params: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -131,6 +133,44 @@ pub struct GoogleDeviceAuth {
     pub user_code: String,
     pub verification_url: String,
     pub interval_secs: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GoogleAccountInfo {
+    pub name: String,
+    pub handle: Option<String>,
+    pub avatar_url: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ShelfCardKind {
+    Track(Track),
+    Album(AlbumSummary),
+    Playlist(PlaylistSummary),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HomeShelfCard {
+    pub title: String,
+    pub subtitle: String,
+    pub thumbnail_url: Option<String>,
+    pub kind: ShelfCardKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum HomeShelfLayout {
+    QuickPicks4Row,
+    CarouselCards,
+    SpeedDialGrid,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HomeShelf {
+    pub title: String,
+    pub eyebrow: Option<String>,
+    pub layout: HomeShelfLayout,
+    pub tracks: Vec<Track>,
+    pub cards: Vec<HomeShelfCard>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -150,6 +190,12 @@ pub struct HomeFeed {
     pub moods: Vec<MoodGenre>,
     #[serde(default)]
     pub is_logged_in: bool,
+    #[serde(default)]
+    pub account: Option<GoogleAccountInfo>,
+    #[serde(default)]
+    pub shelves: Vec<HomeShelf>,
+    #[serde(default)]
+    pub speed_dial: Vec<HomeShelfCard>,
 }
 
 /// Resolved direct audio stream metadata.

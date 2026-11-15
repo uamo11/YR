@@ -4850,8 +4850,13 @@ name = "yr-provider"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "chrono",
+ "reqwest",
  "rquickjs-sys",
  "rustypipe",
+ "serde",
+ "serde_json",
+ "sha1",
  "thiserror 2.0.21",
  "tokio",
  "tracing",

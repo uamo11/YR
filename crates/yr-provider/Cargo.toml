@@ -7,7 +7,12 @@ license.workspace = true
 [dependencies]
 yr-core = { path = "../yr-core" }
 async-trait.workspace = true
+chrono.workspace = true
+reqwest.workspace = true
 rustypipe.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha1 = "0.10"
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true

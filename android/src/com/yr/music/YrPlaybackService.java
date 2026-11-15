@@ -217,11 +217,51 @@ public class YrPlaybackService extends Service {
         return finalUrl;
     }
 
+    private static String mergeYoutubeCookies() {
+        CookieManager cm = CookieManager.getInstance();
+        cm.flush();
+        String cMusic = cm.getCookie("https://music.youtube.com");
+        String cMain = cm.getCookie("https://www.youtube.com");
+        java.util.LinkedHashMap<String, String> map = new java.util.LinkedHashMap<>();
+        for (String src : new String[]{cMain, cMusic}) {
+            if (src == null || src.isEmpty()) continue;
+            for (String part : src.split(";")) {
+                int eq = part.indexOf('=');
+                if (eq > 0) {
+                    String k = part.substring(0, eq).trim();
+                    String v = part.substring(eq + 1).trim();
+                    if (!k.isEmpty() && !v.isEmpty()) {
+                        map.put(k, v);
+                    }
+                }
+            }
+        }
+        StringBuilder sb = new StringBuilder();
+        for (java.util.Map.Entry<String, String> e : map.entrySet()) {
+            if (sb.length() > 0) sb.append("; ");
+            sb.append(e.getKey()).append("=").append(e.getValue());
+        }
+        return sb.toString();
+    }
+
+    private static boolean hasGoogleAuthCookies(String cookies) {
+        if (cookies == null || cookies.isEmpty()) return false;
+        boolean hasSapi = cookies.contains("SAPISID=")
+                || cookies.contains("__Secure-3PAPISID=")
+                || cookies.contains("__Secure-1PAPISID=");
+        boolean hasSid = cookies.contains("SID=")
+                || cookies.contains("__Secure-3PSID=")
+                || cookies.contains("LOGIN_INFO=");
+        return hasSapi && hasSid;
+    }
+
     public static void openGoogleLogin(final Context ctx) {
+        Log.i("YR_LOGIN", "openGoogleLogin called");
         if (ctx == null) return;
         new Handler(Looper.getMainLooper()).post(() -> {
             try {
                 final Dialog dialog = new Dialog(ctx, android.R.style.Theme_Black_NoTitleBar_Fullscreen);
+                dialog.setCancelable(true);
                 LinearLayout root = new LinearLayout(ctx);
                 root.setOrientation(LinearLayout.VERTICAL);
                 root.setBackgroundColor(0xFF0A0A0A);
@@ -229,14 +269,18 @@ public class YrPlaybackService extends Service {
                 LinearLayout bar = new LinearLayout(ctx);
                 bar.setOrientation(LinearLayout.HORIZONTAL);
                 bar.setBackgroundColor(0xFF181818);
-                bar.setPadding(24, 16, 24, 16);
+                bar.setPadding(24, 18, 24, 18);
 
                 TextView title = new TextView(ctx);
-                title.setText("Conectar cuenta de Google");
+                title.setText("Conectar Google / YT Music");
                 title.setTextColor(0xFFFFFFFF);
                 title.setTextSize(16);
                 LinearLayout.LayoutParams tp = new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.0f);
                 bar.addView(title, tp);
+
+                Button doneBtn = new Button(ctx);
+                doneBtn.setText("Listo");
+                bar.addView(doneBtn);
 
                 Button closeBtn = new Button(ctx);
                 closeBtn.setText("Cerrar");
@@ -250,9 +294,44 @@ public class YrPlaybackService extends Service {
                 WebSettings ws = wv.getSettings();
                 ws.setJavaScriptEnabled(true);
                 ws.setDomStorageEnabled(true);
+                ws.setDatabaseEnabled(true);
+                ws.setSupportMultipleWindows(false);
+                String defaultUa = WebSettings.getDefaultUserAgent(ctx);
+                String cleanUa = defaultUa != null
+                        ? defaultUa.replace("; wv)", ")").replace(" wv)", ")")
+                        : "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36";
+                ws.setUserAgentString(cleanUa);
+
                 CookieManager cm = CookieManager.getInstance();
                 cm.setAcceptCookie(true);
                 cm.setAcceptThirdPartyCookies(wv, true);
+
+                final java.util.concurrent.atomic.AtomicBoolean sent = new java.util.concurrent.atomic.AtomicBoolean(false);
+                final Runnable tryCapture = () -> {
+                    if (sent.get()) return;
+                    String merged = mergeYoutubeCookies();
+                    if (hasGoogleAuthCookies(merged)) {
+                        if (sent.compareAndSet(false, true)) {
+                            Log.i("YR_LOGIN", "Captured Google cookies len=" + merged.length());
+                            nativeOnGoogleCookie(merged);
+                            try {
+                                wv.stopLoading();
+                                wv.destroy();
+                            } catch (Throwable ignored) {
+                            }
+                            dialog.dismiss();
+                        }
+                    }
+                };
+
+                doneBtn.setOnClickListener(v -> {
+                    String merged = mergeYoutubeCookies();
+                    if (hasGoogleAuthCookies(merged)) {
+                        tryCapture.run();
+                    } else {
+                        title.setText("Inicia sesión en Google primero");
+                    }
+                });
 
                 closeBtn.setOnClickListener(v -> {
                     try {
@@ -263,24 +342,39 @@ public class YrPlaybackService extends Service {
                     dialog.dismiss();
                 });
 
+                dialog.setOnKeyListener((d, keyCode, event) -> {
+                    if (keyCode == android.view.KeyEvent.KEYCODE_BACK
+                            && event.getAction() == android.view.KeyEvent.ACTION_UP) {
+                        if (wv.canGoBack()) {
+                            wv.goBack();
+                        } else {
+                            try {
+                                wv.stopLoading();
+                                wv.destroy();
+                            } catch (Throwable ignored) {
+                            }
+                            d.dismiss();
+                        }
+                        return true;
+                    }
+                    return false;
+                });
+
                 wv.setWebViewClient(new WebViewClient() {
-                    private boolean sent = false;
+                    @Override
+                    public void doUpdateVisitedHistory(WebView view, String url, boolean isReload) {
+                        super.doUpdateVisitedHistory(view, url, isReload);
+                        Log.i("YR_LOGIN", "Visited: " + url);
+                        if (url != null && url.startsWith("https://music.youtube.com")) {
+                            tryCapture.run();
+                        }
+                    }
 
                     @Override
                     public void onPageFinished(WebView view, String url) {
-                        if (sent) return;
-                        try {
-                            if (url != null && url.contains("music.youtube.com")) {
-                                String cookies = CookieManager.getInstance().getCookie("https://music.youtube.com");
-                                if (cookies != null && (cookies.contains("SAPISID=") || cookies.contains("__Secure-3PAPISID="))) {
-                                    sent = true;
-                                    nativeOnGoogleCookie(cookies);
-                                    wv.stopLoading();
-                                    wv.destroy();
-                                    dialog.dismiss();
-                                }
-                            }
-                        } catch (Throwable ignored) {
+                        Log.i("YR_LOGIN", "Finished: " + url);
+                        if (url != null && url.startsWith("https://music.youtube.com")) {
+                            tryCapture.run();
                         }
                     }
                 });
@@ -291,9 +385,9 @@ public class YrPlaybackService extends Service {
                 ));
                 dialog.setContentView(root);
                 dialog.show();
-                wv.loadUrl("https://accounts.google.com/ServiceLogin?continue=https%3A%2F%2Fmusic.youtube.com");
+                wv.loadUrl("https://accounts.google.com/ServiceLogin?service=youtube&uilel=3&passive=true&continue=https%3A%2F%2Fmusic.youtube.com%2F");
             } catch (Throwable t) {
-                Log.e("YR_WEB", "openGoogleLogin failed", t);
+                Log.e("YR_LOGIN", "openGoogleLogin failed", t);
             }
         });
     }
