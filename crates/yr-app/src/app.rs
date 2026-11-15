@@ -3855,32 +3855,14 @@ impl YrApp {
                                                         grip_color,
                                                     );
                                                 }
-                                                if grip_resp.dragged() {
-                                                    let delta_y = grip_resp.drag_delta().y;
-                                                    let mut accum = ui.data_mut(|d| {
-                                                        let v = d.get_temp::<f32>(drag_id).unwrap_or(0.0)
-                                                            + delta_y;
-                                                        d.insert_temp(drag_id, v);
-                                                        v
-                                                    });
-                                                    const STEP_PX: f32 = 38.0;
-                                                    if accum >= STEP_PX && order_pos + 1 < total_ordered {
-                                                        self.queue
-                                                            .lock()
-                                                            .unwrap()
-                                                            .move_in_order(order_pos, 1);
-                                                        accum -= STEP_PX;
-                                                        ui.data_mut(|d| d.insert_temp(drag_id, accum));
-                                                    } else if accum <= -STEP_PX && order_pos > 0 {
-                                                        self.queue
-                                                            .lock()
-                                                            .unwrap()
-                                                            .move_in_order(order_pos, -1);
-                                                        accum += STEP_PX;
-                                                        ui.data_mut(|d| d.insert_temp(drag_id, accum));
-                                                    }
-                                                } else if grip_resp.drag_stopped() {
-                                                    ui.data_mut(|d| d.remove::<f32>(drag_id));
+                                                let step = consume_vertical_drag_step(
+                                                    ui, drag_id, &grip_resp, 38.0, false,
+                                                );
+                                                if step != 0 {
+                                                    self.queue
+                                                        .lock()
+                                                        .unwrap()
+                                                        .move_in_order(order_pos, step as isize);
                                                 }
 
                                                 let row_start = ui.next_widget_position();
@@ -4605,29 +4587,23 @@ impl YrApp {
                         self.now_playing_open = false;
                     }
                 }
-                let handle_drag_id = egui::Id::new("yr_player_handle_drag");
-                if handle_resp.dragged() {
-                    let accum = ui.data_mut(|d| {
-                        let v = d.get_temp::<f32>(handle_drag_id).unwrap_or(0.0)
-                            + handle_resp.drag_delta().y;
-                        d.insert_temp(handle_drag_id, v);
-                        v
-                    });
-                    if accum >= 32.0 {
-                        if drawer_open {
-                            self.show_queue = false;
-                            self.show_lyrics = false;
-                            self.show_related = false;
-                        } else {
-                            self.now_playing_open = false;
-                        }
-                        ui.data_mut(|d| d.insert_temp(handle_drag_id, 0.0_f32));
-                    } else if accum <= -32.0 && !drawer_open {
-                        self.show_queue = true;
-                        ui.data_mut(|d| d.insert_temp(handle_drag_id, 0.0_f32));
+                let step = consume_vertical_drag_step(
+                    ui,
+                    egui::Id::new("yr_player_handle_drag"),
+                    &handle_resp,
+                    32.0,
+                    true,
+                );
+                if step > 0 {
+                    if drawer_open {
+                        self.show_queue = false;
+                        self.show_lyrics = false;
+                        self.show_related = false;
+                    } else {
+                        self.now_playing_open = false;
                     }
-                } else if handle_resp.drag_stopped() {
-                    ui.data_mut(|d| d.remove::<f32>(handle_drag_id));
+                } else if step < 0 && !drawer_open {
+                    self.show_queue = true;
                 }
             });
             ui.add_space(6.0);
@@ -5474,6 +5450,45 @@ impl YrApp {
         if close_modal {
             self.show_google_login = false;
         }
+    }
+}
+
+/// Accumulates vertical drag delta without nesting `egui::Context` locks.
+/// Returns `1` when dragged downward past `threshold`, `-1` upward, or `0`.
+/// When `single_shot` is true, latches until pointer release so one swipe triggers once.
+fn consume_vertical_drag_step(
+    ui: &egui::Ui,
+    id: egui::Id,
+    resp: &egui::Response,
+    threshold: f32,
+    single_shot: bool,
+) -> i32 {
+    if resp.dragged() {
+        // Read drag_delta before `ui.data_mut` so Context read & write locks never nest.
+        let delta_y = resp.drag_delta().y;
+        ui.data_mut(|d| {
+            let prev = d.get_temp::<f32>(id).unwrap_or(0.0);
+            if prev.is_nan() {
+                return 0;
+            }
+            let mut accum = prev + delta_y;
+            let step = if accum >= threshold {
+                accum = if single_shot { f32::NAN } else { accum - threshold };
+                1
+            } else if accum <= -threshold {
+                accum = if single_shot { f32::NAN } else { accum + threshold };
+                -1
+            } else {
+                0
+            };
+            d.insert_temp(id, accum);
+            step
+        })
+    } else if resp.drag_stopped() {
+        ui.data_mut(|d| d.remove::<f32>(id));
+        0
+    } else {
+        0
     }
 }
 
