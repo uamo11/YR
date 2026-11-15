@@ -118,7 +118,7 @@ pub struct YrApp {
     sleep_after_track: bool,
     playlist_picker_track: Option<Track>,
 
-    last_finished_counter: u64,
+    last_finished_counter: Arc<std::sync::atomic::AtomicU64>,
     last_media_sync: Option<(String, bool, Instant)>,
     status_banner: Option<(String, Instant)>,
     seeking_secs: Option<f64>,
@@ -241,7 +241,7 @@ impl YrApp {
             sleep_timer_until: None,
             sleep_after_track: false,
             playlist_picker_track: None,
-            last_finished_counter: 0,
+            last_finished_counter: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             last_media_sync: None,
             status_banner: None,
             seeking_secs: None,
@@ -339,6 +339,56 @@ impl YrApp {
                 }
                 let _ = ev_tx_bg.send(AppEvent::MediaAction(act));
                 ctx_bg.request_repaint();
+            }
+        });
+
+        let audio_tick = app.audio.clone();
+        let queue_tick = Arc::clone(&app.queue);
+        let dl_tick = Arc::clone(&app.downloader);
+        let provider_tick = Arc::clone(&app.provider);
+        let ev_tx_tick = app.event_tx.clone();
+        let ctx_tick = cc.egui_ctx.clone();
+        let fin_tick = Arc::clone(&app.last_finished_counter);
+        app.runtime.spawn(async move {
+            use std::sync::atomic::Ordering;
+            let mut interval = tokio::time::interval(Duration::from_secs(1));
+            loop {
+                interval.tick().await;
+                let snap = audio_tick.snapshot();
+                if snap.finished_counter > fin_tick.load(Ordering::SeqCst) {
+                    fin_tick.store(snap.finished_counter, Ordering::SeqCst);
+                    let next = queue_tick.lock().ok().and_then(|mut q| q.next_track(false).cloned());
+                    if let Some(track) = next {
+                        play_track_bg(
+                            track,
+                            quality_bg,
+                            Arc::clone(&dl_tick),
+                            Arc::clone(&provider_tick),
+                            audio_tick.clone(),
+                            ev_tx_tick.clone(),
+                            ctx_tick.clone(),
+                        )
+                        .await;
+                        continue;
+                    }
+                }
+                if snap.status == PlaybackStatus::Playing {
+                    if let Some(t) = queue_tick.lock().ok().and_then(|q| q.current_track().cloned()) {
+                        let pos_ms = (snap.position_secs * 1000.0).max(0.0) as u64;
+                        let dur_ms = snap
+                            .duration_secs
+                            .or(t.duration_secs.map(|d| d as f64))
+                            .map(|d| (d * 1000.0).max(0.0) as u64)
+                            .unwrap_or(0);
+                        crate::android_media::update_playback(
+                            &t.title,
+                            &t.artist,
+                            true,
+                            pos_ms,
+                            dur_ms,
+                        );
+                    }
+                }
             }
         });
 
@@ -756,8 +806,9 @@ impl YrApp {
         }
 
         let snap = self.audio.snapshot();
-        if snap.finished_counter > self.last_finished_counter {
-            self.last_finished_counter = snap.finished_counter;
+        if snap.finished_counter > self.last_finished_counter.load(std::sync::atomic::Ordering::SeqCst) {
+            self.last_finished_counter
+                .store(snap.finished_counter, std::sync::atomic::Ordering::SeqCst);
             if self.sleep_after_track {
                 self.sleep_after_track = false;
                 self.audio.pause();
@@ -1445,8 +1496,10 @@ impl YrApp {
             ui.heading("Biblioteca");
 
             ui.horizontal(|ui| {
+                let input_w = (ui.available_width() - 88.0).max(120.0);
                 ui.add(
                     egui::TextEdit::singleline(&mut self.new_playlist_name)
+                        .desired_width(input_w)
                         .hint_text("Nueva playlist..."),
                 );
                 if ui.button("+ Crear").clicked() && !self.new_playlist_name.trim().is_empty() {
