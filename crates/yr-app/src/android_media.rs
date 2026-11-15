@@ -128,10 +128,20 @@ mod imp {
     }
 
     pub fn resolve_audio_url(video_id: &str) -> Option<String> {
-        let bridge = BRIDGE.get()?;
-        let mut env = bridge.vm.attach_current_thread().ok()?;
+        let Some(bridge) = BRIDGE.get() else {
+            log::warn!("android_media: resolve_audio_url BRIDGE not initialized");
+            return None;
+        };
+        let mut env = match bridge.vm.attach_current_thread() {
+            Ok(e) => e,
+            Err(err) => {
+                log::warn!("android_media: attach_current_thread failed: {err:?}");
+                return None;
+            }
+        };
         let j_vid = env.new_string(video_id).ok()?;
         let service_cls: &JClass = bridge.service_class.as_obj().into();
+        log::info!("android_media: calling YrPlaybackService.resolveAudioUrl({video_id})");
         let res = env.call_static_method(
             service_cls,
             "resolveAudioUrl",

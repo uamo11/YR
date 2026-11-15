@@ -6,6 +6,13 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
+use symphonia::core::audio::{SampleBuffer, SignalSpec};
+use symphonia::core::codecs::{DecoderOptions, CODEC_TYPE_NULL};
+use symphonia::core::errors::Error as SymphoniaError;
+use symphonia::core::formats::{FormatOptions, FormatReader};
+use symphonia::core::io::{MediaSource, MediaSourceStream};
+use symphonia::core::meta::MetadataOptions;
+use symphonia::core::probe::Hint;
 use yr_core::PlaybackStatus;
 
 #[derive(Debug, Clone)]
@@ -227,12 +234,8 @@ fn audio_thread_main(
                     let cache_file = cache_dir.join(format!("stream_{track_id}.tmp"));
 
                     match open_progressive_stream(&runtime, &url, cache_file, cancel) {
-                        Ok(reader) => {
-                            let decoded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
-                                || Decoder::new(BufReader::new(reader)),
-                            ));
-                            match decoded {
-                                Ok(Ok(decoder)) => {
+                        Ok(reader) => match SymphoniaStreamDecoder::new(Box::new(reader)) {
+                            Ok(decoder) => {
                                 let dur = decoder
                                     .total_duration()
                                     .map(|d| d.as_secs_f64())
@@ -257,17 +260,10 @@ fn audio_thread_main(
                                     }
                                 }
                             }
-                                Ok(Err(e)) => {
-                                    set_status(&snapshot, PlaybackStatus::Error(e.to_string()));
-                                }
-                                Err(_) => {
-                                    set_status(
-                                        &snapshot,
-                                        PlaybackStatus::Error("Decoder panic".to_string()),
-                                    );
-                                }
+                            Err(e) => {
+                                set_status(&snapshot, PlaybackStatus::Error(e));
                             }
-                        }
+                        },
                         Err(e) => {
                             set_status(&snapshot, PlaybackStatus::Error(e));
                         }
@@ -445,6 +441,159 @@ impl Seek for ProgressiveFileReader {
         let target_u64 = target as u64;
         self.pos = target_u64;
         Ok(self.pos)
+    }
+}
+
+impl MediaSource for ProgressiveFileReader {
+    fn is_seekable(&self) -> bool {
+        false
+    }
+
+    fn byte_len(&self) -> Option<u64> {
+        None
+    }
+}
+
+struct SymphoniaStreamDecoder {
+    format: Box<dyn FormatReader>,
+    decoder: Box<dyn symphonia::core::codecs::Decoder>,
+    track_id: u32,
+    spec: SignalSpec,
+    samples: Vec<i16>,
+    sample_idx: usize,
+    total_duration: Option<Duration>,
+    eof: bool,
+}
+
+impl SymphoniaStreamDecoder {
+    fn new(source: Box<dyn MediaSource>) -> Result<Self, String> {
+        let mss = MediaSourceStream::new(source, Default::default());
+        let mut hint = Hint::new();
+        hint.with_extension("m4a");
+        let probed = symphonia::default::get_probe()
+            .format(
+                &hint,
+                mss,
+                &FormatOptions {
+                    enable_gapless: true,
+                    ..Default::default()
+                },
+                &MetadataOptions::default(),
+            )
+            .map_err(|e| e.to_string())?;
+
+        let track = probed
+            .format
+            .tracks()
+            .iter()
+            .find(|t| t.codec_params.codec != CODEC_TYPE_NULL)
+            .ok_or_else(|| "Sin pista de audio compatible".to_string())?;
+        let track_id = track.id;
+        let codec_params = track.codec_params.clone();
+        let total_duration = codec_params
+            .time_base
+            .zip(codec_params.n_frames)
+            .map(|(tb, frames)| {
+                let t = tb.calc_time(frames);
+                Duration::from_secs(t.seconds) + Duration::from_secs_f64(t.frac)
+            });
+
+        let decoder = symphonia::default::get_codecs()
+            .make(&codec_params, &DecoderOptions::default())
+            .map_err(|e| e.to_string())?;
+
+        let spec = SignalSpec::new(
+            codec_params.sample_rate.unwrap_or(44_100),
+            codec_params
+                .channels
+                .unwrap_or_else(|| symphonia::core::audio::Channels::FRONT_LEFT | symphonia::core::audio::Channels::FRONT_RIGHT),
+        );
+
+        let mut out = Self {
+            format: probed.format,
+            decoder,
+            track_id,
+            spec,
+            samples: Vec::new(),
+            sample_idx: 0,
+            total_duration,
+            eof: false,
+        };
+        out.decode_next_packet();
+        Ok(out)
+    }
+
+    fn decode_next_packet(&mut self) -> bool {
+        self.samples.clear();
+        self.sample_idx = 0;
+        loop {
+            let packet = match self.format.next_packet() {
+                Ok(p) => p,
+                Err(SymphoniaError::ResetRequired) => {
+                    self.decoder.reset();
+                    continue;
+                }
+                Err(_) => {
+                    self.eof = true;
+                    return false;
+                }
+            };
+            if packet.track_id() != self.track_id {
+                continue;
+            }
+            match self.decoder.decode(&packet) {
+                Ok(decoded) => {
+                    let spec = *decoded.spec();
+                    if spec.channels.count() > 0 && spec.rate > 0 {
+                        self.spec = spec;
+                    }
+                    let mut buf = SampleBuffer::<i16>::new(decoded.capacity() as u64, spec);
+                    buf.copy_interleaved_ref(decoded);
+                    self.samples.extend_from_slice(buf.samples());
+                    if !self.samples.is_empty() {
+                        return true;
+                    }
+                }
+                Err(SymphoniaError::DecodeError(_)) => continue,
+                Err(_) => {
+                    self.eof = true;
+                    return false;
+                }
+            }
+        }
+    }
+}
+
+impl Iterator for SymphoniaStreamDecoder {
+    type Item = i16;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.sample_idx >= self.samples.len() {
+            if self.eof || !self.decode_next_packet() {
+                return None;
+            }
+        }
+        let s = self.samples[self.sample_idx];
+        self.sample_idx += 1;
+        Some(s)
+    }
+}
+
+impl Source for SymphoniaStreamDecoder {
+    fn current_frame_len(&self) -> Option<usize> {
+        Some(self.samples.len().saturating_sub(self.sample_idx))
+    }
+
+    fn channels(&self) -> u16 {
+        self.spec.channels.count().max(1) as u16
+    }
+
+    fn sample_rate(&self) -> u32 {
+        self.spec.rate.max(1)
+    }
+
+    fn total_duration(&self) -> Option<Duration> {
+        self.total_duration
     }
 }
 
