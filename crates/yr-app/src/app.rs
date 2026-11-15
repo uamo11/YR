@@ -385,51 +385,66 @@ impl YrApp {
             use crate::android_media::MediaAction;
             while let Some(act) = media_rx.recv().await {
                 match act {
-                    MediaAction::Play => {
-                        audio_bg.resume();
-                        if let Some(t) = queue_bg.lock().ok().and_then(|q| q.current_track().cloned()) {
+                    MediaAction::Play | MediaAction::Pause | MediaAction::Toggle => {
+                        let playing_now = match act {
+                            MediaAction::Play => {
+                                audio_bg.resume();
+                                true
+                            }
+                            MediaAction::Pause => {
+                                audio_bg.pause();
+                                false
+                            }
+                            MediaAction::Toggle => {
+                                let was_playing =
+                                    audio_bg.snapshot().status == PlaybackStatus::Playing;
+                                if was_playing {
+                                    audio_bg.pause();
+                                } else {
+                                    audio_bg.resume();
+                                }
+                                !was_playing
+                            }
+                            _ => false,
+                        };
+                        if let Some(t) =
+                            queue_bg.lock().ok().and_then(|q| q.current_track().cloned())
+                        {
                             let snap = audio_bg.snapshot();
+                            let dur_ms = snap
+                                .duration_secs
+                                .map(|d| (d * 1000.0).max(0.0) as u64)
+                                .or_else(|| t.duration_secs.map(|d| d * 1000))
+                                .unwrap_or(0);
                             crate::android_media::update_playback(
                                 &t.title,
                                 &t.artist,
-                                true,
-                                (snap.position_secs * 1000.0) as u64,
-                                t.duration_secs.unwrap_or(0) * 1000,
+                                playing_now,
+                                (snap.position_secs * 1000.0).max(0.0) as u64,
+                                dur_ms,
                             );
                         }
                     }
-                    MediaAction::Pause => {
-                        audio_bg.pause();
-                        if let Some(t) = queue_bg.lock().ok().and_then(|q| q.current_track().cloned()) {
+                    MediaAction::SeekMs(ms) => {
+                        audio_bg.seek(Duration::from_millis(ms));
+                        if let Some(t) =
+                            queue_bg.lock().ok().and_then(|q| q.current_track().cloned())
+                        {
                             let snap = audio_bg.snapshot();
+                            let dur_ms = snap
+                                .duration_secs
+                                .map(|d| (d * 1000.0).max(0.0) as u64)
+                                .or_else(|| t.duration_secs.map(|d| d * 1000))
+                                .unwrap_or(0);
                             crate::android_media::update_playback(
                                 &t.title,
                                 &t.artist,
-                                false,
-                                (snap.position_secs * 1000.0) as u64,
-                                t.duration_secs.unwrap_or(0) * 1000,
+                                snap.status == PlaybackStatus::Playing,
+                                ms,
+                                dur_ms,
                             );
                         }
                     }
-                    MediaAction::Toggle => {
-                        let was_playing = audio_bg.snapshot().status == PlaybackStatus::Playing;
-                        if was_playing {
-                            audio_bg.pause();
-                        } else {
-                            audio_bg.resume();
-                        }
-                        if let Some(t) = queue_bg.lock().ok().and_then(|q| q.current_track().cloned()) {
-                            let snap = audio_bg.snapshot();
-                            crate::android_media::update_playback(
-                                &t.title,
-                                &t.artist,
-                                !was_playing,
-                                (snap.position_secs * 1000.0) as u64,
-                                t.duration_secs.unwrap_or(0) * 1000,
-                            );
-                        }
-                    }
-                    MediaAction::SeekMs(ms) => audio_bg.seek(Duration::from_millis(ms)),
                     MediaAction::Stop => audio_bg.stop(),
                     MediaAction::Next => {
                         let next = queue_bg.lock().ok().and_then(|mut q| q.next_track(true).cloned());
@@ -1272,7 +1287,7 @@ impl YrApp {
                     id != &track.id
                         || *prev_playing != is_playing
                         || (*prev_dur_ms == 0 && dur_ms > 0)
-                        || (is_playing && at.elapsed() >= Duration::from_secs(2))
+                        || (is_playing && at.elapsed() >= Duration::from_secs(8))
                 }
                 None => true,
             };
@@ -2037,9 +2052,9 @@ impl YrApp {
                                     egui::pos2(rect.left(), rect.bottom() - overlay_h),
                                     rect.max,
                                 );
-                                // Smooth multi-band bottom scrim so cover artwork text never clashes.
-                                let band_h = 6.5;
-                                for (idx, alpha) in [32_u8, 84, 145, 200].into_iter().enumerate() {
+                                // Strong multi-band bottom scrim so bold cover art letters never clash with card titles.
+                                let band_h = 7.0;
+                                for (idx, alpha) in [48_u8, 115, 185, 232].into_iter().enumerate() {
                                     let band_bottom = overlay_rect.top() - (3 - idx) as f32 * band_h;
                                     let band_top = (band_bottom - band_h).max(rect.top());
                                     if band_bottom > band_top {
@@ -2061,7 +2076,7 @@ impl YrApp {
                                         sw: 8,
                                         se: 8,
                                     },
-                                    Color32::from_rgba_unmultiplied(0, 0, 0, 232),
+                                    Color32::from_rgba_unmultiplied(0, 0, 0, 248),
                                 );
                                 let clipped_painter = ui.painter().with_clip_rect(overlay_rect);
                                 clipped_painter.galley(
@@ -3886,9 +3901,18 @@ impl YrApp {
                                                             tw,
                                                             2,
                                                         );
+                                                        let q_sub = match t.duration_secs.filter(|&s| s > 0) {
+                                                            Some(s) => format!(
+                                                                "{} • {}:{:02}",
+                                                                t.artist,
+                                                                s / 60,
+                                                                s % 60
+                                                            ),
+                                                            None => t.artist.clone(),
+                                                        };
                                                         ui.add(
                                                             egui::Label::new(
-                                                                RichText::new(&t.artist)
+                                                                RichText::new(q_sub)
                                                                     .size(12.0)
                                                                     .color(Color32::from_white_alpha(175)),
                                                             )
@@ -4430,6 +4454,7 @@ impl YrApp {
                         if resp.drag_stopped() {
                             self.audio.seek(Duration::from_secs_f64(pos));
                             self.seeking_secs = None;
+                            self.last_media_sync = None;
                         }
                     });
 

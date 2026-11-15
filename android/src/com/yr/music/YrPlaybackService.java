@@ -60,6 +60,9 @@ public class YrPlaybackService extends Service {
     private static volatile long currentDurMs = 0;
     private static volatile String currentArtworkUrl = "";
     private static volatile Bitmap currentArtworkBitmap = null;
+    private static volatile YrPlaybackService activeInstance = null;
+    private static volatile String lastMetaKey = "";
+    private static volatile Boolean lastNotifPlaying = null;
 
     static {
         try {
@@ -73,6 +76,12 @@ public class YrPlaybackService extends Service {
 
     private MediaSession mediaSession;
     private PowerManager.WakeLock wakeLock;
+
+    private static String buildMetaKey() {
+        Bitmap art = currentArtworkBitmap;
+        int artId = (art != null && !art.isRecycled()) ? System.identityHashCode(art) : 0;
+        return currentTitle + "\0" + currentArtist + "\0" + currentDurMs + "\0" + artId;
+    }
 
     public static void updatePlayback(
             Context ctx,
@@ -88,6 +97,16 @@ public class YrPlaybackService extends Service {
         currentPlaying = playing;
         currentPosMs = posMs;
         currentDurMs = durMs;
+
+        YrPlaybackService svc = activeInstance;
+        String metaKey = buildMetaKey();
+        if (svc != null
+                && metaKey.equals(lastMetaKey)
+                && lastNotifPlaying != null
+                && lastNotifPlaying.booleanValue() == playing) {
+            svc.publishPlaybackState();
+            return;
+        }
 
         Intent intent = new Intent(ctx, YrPlaybackService.class);
         intent.setAction(ACTION_UPDATE);
@@ -546,6 +565,9 @@ public class YrPlaybackService extends Service {
             }
         });
         mediaSession.setActive(true);
+        activeInstance = this;
+        lastMetaKey = "";
+        lastNotifPlaying = null;
     }
 
     @Override
@@ -568,6 +590,26 @@ public class YrPlaybackService extends Service {
         return START_STICKY;
     }
 
+    private void publishPlaybackState() {
+        MediaSession session = mediaSession;
+        if (session == null) return;
+        long actions = PlaybackState.ACTION_PLAY
+                | PlaybackState.ACTION_PAUSE
+                | PlaybackState.ACTION_PLAY_PAUSE
+                | PlaybackState.ACTION_SKIP_TO_NEXT
+                | PlaybackState.ACTION_SKIP_TO_PREVIOUS
+                | PlaybackState.ACTION_SEEK_TO
+                | PlaybackState.ACTION_STOP;
+        int state = currentPlaying
+                ? PlaybackState.STATE_PLAYING
+                : PlaybackState.STATE_PAUSED;
+        PlaybackState pbState = new PlaybackState.Builder()
+                .setActions(actions)
+                .setState(state, currentPosMs, currentPlaying ? 1.0f : 0.0f)
+                .build();
+        session.setPlaybackState(pbState);
+    }
+
     private void refreshMediaSessionAndNotification() {
         if (wakeLock != null) {
             if (currentPlaying && !wakeLock.isHeld()) {
@@ -577,7 +619,8 @@ public class YrPlaybackService extends Service {
             }
         }
 
-        if (mediaSession != null) {
+        String metaKey = buildMetaKey();
+        if (mediaSession != null && !metaKey.equals(lastMetaKey)) {
             MediaMetadata.Builder meta = new MediaMetadata.Builder()
                     .putString(MediaMetadata.METADATA_KEY_TITLE, currentTitle)
                     .putString(MediaMetadata.METADATA_KEY_ARTIST, currentArtist);
@@ -591,23 +634,10 @@ public class YrPlaybackService extends Service {
                 meta.putBitmap(MediaMetadata.METADATA_KEY_DISPLAY_ICON, art);
             }
             mediaSession.setMetadata(meta.build());
-
-            long actions = PlaybackState.ACTION_PLAY
-                    | PlaybackState.ACTION_PAUSE
-                    | PlaybackState.ACTION_PLAY_PAUSE
-                    | PlaybackState.ACTION_SKIP_TO_NEXT
-                    | PlaybackState.ACTION_SKIP_TO_PREVIOUS
-                    | PlaybackState.ACTION_SEEK_TO
-                    | PlaybackState.ACTION_STOP;
-            int state = currentPlaying
-                    ? PlaybackState.STATE_PLAYING
-                    : PlaybackState.STATE_PAUSED;
-            PlaybackState pbState = new PlaybackState.Builder()
-                    .setActions(actions)
-                    .setState(state, currentPosMs, currentPlaying ? 1.0f : 0.0f)
-                    .build();
-            mediaSession.setPlaybackState(pbState);
+            lastMetaKey = metaKey;
         }
+        publishPlaybackState();
+        lastNotifPlaying = currentPlaying;
 
         Notification notif = buildNotification();
         if (Build.VERSION.SDK_INT >= 29) {
@@ -697,6 +727,9 @@ public class YrPlaybackService extends Service {
 
     @Override
     public void onDestroy() {
+        activeInstance = null;
+        lastMetaKey = "";
+        lastNotifPlaying = null;
         if (wakeLock != null && wakeLock.isHeld()) {
             wakeLock.release();
         }
