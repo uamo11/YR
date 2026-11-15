@@ -2013,15 +2013,17 @@ impl YrApp {
                                     CornerRadius::same(8),
                                     BG_SURFACE,
                                 );
-                                if let Some(url) = &card.thumbnail_url {
-                                    let thumb_uri = tracked_thumb_uri(url, 256);
-                                    ui.put(
-                                        rect,
-                                        Image::new(thumb_uri)
-                                            .fit_to_exact_size(Vec2::splat(tile_size))
-                                            .corner_radius(CornerRadius::same(8))
-                                            .sense(Sense::hover()),
-                                    );
+                                if ui.is_rect_visible(rect) {
+                                    if let Some(url) = &card.thumbnail_url {
+                                        let thumb_uri = tracked_thumb_uri(url, 224);
+                                        ui.put(
+                                            rect,
+                                            Image::new(thumb_uri)
+                                                .fit_to_exact_size(Vec2::splat(tile_size))
+                                                .corner_radius(CornerRadius::same(8))
+                                                .sense(Sense::hover()),
+                                        );
+                                    }
                                 }
                                 let galley = ui.painter().layout(
                                     card.title.clone(),
@@ -3392,10 +3394,15 @@ impl YrApp {
                             ui.spacing_mut().item_spacing.y = 2.0;
                             ui.set_max_width(text_width);
                             render_clamped_label(ui, &track.title, 14.5, title_color, text_width, 2);
+                            let dur_part = track
+                                .duration_secs
+                                .filter(|&s| s > 0)
+                                .map(|s| format!(" • {}:{:02}", s / 60, s % 60))
+                                .unwrap_or_default();
                             let sub = if offline_badge || is_downloaded {
-                                format!("✓ {} • {}", track.artist, track.formatted_duration())
+                                format!("✓ {}{}", track.artist, dur_part)
                             } else {
-                                format!("{} • {}", track.artist, track.formatted_duration())
+                                format!("{}{}", track.artist, dur_part)
                             };
                             ui.add(
                                 egui::Label::new(
@@ -3643,7 +3650,7 @@ impl YrApp {
 
         let pad_x = 16.0;
         #[cfg(target_os = "android")]
-        let (safe_top, safe_bottom) = (36.0_f32, 54.0_f32);
+        let (safe_top, safe_bottom) = (36.0_f32, 68.0_f32);
         #[cfg(not(target_os = "android"))]
         let (safe_top, safe_bottom) = (10.0_f32, 12.0_f32);
         let inner_rect = egui::Rect::from_min_max(
@@ -4217,17 +4224,18 @@ impl YrApp {
                                 egui::Frame::new()
                                     .fill(pill_bg)
                                     .corner_radius(CornerRadius::same(18))
-                                    .inner_margin(egui::Margin::symmetric(10, 6))
+                                    .inner_margin(egui::Margin::symmetric(8, 5))
                                     .show(ui, |ui| {
                                         ui.horizontal(|ui| {
+                                            ui.spacing_mut().item_spacing.x = 3.0;
                                             if icons::icon_button(
                                                 ui,
                                                 icons::Icon::ThumbUp,
-                                                30.0,
-                                                19.0,
+                                                26.0,
+                                                18.0,
                                                 Color32::TRANSPARENT,
                                                 if liked { ACCENT_RED } else { Color32::WHITE },
-                                                17.0,
+                                                16.0,
                                             )
                                             .clicked()
                                             {
@@ -4235,28 +4243,26 @@ impl YrApp {
                                             }
                                             ui.label(
                                                 RichText::new("Me gusta")
-                                                    .size(12.5)
+                                                    .size(12.0)
                                                     .color(if liked {
                                                         ACCENT_RED
                                                     } else {
                                                         Color32::WHITE
                                                     }),
                                             );
-                                            ui.add_space(4.0);
                                             ui.label(
                                                 RichText::new("|")
-                                                    .size(13.0)
+                                                    .size(12.5)
                                                     .color(Color32::from_white_alpha(70)),
                                             );
-                                            ui.add_space(4.0);
                                             if icons::icon_button(
                                                 ui,
                                                 icons::Icon::ThumbDown,
-                                                30.0,
-                                                19.0,
+                                                26.0,
+                                                18.0,
                                                 Color32::TRANSPARENT,
                                                 if disliked { ACCENT_RED } else { Color32::WHITE },
-                                                17.0,
+                                                16.0,
                                             )
                                             .clicked()
                                             {
@@ -4764,9 +4770,9 @@ impl YrApp {
                             None
                         }
                     });
-                    let dur_str = match dur_secs {
-                        Some(s) if s > 0 => format!("{}:{:02}", s / 60, s % 60),
-                        _ => track.formatted_duration(),
+                    let sheet_sub = match dur_secs.filter(|&s| s > 0) {
+                        Some(s) => format!("{} • {}:{:02}", track.artist, s / 60, s % 60),
+                        None => track.artist.clone(),
                     };
                     ui.allocate_ui(Vec2::new(tw, 52.0), |ui| {
                         ui.vertical(|ui| {
@@ -4775,7 +4781,7 @@ impl YrApp {
                             render_clamped_label(ui, &track.title, 15.0, Color32::WHITE, tw, 2);
                             ui.add(
                                 egui::Label::new(
-                                    RichText::new(format!("{} • {}", track.artist, dur_str))
+                                    RichText::new(sheet_sub)
                                         .size(12.5)
                                         .color(TEXT_SECONDARY),
                                 )
@@ -5281,24 +5287,27 @@ fn render_collection_row(
 }
 
 fn render_thumb(ui: &mut egui::Ui, url: Option<&str>, size: f32) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
+    ui.painter()
+        .rect_filled(rect, CornerRadius::same(8), BG_ELEVATED);
+    if !ui.is_rect_visible(rect) {
+        return;
+    }
     if let Some(u) = url {
         let max_px = if size <= 72.0 {
-            192
+            160
         } else if size <= 150.0 {
-            256
+            224
         } else {
-            384
+            320
         };
         let thumb_uri = tracked_thumb_uri(u, max_px);
-        ui.add(
+        ui.put(
+            rect,
             Image::new(thumb_uri)
                 .fit_to_exact_size(Vec2::splat(size))
                 .corner_radius(CornerRadius::same(8)),
         );
-    } else {
-        let (rect, _) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
-        ui.painter()
-            .rect_filled(rect, CornerRadius::same(8), BG_ELEVATED);
     }
 }
 

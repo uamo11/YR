@@ -1,19 +1,30 @@
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
-pub const MAX_CACHED_IMAGES: usize = 96;
-pub const IDLE_SOFT_LIMIT: usize = 36;
-pub const IDLE_FORGET_FRAMES: u64 = 180;
-pub const MIN_ACTIVE_FRAMES: u64 = 60;
+pub const MAX_CACHED_IMAGES: usize = 64;
+pub const IDLE_SOFT_LIMIT: usize = 24;
+pub const IDLE_FORGET_AFTER: Duration = Duration::from_secs(6);
+pub const MIN_ACTIVE_AGE: Duration = Duration::from_secs(2);
 
-#[derive(Default)]
 pub struct ImageLru {
-    frame: u64,
-    last_seen: HashMap<String, u64>,
+    last_seen: HashMap<String, Instant>,
+}
+
+impl Default for ImageLru {
+    fn default() -> Self {
+        Self {
+            last_seen: HashMap::new(),
+        }
+    }
 }
 
 impl ImageLru {
     pub fn touch(&mut self, uri: &str) {
-        self.last_seen.insert(uri.to_string(), self.frame);
+        self.touch_at(uri, Instant::now());
+    }
+
+    pub fn touch_at(&mut self, uri: &str, now: Instant) {
+        self.last_seen.insert(uri.to_string(), now);
     }
 
     pub fn len(&self) -> usize {
@@ -25,28 +36,31 @@ impl ImageLru {
     }
 
     pub fn advance_and_collect_evictions(&mut self) -> Vec<String> {
-        self.frame = self.frame.saturating_add(1);
+        self.advance_and_collect_evictions_at(Instant::now())
+    }
+
+    pub fn advance_and_collect_evictions_at(&mut self, now: Instant) -> Vec<String> {
         let mut evicted = Vec::new();
         if self.last_seen.len() > IDLE_SOFT_LIMIT {
-            let cutoff = self.frame.saturating_sub(IDLE_FORGET_FRAMES);
             let stale: Vec<String> = self
                 .last_seen
                 .iter()
-                .filter_map(|(k, &seen)| (seen < cutoff).then(|| k.clone()))
+                .filter_map(|(k, &seen)| {
+                    (now.saturating_duration_since(seen) >= IDLE_FORGET_AFTER).then(|| k.clone())
+                })
                 .collect();
             for k in stale {
                 self.last_seen.remove(&k);
                 evicted.push(k);
             }
         }
-        // Never evict actively-rendered entries (< MIN_ACTIVE_FRAMES old), preventing
+        // Never evict actively-rendered entries (< MIN_ACTIVE_AGE old), preventing
         // per-frame forget_image -> ehttp refetch loops when > MAX_CACHED_IMAGES appear at once.
-        let active_cutoff = self.frame.saturating_sub(MIN_ACTIVE_FRAMES);
         while self.last_seen.len() > MAX_CACHED_IMAGES {
             let Some(oldest) = self
                 .last_seen
                 .iter()
-                .filter(|(_, seen)| **seen < active_cutoff)
+                .filter(|(_, &seen)| now.saturating_duration_since(seen) >= MIN_ACTIVE_AGE)
                 .min_by(|(ka, sa), (kb, sb)| sa.cmp(sb).then_with(|| ka.cmp(kb)))
                 .map(|(k, _)| k.clone())
             else {
@@ -129,19 +143,19 @@ mod tests {
         assert_eq!(
             optimize_thumb_url(
                 "https://lh3.googleusercontent.com/abc=w1200-h1200-l90-rj",
-                192
+                160
             ),
-            "https://lh3.googleusercontent.com/abc=w192-h192-l90-rj"
+            "https://lh3.googleusercontent.com/abc=w160-h160-l90-rj"
         );
         assert_eq!(
             optimize_thumb_url(
                 "https://yt3.ggpht.com/xyz=s800-c-k-c0x00ffffff-no-rj",
-                192
+                160
             ),
-            "https://yt3.ggpht.com/xyz=s192-c-l90-rj"
+            "https://yt3.ggpht.com/xyz=s160-c-l90-rj"
         );
         assert_eq!(
-            optimize_thumb_url("https://i.ytimg.com/vi/dQw4w9WgXcQ/maxresdefault.jpg?sqp=1", 192),
+            optimize_thumb_url("https://i.ytimg.com/vi/dQw4w9WgXcQ/maxresdefault.jpg?sqp=1", 160),
             "https://i.ytimg.com/vi/dQw4w9WgXcQ/mqdefault.jpg?sqp=1"
         );
         assert_eq!(
@@ -149,38 +163,35 @@ mod tests {
             "https://i.ytimg.com/vi/dQw4w9WgXcQ/hqdefault.jpg"
         );
         assert_eq!(
-            optimize_thumb_url("https://example.com/static/cover.png", 192),
+            optimize_thumb_url("https://example.com/static/cover.png", 160),
             "https://example.com/static/cover.png"
         );
     }
 
     #[test]
     fn image_lru_preserves_active_entries_and_evicts_stale() {
+        let t0 = Instant::now();
         let mut lru = ImageLru::default();
-        // Even when > MAX_CACHED_IMAGES are touched in the same frame, active items are NOT evicted.
-        for i in 0..110 {
-            lru.touch(&format!("https://img/{i}"));
+        // Touching > MAX_CACHED_IMAGES at t0 never evicts active images immediately.
+        for i in 0..80 {
+            lru.touch_at(&format!("https://img/{i}"), t0);
         }
-        assert!(lru.advance_and_collect_evictions().is_empty());
-        assert_eq!(lru.len(), 110);
+        assert!(lru.advance_and_collect_evictions_at(t0).is_empty());
+        assert_eq!(lru.len(), 80);
 
-        // Advance past MIN_ACTIVE_FRAMES while keeping items 50..110 actively touched:
-        // only the inactive entries (0..50) get trimmed down to MAX_CACHED_IMAGES.
-        for _ in 0..MIN_ACTIVE_FRAMES {
-            for i in 50..110 {
-                lru.touch(&format!("https://img/{i}"));
-            }
-            let evicted = lru.advance_and_collect_evictions();
-            if lru.len() == MAX_CACHED_IMAGES {
-                assert_eq!(evicted.len(), 110 - MAX_CACHED_IMAGES);
-            }
+        // After MIN_ACTIVE_AGE while 40..80 are re-touched, inactive 0..40 get trimmed down to MAX_CACHED_IMAGES.
+        let t1 = t0 + MIN_ACTIVE_AGE + Duration::from_millis(100);
+        for i in 40..80 {
+            lru.touch_at(&format!("https://img/{i}"), t1);
         }
+        let evicted = lru.advance_and_collect_evictions_at(t1);
         assert_eq!(lru.len(), MAX_CACHED_IMAGES);
+        assert_eq!(evicted.len(), 80 - MAX_CACHED_IMAGES);
 
-        // Once nothing is touched past IDLE_FORGET_FRAMES, all entries evict cleanly.
-        for _ in 0..(IDLE_FORGET_FRAMES + 2) {
-            lru.advance_and_collect_evictions();
-        }
+        // Once all entries sit idle past IDLE_FORGET_AFTER, all evict cleanly.
+        let t2 = t1 + IDLE_FORGET_AFTER;
+        let evicted_stale = lru.advance_and_collect_evictions_at(t2);
+        assert_eq!(evicted_stale.len(), MAX_CACHED_IMAGES);
         assert!(lru.is_empty());
     }
 }

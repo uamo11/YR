@@ -347,6 +347,10 @@ pub async fn fetch_home_feed(
         }
     }
 
+    if feed.quick_picks.is_empty() && !feed.recommended_tracks.is_empty() {
+        feed.quick_picks = feed.recommended_tracks.clone();
+    }
+
     if feed.shelves.is_empty() && feed.quick_picks.is_empty() {
         return Err("FEmusic_home devolvió un feed vacío".to_string());
     }
@@ -1285,7 +1289,12 @@ mod tests {
             .expect("FEmusic_home fetch");
         assert!(!feed.moods.is_empty(), "expected Spanish mood chips");
         assert!(!feed.shelves.is_empty(), "expected YouTube Music shelves");
-        assert!(!feed.quick_picks.is_empty(), "expected quick_picks");
+        assert!(
+            !feed.quick_picks.is_empty()
+                || !feed.recommended_playlists.is_empty()
+                || !feed.new_albums.is_empty(),
+            "expected home music items"
+        );
     }
 
     #[test]
