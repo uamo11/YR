@@ -88,6 +88,32 @@ impl PlaybackQueue {
         }
     }
 
+    /// Backfill duration/thumbnail on an existing track or append if not yet in the queue.
+    pub fn enqueue_or_enrich(&mut self, track: Track) {
+        if let Some(existing) = self.tracks.iter_mut().find(|t| t.id == track.id) {
+            if existing.duration_secs.unwrap_or(0) == 0 && track.duration_secs.is_some() {
+                existing.duration_secs = track.duration_secs;
+            }
+            if existing.thumbnail_url.is_none() && track.thumbnail_url.is_some() {
+                existing.thumbnail_url = track.thumbnail_url;
+            }
+            return;
+        }
+        self.enqueue(track);
+    }
+
+    /// Fill `duration_secs` on the matching track if not already known.
+    pub fn fill_track_duration(&mut self, track_id: &str, duration_secs: u64) {
+        if duration_secs == 0 {
+            return;
+        }
+        for t in &mut self.tracks {
+            if t.id == track_id && t.duration_secs.unwrap_or(0) == 0 {
+                t.duration_secs = Some(duration_secs);
+            }
+        }
+    }
+
     /// Insert a track immediately after the currently playing track.
     pub fn enqueue_next(&mut self, track: Track) {
         let new_idx = self.tracks.len();
@@ -287,6 +313,23 @@ mod tests {
         q.enqueue_next(sample_track("X"));
         assert_eq!(q.next_track(true).unwrap().id, "X");
         q.remove_at(1);
+        assert_eq!(q.len(), 2);
+    }
+
+    #[test]
+    fn enqueue_or_enrich_dedupes_and_fills_duration() {
+        let mut q = PlaybackQueue::new();
+        let mut bare = sample_track("1");
+        bare.duration_secs = None;
+        q.set_queue(vec![bare], 0);
+
+        let mut rich = sample_track("1");
+        rich.duration_secs = Some(212);
+        q.enqueue_or_enrich(rich);
+        assert_eq!(q.len(), 1);
+        assert_eq!(q.current_track().unwrap().duration_secs, Some(212));
+
+        q.enqueue_or_enrich(sample_track("2"));
         assert_eq!(q.len(), 2);
     }
 }

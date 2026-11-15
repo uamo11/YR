@@ -1057,7 +1057,7 @@ impl YrApp {
                         {
                             let mut q = self.queue.lock().unwrap();
                             for t in tracks {
-                                q.enqueue(t);
+                                q.enqueue_or_enrich(t);
                             }
                         }
                         self.set_banner("Radio añadida a la cola");
@@ -1274,7 +1274,16 @@ impl YrApp {
             ctx.request_repaint_after(Duration::from_millis(250));
         }
 
-        if let Some(track) = self.queue.lock().unwrap().current_track().cloned() {
+        let maybe_current = {
+            let mut q = self.queue.lock().unwrap();
+            if let Some(dur) = snap.duration_secs.filter(|&d| d > 1.0) {
+                if let Some(tid) = q.current_track().map(|t| t.id.clone()) {
+                    q.fill_track_duration(&tid, dur.round() as u64);
+                }
+            }
+            q.current_track().cloned()
+        };
+        if let Some(track) = maybe_current {
             let is_playing = snap.status == PlaybackStatus::Playing;
             let pos_ms = (snap.position_secs * 1000.0).max(0.0) as u64;
             let dur_ms = snap
@@ -2085,6 +2094,16 @@ impl YrApp {
                                     CornerRadius::same(8),
                                     BG_SURFACE,
                                 );
+                                let note_rect = egui::Rect::from_center_size(
+                                    rect.center(),
+                                    Vec2::splat((tile_size * 0.34).clamp(18.0, 42.0)),
+                                );
+                                icons::draw_icon(
+                                    ui.painter(),
+                                    note_rect,
+                                    icons::Icon::MusicNote,
+                                    Color32::from_white_alpha(80),
+                                );
                                 if let Some(url) = &card.thumbnail_url {
                                     let thumb_uri = tracked_thumb_uri(url, 224);
                                     ui.put(
@@ -2308,7 +2327,13 @@ impl YrApp {
             .home_feed
             .listen_again
             .iter()
-            .chain(self.store.data.recent_tracks.iter())
+            .chain(
+                self.store
+                    .data
+                    .recent_tracks
+                    .iter()
+                    .filter(|t| !t.id.starts_with("local_demo_")),
+            )
         {
             push_unique(
                 format!("tr:{}", t.id),

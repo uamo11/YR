@@ -66,10 +66,12 @@ pub struct LibraryStore {
 impl LibraryStore {
     pub fn load_or_default(base_dir: &Path) -> Self {
         let path = base_dir.join("library.json");
-        let data = std::fs::read_to_string(&path)
+        let mut data = std::fs::read_to_string(&path)
             .ok()
             .and_then(|raw| serde_json::from_str::<LibraryData>(&raw).ok())
             .unwrap_or_default();
+        data.recent_tracks
+            .retain(|t| !t.id.starts_with("local_demo_"));
         Self { path, data }
     }
 
@@ -102,6 +104,9 @@ impl LibraryStore {
     }
 
     pub fn record_play(&mut self, track: Track) {
+        if track.id.starts_with("local_demo_") {
+            return;
+        }
         self.data.recent_tracks.retain(|t| t.id != track.id);
         self.data.recent_tracks.insert(0, track);
         if self.data.recent_tracks.len() > 50 {
