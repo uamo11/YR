@@ -1019,28 +1019,28 @@ impl YrApp {
                             }
                             self.search_results = r;
                         }
-                        Err(e) => self.set_banner(format!("Error al buscar: {e}")),
+                        Err(e) => self.set_banner(friendly_error_message("Error al buscar", &e)),
                     }
                 }
                 AppEvent::AlbumLoaded(res) => {
                     self.detail_loading = false;
                     match res {
                         Ok(a) => self.detail_view = DetailView::Album(a),
-                        Err(e) => self.set_banner(format!("Error al abrir álbum: {e}")),
+                        Err(e) => self.set_banner(friendly_error_message("Error al abrir álbum", &e)),
                     }
                 }
                 AppEvent::PlaylistLoaded(res) => {
                     self.detail_loading = false;
                     match res {
                         Ok(p) => self.detail_view = DetailView::Playlist(p),
-                        Err(e) => self.set_banner(format!("Error al abrir playlist: {e}")),
+                        Err(e) => self.set_banner(friendly_error_message("Error al abrir playlist", &e)),
                     }
                 }
                 AppEvent::ArtistLoaded(res) => {
                     self.detail_loading = false;
                     match res {
                         Ok(a) => self.detail_view = DetailView::Artist(a),
-                        Err(e) => self.set_banner(format!("Error al abrir artista: {e}")),
+                        Err(e) => self.set_banner(friendly_error_message("Error al abrir artista", &e)),
                     }
                 }
                 AppEvent::MoodLoaded { title, result } => {
@@ -1049,7 +1049,7 @@ impl YrApp {
                         Ok(playlists) => {
                             self.detail_view = DetailView::Mood { title, playlists }
                         }
-                        Err(e) => self.set_banner(format!("Error al abrir género: {e}")),
+                        Err(e) => self.set_banner(friendly_error_message("Error al abrir género", &e)),
                     }
                 }
                 AppEvent::RadioLoaded(res) => match res {
@@ -1063,7 +1063,7 @@ impl YrApp {
                         self.set_banner("Radio añadida a la cola");
                     }
                     Ok(_) => self.set_banner("No se encontraron canciones similares"),
-                    Err(e) => self.set_banner(format!("Error de radio: {e}")),
+                    Err(e) => self.set_banner(friendly_error_message("Error de radio", &e)),
                 },
                 AppEvent::RelatedLoaded { track_id, result } => {
                     if self.related_track_id.as_deref() == Some(&track_id) {
@@ -1084,7 +1084,7 @@ impl YrApp {
                                 source: String::new(),
                             }),
                             Err(e) => Some(LyricsData {
-                                plain: format!("Error al cargar letra: {e}"),
+                                plain: friendly_error_message("No se pudo cargar la letra", &e),
                                 synced: Vec::new(),
                                 source: String::new(),
                             }),
@@ -1119,7 +1119,7 @@ impl YrApp {
                             self.audio.play_url(url, track.id, track.duration_secs);
                         }
                     }
-                    Err(e) => self.set_banner(format!("No se pudo reproducir: {e}")),
+                    Err(e) => self.set_banner(friendly_error_message("No se pudo reproducir", &e)),
                 },
                 AppEvent::SearchSuggestionsLoaded { query, suggestions } => {
                     if self.search_query.trim() == query {
@@ -4269,6 +4269,22 @@ impl YrApp {
                                                 .size(16.0)
                                                 .color(Color32::from_white_alpha(230)),
                                         );
+                                        if data.source.is_empty()
+                                            && data.plain.starts_with("No se pudo")
+                                        {
+                                            ui.add_space(12.0);
+                                            if icons::icon_pill_button(
+                                                ui,
+                                                icons::Icon::Refresh,
+                                                "Reintentar",
+                                                Color32::from_white_alpha(24),
+                                                Color32::WHITE,
+                                            )
+                                            .clicked()
+                                            {
+                                                self.load_lyrics(track.clone(), ctx);
+                                            }
+                                        }
                                     });
                             } else {
                                 ui.add_space(24.0);
@@ -4276,6 +4292,18 @@ impl YrApp {
                                     RichText::new("No hay letra disponible para esta canción.")
                                         .color(Color32::from_white_alpha(175)),
                                 );
+                                ui.add_space(10.0);
+                                if icons::icon_pill_button(
+                                    ui,
+                                    icons::Icon::Refresh,
+                                    "Reintentar",
+                                    Color32::from_white_alpha(24),
+                                    Color32::WHITE,
+                                )
+                                .clicked()
+                                {
+                                    self.load_lyrics(track.clone(), ctx);
+                                }
                             }
                         } else {
                             ui.add_space(24.0);
@@ -4283,6 +4311,18 @@ impl YrApp {
                                 RichText::new("No hay letra disponible para esta canción.")
                                     .color(Color32::from_white_alpha(175)),
                             );
+                            ui.add_space(10.0);
+                            if icons::icon_pill_button(
+                                ui,
+                                icons::Icon::Refresh,
+                                "Reintentar",
+                                Color32::from_white_alpha(24),
+                                Color32::WHITE,
+                            )
+                            .clicked()
+                            {
+                                self.load_lyrics(track.clone(), ctx);
+                            }
                         }
                     } else if self.show_related {
                         ui.horizontal(|ui| {
@@ -4335,24 +4375,33 @@ impl YrApp {
                     ui.add_space(4.0);
                     let art_size = (avail_w - 28.0).min(body_h * 0.43).clamp(155.0, 290.0);
                     ui.vertical_centered(|ui| {
-                        let art_resp = if let Some(u) = track.thumbnail_url.as_deref() {
+                        let (art_rect, art_resp) =
+                            ui.allocate_exact_size(Vec2::splat(art_size), Sense::drag());
+                        ui.painter().rect_filled(
+                            art_rect,
+                            CornerRadius::same(14),
+                            Color32::from_white_alpha(22),
+                        );
+                        let note_rect = egui::Rect::from_center_size(
+                            art_rect.center(),
+                            Vec2::splat((art_size * 0.34).clamp(36.0, 88.0)),
+                        );
+                        icons::draw_icon(
+                            ui.painter(),
+                            note_rect,
+                            icons::Icon::MusicNote,
+                            Color32::from_white_alpha(110),
+                        );
+                        if let Some(u) = track.thumbnail_url.as_deref() {
                             let art_uri = tracked_thumb_uri(u, 544);
-                            ui.add(
+                            ui.put(
+                                art_rect,
                                 Image::new(art_uri)
                                     .fit_to_exact_size(Vec2::splat(art_size))
                                     .corner_radius(CornerRadius::same(14))
-                                    .sense(Sense::drag()),
-                            )
-                        } else {
-                            let (rect, resp) =
-                                ui.allocate_exact_size(Vec2::splat(art_size), Sense::drag());
-                            ui.painter().rect_filled(
-                                rect,
-                                CornerRadius::same(14),
-                                Color32::from_white_alpha(22),
+                                    .sense(Sense::hover()),
                             );
-                            resp
-                        };
+                        }
                         if art_resp.drag_started() {
                             self.cover_drag_accum = Vec2::ZERO;
                         }
@@ -5855,6 +5904,24 @@ fn advance_and_prune_image_cache(ctx: &egui::Context) {
     let evicted = image_lru().lock().unwrap().advance_and_collect_evictions();
     for uri in evicted {
         ctx.forget_image(&uri);
+    }
+}
+
+fn friendly_error_message(prefix: &str, raw: &str) -> String {
+    let low = raw.to_lowercase();
+    if low.contains("error sending request")
+        || low.contains("dns")
+        || low.contains("failed to lookup")
+        || low.contains("connection refused")
+        || low.contains("network is unreachable")
+    {
+        format!("{prefix}: sin conexión a internet.")
+    } else if low.contains("timed out") || low.contains("timeout") {
+        format!("{prefix}: tiempo de espera agotado.")
+    } else if let Some((clean, _)) = raw.split_once(" (http") {
+        format!("{prefix}: {}", clean.trim())
+    } else {
+        format!("{prefix}: {raw}")
     }
 }
 
