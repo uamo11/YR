@@ -784,9 +784,13 @@ impl YrApp {
     }
 
     fn load_lyrics(&mut self, track: Track, ctx: &egui::Context) {
-        self.lyrics_loading = true;
         self.lyrics_track_id = Some(track.id.clone());
         self.lyrics_data = None;
+        if track.local_path.is_some() || track.id.starts_with("local_") {
+            self.lyrics_loading = false;
+            return;
+        }
+        self.lyrics_loading = true;
         let provider = Arc::clone(&self.provider);
         let tx = self.event_tx.clone();
         let ctx = ctx.clone();
@@ -5118,28 +5122,62 @@ impl YrApp {
                         .or(track.duration_secs.map(|d| d as f64))
                         .unwrap_or(1.0)
                         .max(1.0);
-                    let mut pos = self.seeking_secs.unwrap_or(snap.position_secs).min(total);
+                    let pos = self.seeking_secs.unwrap_or(snap.position_secs).min(total);
                     let slider_w = (avail_w - 8.0).max(160.0);
-                    ui.scope(|ui| {
-                        ui.spacing_mut().slider_width = slider_w;
-                        let v = ui.visuals_mut();
-                        v.selection.bg_fill = Color32::WHITE;
-                        v.widgets.inactive.bg_fill = Color32::from_white_alpha(64);
-                        v.widgets.inactive.fg_stroke =
-                            egui::Stroke::new(1.0_f32, Color32::WHITE);
-                        v.widgets.hovered.fg_stroke = egui::Stroke::new(1.0_f32, Color32::WHITE);
-                        v.widgets.active.fg_stroke = egui::Stroke::new(1.0_f32, Color32::WHITE);
-                        let resp =
-                            ui.add(egui::Slider::new(&mut pos, 0.0..=total).show_value(false));
-                        if resp.dragged() {
-                            self.seeking_secs = Some(pos);
+                    let (bar_rect, bar_resp) = ui.allocate_exact_size(
+                        Vec2::new(slider_w, 24.0),
+                        Sense::click_and_drag(),
+                    );
+                    let frac_from_x = |x: f32| -> f64 {
+                        ((x - bar_rect.left()) / bar_rect.width().max(1.0)).clamp(0.0, 1.0)
+                            as f64
+                            * total
+                    };
+                    let mut display_pos = pos;
+                    if bar_resp.dragged() {
+                        if let Some(pointer) = bar_resp.interact_pointer_pos() {
+                            let target = frac_from_x(pointer.x);
+                            self.seeking_secs = Some(target);
+                            display_pos = target;
                         }
-                        if resp.drag_stopped() {
-                            self.audio.seek(Duration::from_secs_f64(pos));
+                    }
+                    if bar_resp.drag_stopped() {
+                        let target = self
+                            .seeking_secs
+                            .or_else(|| bar_resp.interact_pointer_pos().map(|p| frac_from_x(p.x)))
+                            .unwrap_or(display_pos);
+                        self.audio.seek(Duration::from_secs_f64(target));
+                        self.seeking_secs = None;
+                        self.last_media_sync = None;
+                        display_pos = target;
+                    } else if bar_resp.clicked() {
+                        if let Some(pointer) = bar_resp.interact_pointer_pos() {
+                            let target = frac_from_x(pointer.x);
+                            self.audio.seek(Duration::from_secs_f64(target));
                             self.seeking_secs = None;
                             self.last_media_sync = None;
+                            display_pos = target;
                         }
-                    });
+                    }
+                    if ui.is_rect_visible(bar_rect) {
+                        let frac = (display_pos / total).clamp(0.0, 1.0) as f32;
+                        let cy = bar_rect.center().y;
+                        let track_rect = egui::Rect::from_min_max(
+                            egui::pos2(bar_rect.left(), cy - 1.5),
+                            egui::pos2(bar_rect.right(), cy + 1.5),
+                        );
+                        let painter = ui.painter();
+                        painter.rect_filled(track_rect, 1.5, Color32::from_white_alpha(64));
+                        let thumb_x = track_rect.left() + track_rect.width() * frac;
+                        let active_rect = egui::Rect::from_min_max(
+                            track_rect.min,
+                            egui::pos2(thumb_x, track_rect.bottom()),
+                        );
+                        painter.rect_filled(active_rect, 1.5, Color32::WHITE);
+                        let radius = if bar_resp.dragged() { 8.5 } else { 6.0 };
+                        painter.circle_filled(egui::pos2(thumb_x, cy), radius, Color32::WHITE);
+                    }
+                    let pos = display_pos;
 
                     ui.horizontal(|ui| {
                         ui.label(
@@ -6375,6 +6413,8 @@ fn friendly_error_message(prefix: &str, raw: &str) -> String {
         format!("{prefix}: sin conexión a internet.")
     } else if low.contains("timed out") || low.contains("timeout") {
         format!("{prefix}: tiempo de espera agotado.")
+    } else if low.contains("extraction error:") || low.contains("was not found (no content)") {
+        format!("{prefix}: no disponible para esta pista.")
     } else if let Some((clean, _)) = raw.split_once(" (http") {
         format!("{prefix}: {}", clean.trim())
     } else {
