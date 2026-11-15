@@ -50,23 +50,23 @@ adb shell input swipe 540 650 540 1650 350
 sleep 1
 
 # 1b. Open Google Login modal and WebView
-adb shell input tap 820 135
+adb shell input tap 820 140
 sleep 1
 adb shell screencap -p /data/local/tmp/01b_google_login_modal.png
 adb pull /data/local/tmp/01b_google_login_modal.png screenshots/01b_google_login_modal.png
 # Tap "Iniciar sesión con Google" inside modal
-adb shell input tap 450 1120
-sleep 5
+adb shell input tap 365 929
+sleep 6
 adb shell screencap -p /data/local/tmp/01c_google_webview.png
 adb pull /data/local/tmp/01c_google_webview.png screenshots/01c_google_webview.png
 adb logcat -d | grep -i "YR_LOGIN" || true
-# Close WebView dialog via hardware BACK (or top-right Cerrar fallback) and close modal
-adb shell input keyevent 4
-sleep 1
-adb shell input tap 960 155 || true
-sleep 1
-# Tap modal close X button (centered 280..320dp dialog -> top-right X)
-adb shell input tap 890 830 || true
+# Close WebView dialog via hardware BACK (only press if WebView/AlertDialog window is focused)
+if adb shell dumpsys window | grep -qi "AlertDialog\|PopupWindow\|accounts.google"; then
+  adb shell input keyevent 4
+  sleep 1
+fi
+# Tap modal "Cerrar" button (bottom-right inside centered modal)
+adb shell input tap 882 1660
 sleep 1
 
 # 2. Search tab (second column at bottom nav)

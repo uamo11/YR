@@ -134,6 +134,7 @@ pub struct YrApp {
     last_media_sync: Option<(String, bool, Instant)>,
     status_banner: Option<(String, Instant)>,
     seeking_secs: Option<f64>,
+    home_v_drag_id: Option<egui::Id>,
 }
 
 async fn play_track_bg(
@@ -274,6 +275,7 @@ impl YrApp {
             last_media_sync: None,
             status_banner: None,
             seeking_secs: None,
+            home_v_drag_id: None,
         };
 
         let (media_tx, mut media_rx) = mpsc::unbounded_channel();
@@ -1007,7 +1009,7 @@ impl eframe::App for YrApp {
             .frame(egui::Frame::new().fill(BG_PRIMARY).inner_margin(12.0))
             .show(ctx, |ui| {
                 #[cfg(target_os = "android")]
-                ui.add_space(20.0);
+                ui.add_space(22.0);
 
                 ui.horizontal(|ui| {
                     let badge_center = ui.cursor().min + Vec2::new(13.0, 13.0);
@@ -1703,78 +1705,89 @@ impl YrApp {
         let page_width = tile_size * 3.0 + gap * 2.0;
         let sibling_tracks = shelf.tracks.clone();
         let pages: Vec<&[HomeShelfCard]> = shelf.cards.chunks(9).collect();
-
-        egui::ScrollArea::horizontal()
-            .id_salt(salt)
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 12.0;
-                    for page in &pages {
-                        ui.vertical(|ui| {
-                            ui.set_width(page_width);
-                            ui.spacing_mut().item_spacing.y = gap;
-                            for row in page.chunks(3) {
-                                ui.horizontal(|ui| {
-                                    ui.spacing_mut().item_spacing.x = gap;
-                                    for card in row {
-                                        let (rect, resp) = ui.allocate_exact_size(
-                                            Vec2::splat(tile_size),
-                                            Sense::click(),
-                                        );
-                                        if ui.is_rect_visible(rect) {
-                                            ui.painter().rect_filled(
-                                                rect,
-                                                CornerRadius::same(8),
-                                                BG_SURFACE,
-                                            );
-                                            if let Some(url) = &card.thumbnail_url {
-                                                ui.put(
-                                                    rect,
-                                                    Image::new(url.as_str())
-                                                        .fit_to_exact_size(Vec2::splat(tile_size))
-                                                        .corner_radius(CornerRadius::same(8)),
-                                                );
-                                            }
-                                            let overlay_rect = egui::Rect::from_min_max(
-                                                egui::pos2(rect.left(), rect.bottom() - 34.0),
-                                                rect.max,
-                                            );
-                                            ui.painter().rect_filled(
-                                                overlay_rect,
-                                                CornerRadius {
-                                                    nw: 0,
-                                                    ne: 0,
-                                                    sw: 8,
-                                                    se: 8,
-                                                },
-                                                Color32::from_rgba_unmultiplied(0, 0, 0, 175),
-                                            );
-                                            let galley = ui.painter().layout(
-                                                card.title.clone(),
-                                                egui::FontId::proportional(11.5),
-                                                Color32::WHITE,
-                                                tile_size - 12.0,
-                                            );
-                                            ui.painter().galley(
-                                                egui::pos2(
-                                                    rect.left() + 6.0,
-                                                    (rect.bottom() - galley.size().y - 5.0)
-                                                        .max(overlay_rect.top()),
-                                                ),
-                                                galley,
-                                                Color32::WHITE,
-                                            );
-                                        }
-                                        if resp.clicked() {
-                                            self.activate_shelf_card(card, &sibling_tracks, ctx);
-                                        }
-                                    }
-                                });
+        let draw_page = |ui: &mut egui::Ui, page: &[HomeShelfCard], app: &mut Self| {
+            ui.vertical(|ui| {
+                ui.set_width(page_width);
+                ui.spacing_mut().item_spacing.y = gap;
+                for row in page.chunks(3) {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = gap;
+                        for card in row {
+                            let (rect, resp) =
+                                ui.allocate_exact_size(Vec2::splat(tile_size), Sense::click());
+                            if ui.is_rect_visible(rect) {
+                                ui.painter().rect_filled(
+                                    rect,
+                                    CornerRadius::same(8),
+                                    BG_SURFACE,
+                                );
+                                if let Some(url) = &card.thumbnail_url {
+                                    ui.put(
+                                        rect,
+                                        Image::new(url.as_str())
+                                            .fit_to_exact_size(Vec2::splat(tile_size))
+                                            .corner_radius(CornerRadius::same(8))
+                                            .sense(Sense::hover()),
+                                    );
+                                }
+                                let galley = ui.painter().layout(
+                                    card.title.clone(),
+                                    egui::FontId::proportional(11.0),
+                                    Color32::WHITE,
+                                    tile_size - 12.0,
+                                );
+                                let overlay_h =
+                                    (galley.size().y + 11.0).clamp(28.0, tile_size * 0.46);
+                                let overlay_rect = egui::Rect::from_min_max(
+                                    egui::pos2(rect.left(), rect.bottom() - overlay_h),
+                                    rect.max,
+                                );
+                                ui.painter().rect_filled(
+                                    overlay_rect,
+                                    CornerRadius {
+                                        nw: 0,
+                                        ne: 0,
+                                        sw: 8,
+                                        se: 8,
+                                    },
+                                    Color32::from_rgba_unmultiplied(0, 0, 0, 185),
+                                );
+                                let clipped_painter = ui.painter().with_clip_rect(overlay_rect);
+                                clipped_painter.galley(
+                                    egui::pos2(
+                                        rect.left() + 6.0,
+                                        (rect.bottom() - galley.size().y - 5.0)
+                                            .max(overlay_rect.top() + 3.0),
+                                    ),
+                                    galley,
+                                    Color32::WHITE,
+                                );
                             }
-                        });
-                    }
-                });
+                            if resp.clicked() {
+                                app.activate_shelf_card(card, &sibling_tracks, ctx);
+                            }
+                        }
+                    });
+                }
             });
+        };
+
+        if pages.len() <= 1 {
+            if let Some(page) = pages.first() {
+                draw_page(ui, page, self);
+            }
+        } else {
+            egui::ScrollArea::horizontal()
+                .id_salt(salt)
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 12.0;
+                        for page in &pages {
+                            draw_page(ui, page, self);
+                        }
+                    });
+                });
+        }
 
         if pages.len() > 1 {
             ui.add_space(4.0);
@@ -1869,52 +1882,112 @@ impl YrApp {
 
     fn synthesize_speed_dial_cards(&self) -> Vec<HomeShelfCard> {
         let mut cards = Vec::new();
-        let mut seen = std::collections::HashSet::new();
-        if let Some(liked_pl) = self.home_feed.user_playlists.first() {
-            seen.insert(liked_pl.id.clone());
-            cards.push(HomeShelfCard {
-                title: liked_pl.title.clone(),
-                subtitle: "Lista".to_string(),
-                thumbnail_url: liked_pl.thumbnail_url.clone(),
-                kind: ShelfCardKind::Playlist(liked_pl.clone()),
-            });
-        }
-        for pl in self.home_feed.user_playlists.iter().skip(1) {
-            if seen.insert(pl.id.clone()) {
-                cards.push(HomeShelfCard {
+        let mut seen_ids = std::collections::HashSet::new();
+        let mut seen_thumbs = std::collections::HashSet::new();
+
+        let mut push_unique = |id_key: String, card: HomeShelfCard| {
+            if cards.len() >= 18 || !seen_ids.insert(id_key) {
+                return;
+            }
+            if let Some(t) = card.thumbnail_url.as_deref() {
+                if !t.is_empty() && !seen_thumbs.insert(t.to_string()) {
+                    return;
+                }
+            }
+            cards.push(card);
+        };
+
+        for (idx, pl) in self.home_feed.user_playlists.iter().enumerate() {
+            let sub = if idx == 0 {
+                "Lista".to_string()
+            } else {
+                pl.author.clone().unwrap_or_default()
+            };
+            push_unique(
+                format!("pl:{}", pl.id),
+                HomeShelfCard {
                     title: pl.title.clone(),
-                    subtitle: pl.author.clone().unwrap_or_default(),
+                    subtitle: sub,
                     thumbnail_url: pl.thumbnail_url.clone(),
                     kind: ShelfCardKind::Playlist(pl.clone()),
-                });
-            }
+                },
+            );
         }
+
         for t in self
             .home_feed
             .listen_again
             .iter()
             .chain(self.store.data.recent_tracks.iter())
-            .chain(self.home_feed.recommended_tracks.iter())
-            .chain(self.home_feed.quick_picks.iter().skip(4))
         {
-            if cards.len() >= 18 {
-                break;
-            }
-            if seen.insert(t.id.clone()) {
-                cards.push(HomeShelfCard {
+            push_unique(
+                format!("tr:{}", t.id),
+                HomeShelfCard {
                     title: t.title.clone(),
                     subtitle: t.artist.clone(),
                     thumbnail_url: t.thumbnail_url.clone(),
                     kind: ShelfCardKind::Track(t.clone()),
-                });
+                },
+            );
+        }
+
+        for shelf in &self.home_feed.shelves {
+            if shelf.layout == HomeShelfLayout::CarouselCards {
+                for c in shelf.cards.iter().take(4) {
+                    push_unique(format!("card:{}", c.title), c.clone());
+                }
             }
+        }
+
+        for t in self
+            .home_feed
+            .recommended_tracks
+            .iter()
+            .chain(self.home_feed.quick_picks.iter().skip(4))
+        {
+            push_unique(
+                format!("tr:{}", t.id),
+                HomeShelfCard {
+                    title: t.title.clone(),
+                    subtitle: t.artist.clone(),
+                    thumbnail_url: t.thumbnail_url.clone(),
+                    kind: ShelfCardKind::Track(t.clone()),
+                },
+            );
         }
         cards
     }
 
     fn render_home(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            // Mood / Genre Chips row (YT Music style)
+        let expected_v_drag = self.home_v_drag_id;
+        let scroll_out = egui::ScrollArea::vertical()
+            .id_salt("home_vertical_scroll")
+            .show(ui, |ui| {
+                if let Some(v_id) = expected_v_drag {
+                    let clip = ui.clip_rect();
+                    let stolen_vertical_dy = ui.input(|i| {
+                        let other_dragged = ctx.dragged_id().is_some_and(|id| id != v_id);
+                        let origin_inside =
+                            i.pointer.press_origin().is_some_and(|p| clip.contains(p));
+                        if other_dragged && origin_inside && i.pointer.any_down() {
+                            let d = i.pointer.delta();
+                            if d.y.abs() > d.x.abs() * 0.75 && d.y.abs() > 0.25 {
+                                Some(d.y)
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    });
+                    if let Some(dy) = stolen_vertical_dy {
+                        ui.scroll_with_delta_animation(
+                            Vec2::new(0.0, dy),
+                            egui::style::ScrollAnimation::none(),
+                        );
+                    }
+                }
+                // Mood / Genre Chips row (YT Music style)
             if !self.home_feed.moods.is_empty() {
                 let moods = self.home_feed.moods.clone();
                 egui::ScrollArea::horizontal()
@@ -2101,6 +2174,7 @@ impl YrApp {
                 }
             }
         });
+        self.home_v_drag_id = Some(scroll_out.id.with("area"));
     }
 
     fn render_search(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
@@ -3495,6 +3569,11 @@ impl YrApp {
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
+            .frame(
+                egui::Frame::window(&ctx.style())
+                    .fill(BG_SURFACE)
+                    .inner_margin(14.0),
+            )
             .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
             .show(ctx, |ui| {
                 ui.set_min_width(280.0);
