@@ -8,15 +8,15 @@ use eframe::CreationContext;
 use egui::{Align, Color32, CornerRadius, Image, Layout, RichText, Sense, Stroke, Vec2};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use yr_audio::{AudioEngine, AudioSnapshot};
 use yr_core::{
-    format_seconds, AlbumDetail, ArtistDetail, AudioQuality, ExploreFeed, GoogleDeviceAuth,
-    HomeFeed, HomeShelf, HomeShelfCard, HomeShelfLayout, LibraryStore, LyricsData, PlaybackQueue,
-    PlaybackStatus, PlaylistDetail, PlaylistSummary, SearchResults, ShelfCardKind, SponsorSegment,
-    Track,
+    format_seconds, optimize_thumb_url, AlbumDetail, ArtistDetail, AudioQuality, ExploreFeed,
+    GoogleDeviceAuth, HomeFeed, HomeShelf, HomeShelfCard, HomeShelfLayout, ImageLru, LibraryStore,
+    LyricsData, PlaybackQueue, PlaybackStatus, PlaylistDetail, PlaylistSummary, SearchResults,
+    ShelfCardKind, SponsorSegment, Track,
 };
 use yr_download::{DownloadManager, DownloadStatus, DownloadTask};
 use yr_provider::{MusicProvider, YtMusicProvider};
@@ -1084,6 +1084,11 @@ impl YrApp {
                 }
                 AppEvent::TrackAccentColorLoaded { url, color } => {
                     self.pending_color_urls.remove(&url);
+                    if self.cover_colors.len() >= 32 && !self.cover_colors.contains_key(&url) {
+                        if let Some(evict_key) = self.cover_colors.keys().next().cloned() {
+                            self.cover_colors.remove(&evict_key);
+                        }
+                    }
                     self.cover_colors.insert(url, color);
                 }
                 AppEvent::StreamResolved { track, result } => match result {
@@ -1197,6 +1202,8 @@ impl YrApp {
                 ctx.request_repaint_after(Duration::from_secs(1));
             }
         }
+
+        advance_and_prune_image_cache(ctx);
 
         let has_active_dl = self.downloads.iter().any(|d| {
             matches!(
@@ -1346,8 +1353,9 @@ impl eframe::App for YrApp {
                                     .as_ref()
                                     .and_then(|a| a.avatar_url.as_deref());
                                 if let Some(url) = avatar_url {
+                                    let thumb_uri = tracked_thumb_uri(url, 192);
                                     let av = ui.add(
-                                        Image::new(url)
+                                        Image::new(thumb_uri)
                                             .fit_to_exact_size(Vec2::splat(28.0))
                                             .corner_radius(CornerRadius::same(14))
                                             .sense(Sense::click()),
@@ -1735,8 +1743,9 @@ impl YrApp {
                     .as_ref()
                     .and_then(|a| a.avatar_url.as_deref());
                 if let Some(url) = avatar_url {
+                    let thumb_uri = tracked_thumb_uri(url, 192);
                     ui.add(
-                        Image::new(url)
+                        Image::new(thumb_uri)
                             .fit_to_exact_size(Vec2::splat(30.0))
                             .corner_radius(CornerRadius::same(15)),
                     );
@@ -2005,9 +2014,10 @@ impl YrApp {
                                     BG_SURFACE,
                                 );
                                 if let Some(url) = &card.thumbnail_url {
+                                    let thumb_uri = tracked_thumb_uri(url, 256);
                                     ui.put(
                                         rect,
-                                        Image::new(url.as_str())
+                                        Image::new(thumb_uri)
                                             .fit_to_exact_size(Vec2::splat(tile_size))
                                             .corner_radius(CornerRadius::same(8))
                                             .sense(Sense::hover()),
@@ -2025,15 +2035,22 @@ impl YrApp {
                                     egui::pos2(rect.left(), rect.bottom() - overlay_h),
                                     rect.max,
                                 );
-                                let fade_rect = egui::Rect::from_min_max(
-                                    egui::pos2(rect.left(), (rect.bottom() - overlay_h - 14.0).max(rect.top())),
-                                    egui::pos2(rect.right(), overlay_rect.top()),
-                                );
-                                ui.painter().rect_filled(
-                                    fade_rect,
-                                    CornerRadius::ZERO,
-                                    Color32::from_rgba_unmultiplied(0, 0, 0, 110),
-                                );
+                                // Smooth multi-band bottom gradient into rounded card floor.
+                                let band_h = 7.0;
+                                for (idx, alpha) in [28_u8, 68, 125].into_iter().enumerate() {
+                                    let band_bottom = overlay_rect.top() - (2 - idx) as f32 * band_h;
+                                    let band_top = (band_bottom - band_h).max(rect.top());
+                                    if band_bottom > band_top {
+                                        ui.painter().rect_filled(
+                                            egui::Rect::from_min_max(
+                                                egui::pos2(rect.left(), band_top),
+                                                egui::pos2(rect.right(), band_bottom),
+                                            ),
+                                            CornerRadius::ZERO,
+                                            Color32::from_rgba_unmultiplied(0, 0, 0, alpha),
+                                        );
+                                    }
+                                }
                                 ui.painter().rect_filled(
                                     overlay_rect,
                                     CornerRadius {
@@ -2042,7 +2059,7 @@ impl YrApp {
                                         sw: 8,
                                         se: 8,
                                     },
-                                    Color32::from_rgba_unmultiplied(0, 0, 0, 215),
+                                    Color32::from_rgba_unmultiplied(0, 0, 0, 198),
                                 );
                                 let clipped_painter = ui.painter().with_clip_rect(overlay_rect);
                                 clipped_painter.galley(
@@ -4073,8 +4090,9 @@ impl YrApp {
                     let art_size = (avail_w - 28.0).min(body_h * 0.43).clamp(155.0, 290.0);
                     ui.vertical_centered(|ui| {
                         let art_resp = if let Some(u) = track.thumbnail_url.as_deref() {
+                            let art_uri = tracked_thumb_uri(u, 544);
                             ui.add(
-                                Image::new(u)
+                                Image::new(art_uri)
                                     .fit_to_exact_size(Vec2::splat(art_size))
                                     .corner_radius(CornerRadius::same(14))
                                     .sense(Sense::drag()),
@@ -4698,7 +4716,7 @@ impl YrApp {
         let screen = ctx.screen_rect();
         egui::Area::new(egui::Id::new("yr_action_sheet_scrim"))
             .fixed_pos(screen.min)
-            .order(egui::Order::Foreground)
+            .order(egui::Order::Middle)
             .show(ctx, |ui| {
                 let (_, scrim_resp) = ui.allocate_exact_size(screen.size(), Sense::click());
                 ui.painter()
@@ -4708,20 +4726,25 @@ impl YrApp {
                 }
             });
 
-        egui::TopBottomPanel::bottom("yr_action_sheet_panel")
-            .frame(
+        egui::Area::new(egui::Id::new("yr_action_sheet_panel"))
+            .anchor(egui::Align2::CENTER_BOTTOM, Vec2::ZERO)
+            .order(egui::Order::Foreground)
+            .interactable(true)
+            .show(ctx, |ui| {
+                ui.set_width(screen.width());
                 egui::Frame::new()
-                    .fill(Color32::from_rgb(20, 20, 23))
+                    .fill(Color32::from_rgb(24, 24, 28))
+                    .stroke(Stroke::new(0.8_f32, Color32::from_rgb(48, 48, 54)))
                     .corner_radius(CornerRadius {
                         nw: 18,
                         ne: 18,
                         sw: 0,
                         se: 0,
                     })
-                    .inner_margin(egui::Margin::symmetric(14, 12)),
-            )
-            .show(ctx, |ui| {
-                // Header: Thumb | Title + Artist • Duration | ThumbUp | Close
+                    .inner_margin(egui::Margin::symmetric(14, 12))
+                    .show(ui, |ui| {
+                        ui.set_width((screen.width() - 28.0).max(180.0));
+                        // Header: Thumb | Title + Artist • Duration | ThumbUp | Close
                 ui.horizontal(|ui| {
                     render_thumb(ui, track.thumbnail_url.as_deref(), 46.0);
                     let tw = (ui.available_width() - 90.0).max(120.0);
@@ -4957,8 +4980,9 @@ impl YrApp {
                     self.action_sheet_track = None;
                 }
 
-                #[cfg(target_os = "android")]
-                ui.add_space(46.0);
+                        #[cfg(target_os = "android")]
+                        ui.add_space(46.0);
+                    });
             });
     }
 
@@ -5258,8 +5282,16 @@ fn render_collection_row(
 
 fn render_thumb(ui: &mut egui::Ui, url: Option<&str>, size: f32) {
     if let Some(u) = url {
+        let max_px = if size <= 72.0 {
+            192
+        } else if size <= 150.0 {
+            256
+        } else {
+            384
+        };
+        let thumb_uri = tracked_thumb_uri(u, max_px);
         ui.add(
-            Image::new(u)
+            Image::new(thumb_uri)
                 .fit_to_exact_size(Vec2::splat(size))
                 .corner_radius(CornerRadius::same(8)),
         );
@@ -5267,6 +5299,27 @@ fn render_thumb(ui: &mut egui::Ui, url: Option<&str>, size: f32) {
         let (rect, _) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
         ui.painter()
             .rect_filled(rect, CornerRadius::same(8), BG_ELEVATED);
+    }
+}
+
+static IMAGE_LRU: OnceLock<Mutex<ImageLru>> = OnceLock::new();
+
+fn image_lru() -> &'static Mutex<ImageLru> {
+    IMAGE_LRU.get_or_init(|| Mutex::new(ImageLru::default()))
+}
+
+fn tracked_thumb_uri(url: &str, max_px: u32) -> String {
+    let uri = optimize_thumb_url(url, max_px);
+    if !uri.is_empty() {
+        image_lru().lock().unwrap().touch(&uri);
+    }
+    uri
+}
+
+fn advance_and_prune_image_cache(ctx: &egui::Context) {
+    let evicted = image_lru().lock().unwrap().advance_and_collect_evictions();
+    for uri in evicted {
+        ctx.forget_image(&uri);
     }
 }
 
