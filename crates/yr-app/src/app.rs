@@ -1963,32 +1963,6 @@ impl YrApp {
         let scroll_out = egui::ScrollArea::vertical()
             .id_salt("home_vertical_scroll")
             .show(ui, |ui| {
-                if let Some(v_id) = expected_v_drag {
-                    let other_dragged = ctx.dragged_id().is_some_and(|id| id != v_id);
-                    if other_dragged {
-                        let clip = ui.clip_rect();
-                        let stolen_vertical_dy = ui.input(|i| {
-                            let origin_inside =
-                                i.pointer.press_origin().is_some_and(|p| clip.contains(p));
-                            if origin_inside && i.pointer.any_down() {
-                                let d = i.pointer.delta();
-                                if d.y.abs() > d.x.abs() * 0.75 && d.y.abs() > 0.25 {
-                                    Some(d.y)
-                                } else {
-                                    None
-                                }
-                            } else {
-                                None
-                            }
-                        });
-                        if let Some(dy) = stolen_vertical_dy {
-                            ui.scroll_with_delta_animation(
-                                Vec2::new(0.0, dy),
-                                egui::style::ScrollAnimation::none(),
-                            );
-                        }
-                    }
-                }
                 // Mood / Genre Chips row (YT Music style)
             if !self.home_feed.moods.is_empty() {
                 let moods = self.home_feed.moods.clone();
@@ -2173,6 +2147,33 @@ impl YrApp {
                 let recents = self.store.data.recent_tracks.clone();
                 for (idx, track) in recents.iter().take(8).enumerate() {
                     self.render_track_row(ui, ctx, track, &recents, idx, false);
+                }
+            }
+
+            if let Some(v_id) = expected_v_drag {
+                let other_dragged = ctx.dragged_id().is_some_and(|id| id != v_id);
+                if other_dragged {
+                    let clip = ui.clip_rect();
+                    let stolen_vertical_dy = ui.input(|i| {
+                        let origin_inside =
+                            i.pointer.press_origin().is_some_and(|p| clip.contains(p));
+                        if origin_inside && i.pointer.any_down() {
+                            let d = i.pointer.delta();
+                            if d.y.abs() > d.x.abs() * 0.75 && d.y.abs() > 0.25 {
+                                Some(d.y)
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    });
+                    if let Some(dy) = stolen_vertical_dy {
+                        ui.scroll_with_delta_animation(
+                            Vec2::new(0.0, dy),
+                            egui::style::ScrollAnimation::none(),
+                        );
+                    }
                 }
             }
         });

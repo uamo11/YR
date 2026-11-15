@@ -60,11 +60,9 @@ sleep 6
 adb shell screencap -p /data/local/tmp/01c_google_webview.png
 adb pull /data/local/tmp/01c_google_webview.png screenshots/01c_google_webview.png
 adb logcat -d | grep -i "YR_LOGIN" || true
-# Close WebView dialog via hardware BACK (only press if WebView/AlertDialog window is focused)
-if adb shell dumpsys window | grep -qi "AlertDialog\|PopupWindow\|accounts.google"; then
-  adb shell input keyevent 4
-  sleep 1
-fi
+# Close WebView dialog via its top-right "CERRAR" button (940, 80) + fallback BACK if still open
+adb shell input tap 940 80
+sleep 1
 # Tap modal "Cerrar" button (bottom-right inside centered modal)
 adb shell input tap 882 1660
 sleep 1
