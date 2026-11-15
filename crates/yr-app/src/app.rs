@@ -24,6 +24,7 @@ use yr_provider::{MusicProvider, YtMusicProvider};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum NavTab {
     Home,
+    Samples,
     Search,
     Library,
     Downloads,
@@ -180,6 +181,11 @@ pub struct YrApp {
     status_banner: Option<(String, Instant)>,
     seeking_secs: Option<f64>,
     home_v_drag_id: Option<egui::Id>,
+
+    sample_tracks: Vec<Track>,
+    sample_idx: usize,
+    sample_drag_y: f32,
+    sample_prewarmed: HashSet<String>,
 }
 
 async fn play_track_bg(
@@ -360,6 +366,10 @@ impl YrApp {
             status_banner: None,
             seeking_secs: None,
             home_v_drag_id: None,
+            sample_tracks: Vec::new(),
+            sample_idx: 0,
+            sample_drag_y: 0.0,
+            sample_prewarmed: HashSet::new(),
         };
 
         let (media_tx, mut media_rx) = mpsc::unbounded_channel();
@@ -993,7 +1003,10 @@ impl YrApp {
                 AppEvent::HomeLoaded(res) => {
                     self.home_loading = false;
                     match res {
-                        Ok(feed) => self.home_feed = feed,
+                        Ok(feed) => {
+                            self.home_feed = feed;
+                            self.rebuild_samples_deck();
+                        }
                         Err(e) => self.set_banner(format!("Sin conexión: {e}")),
                     }
                 }
@@ -1001,6 +1014,7 @@ impl YrApp {
                     self.explore_loading = false;
                     if let Ok(feed) = res {
                         self.explore_feed = feed;
+                        self.rebuild_samples_deck();
                     }
                 }
                 AppEvent::SearchLoaded(res) => {
@@ -1460,10 +1474,11 @@ impl eframe::App for YrApp {
                         "Biblioteca".to_string()
                     };
 
-                    ui.columns(3, |cols| {
+                    ui.columns(4, |cols| {
                         self.nav_button(&mut cols[0], NavTab::Home, "Principal");
-                        self.nav_button(&mut cols[1], NavTab::Search, "Buscar");
-                        self.nav_button(&mut cols[2], NavTab::Library, &lib_label);
+                        self.nav_button(&mut cols[1], NavTab::Samples, "Samples");
+                        self.nav_button(&mut cols[2], NavTab::Search, "Buscar");
+                        self.nav_button(&mut cols[3], NavTab::Library, &lib_label);
                     });
 
                     #[cfg(target_os = "android")]
@@ -1472,7 +1487,10 @@ impl eframe::App for YrApp {
         }
 
         // Main Content Area
-        let panel_frame = if fullscreen_player {
+        let samples_full_bleed = self.active_tab == NavTab::Samples
+            && !self.show_settings
+            && matches!(self.detail_view, DetailView::None);
+        let panel_frame = if fullscreen_player || samples_full_bleed {
             egui::Frame::new().fill(Color32::from_rgb(12, 12, 14)).inner_margin(0.0)
         } else {
             egui::Frame::new().fill(BG_PRIMARY).inner_margin(12.0)
@@ -1496,6 +1514,7 @@ impl eframe::App for YrApp {
 
                 match self.active_tab {
                     NavTab::Home => self.render_home(ui, ctx),
+                    NavTab::Samples => self.render_samples(ui, ctx, &snap),
                     NavTab::Search => self.render_search(ui, ctx),
                     NavTab::Library => self.render_library(ui, ctx),
                     NavTab::Downloads => {
@@ -1587,6 +1606,7 @@ impl YrApp {
         let bg = if selected { BG_ELEVATED } else { Color32::TRANSPARENT };
         let icon = match tab {
             NavTab::Home => icons::Icon::Home,
+            NavTab::Samples => icons::Icon::Samples,
             NavTab::Search => icons::Icon::Search,
             NavTab::Library => icons::Icon::Library,
             NavTab::Downloads => icons::Icon::DownloadsNav,
@@ -2593,6 +2613,459 @@ impl YrApp {
             }
         });
         self.home_v_drag_id = Some(scroll_out.id.with("area"));
+    }
+
+    /// Rebuilds the deduplicated vertical Samples discovery deck from loaded explore and home feeds.
+    fn rebuild_samples_deck(&mut self) {
+        let mut seen = HashSet::new();
+        let mut deck = Vec::new();
+        let candidates = self
+            .explore_feed
+            .trending_tracks
+            .iter()
+            .chain(self.home_feed.recommended_tracks.iter())
+            .chain(self.home_feed.quick_picks.iter())
+            .chain(self.home_feed.shelves.iter().flat_map(|s| s.tracks.iter()));
+        for t in candidates {
+            if t.id.starts_with("local_demo_") || !seen.insert(t.id.clone()) {
+                continue;
+            }
+            deck.push(t.clone());
+        }
+        if !deck.is_empty() {
+            self.sample_tracks = deck;
+            if self.sample_idx >= self.sample_tracks.len() {
+                self.sample_idx = 0;
+            }
+        }
+    }
+
+    fn prewarm_sample_neighbor(&mut self, idx: usize) {
+        let Some(track) = self.sample_tracks.get(idx).cloned() else {
+            return;
+        };
+        if !self.sample_prewarmed.insert(track.id.clone()) {
+            return;
+        }
+        let provider = Arc::clone(&self.provider);
+        let quality = self.store.data.config.stream_quality;
+        self.runtime.spawn(async move {
+            let _ = provider.resolve_audio_stream(&track.id, quality).await;
+        });
+    }
+
+    fn activate_sample_at(&mut self, idx: usize, ctx: &egui::Context) {
+        if self.sample_tracks.is_empty() {
+            return;
+        }
+        let clamped = idx.min(self.sample_tracks.len() - 1);
+        self.sample_idx = clamped;
+        self.sample_drag_y = 0.0;
+        let deck = self.sample_tracks.clone();
+        self.play_track_in_list(deck, clamped, ctx);
+        if clamped + 1 < self.sample_tracks.len() {
+            self.prewarm_sample_neighbor(clamped + 1);
+        }
+    }
+
+    fn render_samples(
+        &mut self,
+        ui: &mut egui::Ui,
+        ctx: &egui::Context,
+        snap: &AudioSnapshot,
+    ) {
+        if !self.explore_loaded_once {
+            self.load_explore(ctx);
+        }
+        if self.sample_tracks.is_empty() {
+            self.rebuild_samples_deck();
+        }
+
+        if self.sample_tracks.is_empty() {
+            let rect = ui.available_rect_before_wrap();
+            paint_ambient_gradient(ui.painter(), rect, Color32::from_rgb(64, 24, 32));
+            ui.allocate_new_ui(egui::UiBuilder::new().max_rect(rect), |ui| {
+                ui.vertical_centered(|ui| {
+                    ui.add_space((rect.height() * 0.34).max(40.0));
+                    if self.explore_loading || self.home_loading {
+                        ui.spinner();
+                        ui.add_space(10.0);
+                        ui.label(
+                            RichText::new("Cargando Samples...")
+                                .size(15.0)
+                                .color(TEXT_SECONDARY),
+                        );
+                    } else {
+                        ui.label(
+                            RichText::new("Sin muestras disponibles")
+                                .size(16.0)
+                                .strong()
+                                .color(TEXT_PRIMARY),
+                        );
+                        ui.add_space(10.0);
+                        if icons::icon_pill_button(
+                            ui,
+                            icons::Icon::Refresh,
+                            "Reintentar",
+                            BG_ELEVATED,
+                            Color32::WHITE,
+                        )
+                        .clicked()
+                        {
+                            self.load_explore(ctx);
+                            self.refresh_home(ctx);
+                        }
+                    }
+                });
+            });
+            return;
+        }
+
+        if self.sample_idx >= self.sample_tracks.len() {
+            self.sample_idx = 0;
+        }
+        let idx = self.sample_idx;
+        let total_samples = self.sample_tracks.len();
+        let track = self.sample_tracks[idx].clone();
+
+        if let Some(url) = track.thumbnail_url.as_deref() {
+            self.ensure_cover_color(Some(url), ctx);
+        }
+        self.prewarm_sample_neighbor(idx);
+        if idx + 1 < total_samples {
+            self.prewarm_sample_neighbor(idx + 1);
+        }
+
+        let ambient = track
+            .thumbnail_url
+            .as_deref()
+            .and_then(|u| self.cover_colors.get(u).copied())
+            .unwrap_or(Color32::from_rgb(76, 36, 44));
+        let card_rect = ui.available_rect_before_wrap();
+        paint_ambient_gradient(ui.painter(), card_rect, ambient);
+
+        let current_playing_id = self
+            .queue
+            .lock()
+            .unwrap()
+            .current_track()
+            .map(|t| t.id.clone());
+        let is_current = current_playing_id.as_deref() == Some(track.id.as_str());
+        let is_playing = is_current && snap.status == PlaybackStatus::Playing;
+
+        let pad_x = 16.0;
+        let inner_rect = card_rect.shrink2(Vec2::new(pad_x, 10.0));
+        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(inner_rect), |ui| {
+            // Top bar inside Samples card: badge + counter + live status
+            ui.horizontal(|ui| {
+                egui::Frame::new()
+                    .fill(Color32::from_black_alpha(110))
+                    .corner_radius(CornerRadius::same(14))
+                    .inner_margin(egui::Margin::symmetric(10, 4))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 6.0;
+                            let (ic_r, _) = ui.allocate_exact_size(Vec2::splat(13.0), Sense::hover());
+                            icons::draw_icon(ui.painter(), ic_r, icons::Icon::Samples, ACCENT_RED);
+                            ui.label(
+                                RichText::new(format!("Samples • {} / {}", idx + 1, total_samples))
+                                    .size(12.0)
+                                    .strong()
+                                    .color(Color32::WHITE),
+                            );
+                        });
+                    });
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    let status_text = if is_current {
+                        match &snap.status {
+                            PlaybackStatus::Playing => "Reproduciendo",
+                            PlaybackStatus::Paused => "En pausa",
+                            PlaybackStatus::Loading => "Cargando audio...",
+                            PlaybackStatus::Buffering => "Almacenando en búfer...",
+                            PlaybackStatus::Error(_) => "Error de audio",
+                            PlaybackStatus::Idle => "Listo",
+                        }
+                    } else {
+                        "Toca para reproducir"
+                    };
+                    ui.label(
+                        RichText::new(status_text)
+                            .size(11.5)
+                            .color(Color32::from_white_alpha(200)),
+                    );
+                });
+            });
+
+            let rail_w = 52.0;
+            let body_h = (ui.available_height() - 92.0).max(160.0);
+            ui.add_space(8.0);
+            ui.allocate_ui(Vec2::new(inner_rect.width(), body_h), |ui| {
+                ui.horizontal(|ui| {
+                    let art_zone_w = (inner_rect.width() - rail_w - 8.0).max(150.0);
+                    ui.allocate_ui(Vec2::new(art_zone_w, body_h), |ui| {
+                        ui.vertical_centered(|ui| {
+                            let art_size = (art_zone_w.min(body_h) - 8.0).clamp(150.0, 300.0);
+                            let y_off = ((body_h - art_size) * 0.5).max(0.0);
+                            ui.add_space(y_off);
+                            let (art_rect, art_resp) =
+                                ui.allocate_exact_size(Vec2::splat(art_size), Sense::click_and_drag());
+                            ui.painter().rect_filled(
+                                art_rect,
+                                CornerRadius::same(16),
+                                Color32::from_rgb(28, 28, 32),
+                            );
+                            let note_r = egui::Rect::from_center_size(
+                                art_rect.center(),
+                                Vec2::splat((art_size * 0.28).clamp(32.0, 68.0)),
+                            );
+                            icons::draw_icon(
+                                ui.painter(),
+                                note_r,
+                                icons::Icon::MusicNote,
+                                Color32::from_white_alpha(120),
+                            );
+                            if let Some(url) = &track.thumbnail_url {
+                                let hi_res = tracked_thumb_uri(url, 720);
+                                ui.put(
+                                    art_rect,
+                                    Image::new(hi_res)
+                                        .fit_to_exact_size(Vec2::splat(art_size))
+                                        .corner_radius(CornerRadius::same(16))
+                                        .sense(Sense::hover()),
+                                );
+                            }
+                            if is_current
+                                && matches!(
+                                    snap.status,
+                                    PlaybackStatus::Loading | PlaybackStatus::Buffering
+                                )
+                            {
+                                ui.painter().circle_filled(
+                                    art_rect.center(),
+                                    26.0,
+                                    Color32::from_black_alpha(165),
+                                );
+                                let spin_r = egui::Rect::from_center_size(
+                                    art_rect.center(),
+                                    Vec2::splat(26.0),
+                                );
+                                ui.put(spin_r, egui::Spinner::new().size(22.0));
+                            } else if !is_playing {
+                                ui.painter().circle_filled(
+                                    art_rect.center(),
+                                    26.0,
+                                    Color32::from_black_alpha(145),
+                                );
+                                let play_r = egui::Rect::from_center_size(
+                                    art_rect.center() + Vec2::new(2.0, 0.0),
+                                    Vec2::splat(22.0),
+                                );
+                                icons::draw_icon(
+                                    ui.painter(),
+                                    play_r,
+                                    icons::Icon::Play,
+                                    Color32::WHITE,
+                                );
+                            }
+                            if art_resp.dragged() {
+                                self.sample_drag_y += art_resp.drag_delta().y;
+                            }
+                            if art_resp.drag_stopped() {
+                                if self.sample_drag_y < -48.0 && idx + 1 < total_samples {
+                                    self.activate_sample_at(idx + 1, ctx);
+                                } else if self.sample_drag_y > 48.0 && idx > 0 {
+                                    self.activate_sample_at(idx - 1, ctx);
+                                }
+                                self.sample_drag_y = 0.0;
+                            } else if art_resp.clicked() {
+                                if is_current
+                                    && !matches!(
+                                        snap.status,
+                                        PlaybackStatus::Error(_) | PlaybackStatus::Idle
+                                    )
+                                {
+                                    if is_playing {
+                                        self.audio.pause();
+                                    } else {
+                                        self.audio.resume();
+                                    }
+                                } else {
+                                    self.activate_sample_at(idx, ctx);
+                                }
+                            }
+                        });
+                    });
+
+                    // Right-hand vertical action rail (Like, Save, Radio, Player, More)
+                    ui.allocate_ui(Vec2::new(rail_w, body_h), |ui| {
+                        ui.vertical_centered(|ui| {
+                            ui.add_space((body_h - 260.0).max(0.0) * 0.5);
+                            let liked = self.store.is_liked(&track.id);
+                            let rail_bg = Color32::from_black_alpha(120);
+                            if icons::icon_button(
+                                ui,
+                                icons::Icon::ThumbUp,
+                                42.0,
+                                20.0,
+                                rail_bg,
+                                if liked { ACCENT_RED } else { Color32::WHITE },
+                                21.0,
+                            )
+                            .clicked()
+                            {
+                                self.store.toggle_like(track.clone());
+                            }
+                            ui.add_space(10.0);
+                            if icons::icon_button(
+                                ui,
+                                icons::Icon::PlaylistAdd,
+                                42.0,
+                                20.0,
+                                rail_bg,
+                                Color32::WHITE,
+                                21.0,
+                            )
+                            .clicked()
+                            {
+                                self.playlist_picker_track = Some(track.clone());
+                            }
+                            ui.add_space(10.0);
+                            if icons::icon_button(
+                                ui,
+                                icons::Icon::Radio,
+                                42.0,
+                                20.0,
+                                rail_bg,
+                                Color32::WHITE,
+                                21.0,
+                            )
+                            .clicked()
+                            {
+                                self.start_radio(track.id.clone(), ctx);
+                            }
+                            ui.add_space(10.0);
+                            if icons::icon_button(
+                                ui,
+                                icons::Icon::ChevronUp,
+                                42.0,
+                                20.0,
+                                rail_bg,
+                                Color32::WHITE,
+                                21.0,
+                            )
+                            .clicked()
+                            {
+                                if !is_current {
+                                    self.activate_sample_at(idx, ctx);
+                                }
+                                self.now_playing_open = true;
+                            }
+                            ui.add_space(10.0);
+                            if icons::icon_button(
+                                ui,
+                                icons::Icon::MoreVert,
+                                42.0,
+                                20.0,
+                                rail_bg,
+                                Color32::WHITE,
+                                21.0,
+                            )
+                            .clicked()
+                            {
+                                self.action_sheet_track = Some(track.clone());
+                                self.action_sheet_context =
+                                    Some((self.sample_tracks.clone(), idx));
+                            }
+                        });
+                    });
+                });
+            });
+
+            // Bottom title, artist, step buttons & progress strip
+            ui.horizontal(|ui| {
+                let info_w = (inner_rect.width() - 96.0).max(120.0);
+                ui.allocate_ui(Vec2::new(info_w, 58.0), |ui| {
+                    ui.vertical(|ui| {
+                        ui.spacing_mut().item_spacing.y = 2.0;
+                        render_clamped_label(ui, &track.title, 17.0, Color32::WHITE, info_w, 2);
+                        let sub = match track.duration_secs.filter(|&s| s > 0) {
+                            Some(s) => format!("{} • {}", track.artist, format_seconds(s)),
+                            None => track.artist.clone(),
+                        };
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(sub)
+                                    .size(13.0)
+                                    .color(Color32::from_white_alpha(200)),
+                            )
+                            .truncate(),
+                        );
+                    });
+                });
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    let btn_bg = Color32::from_black_alpha(130);
+                    let next_fg = if idx + 1 < total_samples {
+                        Color32::WHITE
+                    } else {
+                        TEXT_SECONDARY
+                    };
+                    if icons::icon_button(
+                        ui,
+                        icons::Icon::ChevronDown,
+                        38.0,
+                        18.0,
+                        btn_bg,
+                        next_fg,
+                        19.0,
+                    )
+                    .clicked()
+                        && idx + 1 < total_samples
+                    {
+                        self.activate_sample_at(idx + 1, ctx);
+                    }
+                    ui.add_space(6.0);
+                    let prev_fg = if idx > 0 {
+                        Color32::WHITE
+                    } else {
+                        TEXT_SECONDARY
+                    };
+                    if icons::icon_button(
+                        ui,
+                        icons::Icon::ChevronUp,
+                        38.0,
+                        18.0,
+                        btn_bg,
+                        prev_fg,
+                        19.0,
+                    )
+                    .clicked()
+                        && idx > 0
+                    {
+                        self.activate_sample_at(idx - 1, ctx);
+                    }
+                });
+            });
+
+            if is_current {
+                let total = snap
+                    .duration_secs
+                    .or(track.duration_secs.map(|d| d as f64))
+                    .unwrap_or(1.0)
+                    .max(1.0);
+                let frac = (snap.position_secs / total).clamp(0.0, 1.0) as f32;
+                let (bar_r, _) =
+                    ui.allocate_exact_size(Vec2::new(inner_rect.width(), 3.0), Sense::hover());
+                ui.painter()
+                    .rect_filled(bar_r, 1.5, Color32::from_white_alpha(55));
+                if frac > 0.0 {
+                    let fill_r = egui::Rect::from_min_max(
+                        bar_r.min,
+                        egui::pos2(bar_r.left() + bar_r.width() * frac, bar_r.bottom()),
+                    );
+                    ui.painter().rect_filled(fill_r, 1.5, Color32::WHITE);
+                }
+            }
+        });
     }
 
     fn render_search(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
@@ -3816,29 +4289,7 @@ impl YrApp {
 
         // Ambient cover backdrop gradient fading into BG_PRIMARY at bottom.
         let bg_rect = ui.available_rect_before_wrap();
-        let top_col = Color32::from_rgb(
-            ((ambient.r() as f32 * 0.56).round() as u8).max(18),
-            ((ambient.g() as f32 * 0.56).round() as u8).max(16),
-            ((ambient.b() as f32 * 0.56).round() as u8).max(18),
-        );
-        let mid_col = Color32::from_rgb(
-            ((ambient.r() as f32 * 0.24).round() as u8).max(12),
-            ((ambient.g() as f32 * 0.24).round() as u8).max(12),
-            ((ambient.b() as f32 * 0.24).round() as u8).max(14),
-        );
-        let mut mesh = egui::Mesh::default();
-        let mid_y = bg_rect.top() + bg_rect.height() * 0.58;
-        mesh.colored_vertex(bg_rect.left_top(), top_col);
-        mesh.colored_vertex(bg_rect.right_top(), top_col);
-        mesh.colored_vertex(egui::pos2(bg_rect.left(), mid_y), mid_col);
-        mesh.colored_vertex(egui::pos2(bg_rect.right(), mid_y), mid_col);
-        mesh.colored_vertex(bg_rect.left_bottom(), BG_PRIMARY);
-        mesh.colored_vertex(bg_rect.right_bottom(), BG_PRIMARY);
-        mesh.add_triangle(0, 1, 2);
-        mesh.add_triangle(1, 3, 2);
-        mesh.add_triangle(2, 3, 4);
-        mesh.add_triangle(3, 5, 4);
-        ui.painter().add(egui::Shape::mesh(mesh));
+        paint_ambient_gradient(ui.painter(), bg_rect, ambient);
 
         let pad_x = 16.0;
         #[cfg(target_os = "android")]
@@ -5925,9 +6376,35 @@ fn friendly_error_message(prefix: &str, raw: &str) -> String {
     }
 }
 
+fn paint_ambient_gradient(painter: &egui::Painter, bg_rect: egui::Rect, ambient: Color32) {
+    let top_col = Color32::from_rgb(
+        ((ambient.r() as f32 * 0.72).round() as u8).max(20),
+        ((ambient.g() as f32 * 0.72).round() as u8).max(18),
+        ((ambient.b() as f32 * 0.72).round() as u8).max(20),
+    );
+    let mid_col = Color32::from_rgb(
+        ((ambient.r() as f32 * 0.36).round() as u8).max(14),
+        ((ambient.g() as f32 * 0.36).round() as u8).max(13),
+        ((ambient.b() as f32 * 0.36).round() as u8).max(15),
+    );
+    let mut mesh = egui::Mesh::default();
+    let mid_y = bg_rect.top() + bg_rect.height() * 0.58;
+    mesh.colored_vertex(bg_rect.left_top(), top_col);
+    mesh.colored_vertex(bg_rect.right_top(), top_col);
+    mesh.colored_vertex(egui::pos2(bg_rect.left(), mid_y), mid_col);
+    mesh.colored_vertex(egui::pos2(bg_rect.right(), mid_y), mid_col);
+    mesh.colored_vertex(bg_rect.left_bottom(), BG_PRIMARY);
+    mesh.colored_vertex(bg_rect.right_bottom(), BG_PRIMARY);
+    mesh.add_triangle(0, 1, 2);
+    mesh.add_triangle(1, 3, 2);
+    mesh.add_triangle(2, 3, 4);
+    mesh.add_triangle(3, 5, 4);
+    painter.add(egui::Shape::mesh(mesh));
+}
+
 fn generate_test_wav(path: &std::path::Path, freq_hz: f32, duration_secs: u32) -> std::io::Result<()> {
     use std::io::Write;
-    let sample_rate: u32 = 22050;
+    let sample_rate: u32 = 44100;
     let num_samples = sample_rate * duration_secs;
     let data_bytes = num_samples * 2;
     let mut f = std::fs::File::create(path)?;

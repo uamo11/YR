@@ -45,6 +45,7 @@ pub enum Icon {
     Trash,
     ArrowBack,
     MusicNote,
+    Samples,
 }
 
 /// Renders a crisp vector icon centered inside `rect`.
@@ -407,6 +408,14 @@ pub fn draw_icon(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32
             painter.line_segment([pt(-0.09, 0.34), pt(-0.09, -0.32)], stroke);
             painter.line_segment([pt(0.39, 0.24), pt(0.39, -0.42)], stroke);
             painter.line_segment([pt(-0.09, -0.32), pt(0.39, -0.42)], stroke);
+        }
+        Icon::Samples => {
+            // Double forward-play outline matching YouTube Music's Samples tab icon.
+            let front = [pt(-0.06, -0.38), pt(0.46, 0.0), pt(-0.06, 0.38)];
+            painter.add(egui::Shape::closed_line(front.to_vec(), stroke));
+            let back = [pt(-0.46, -0.34), pt(0.02, 0.0), pt(-0.46, 0.34)];
+            painter.line_segment([back[0], back[1]], stroke);
+            painter.line_segment([back[1], back[2]], stroke);
         }
     }
 }

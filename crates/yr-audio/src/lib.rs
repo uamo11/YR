@@ -191,10 +191,21 @@ fn audio_thread_main(
                         .and_then(|f| Decoder::new(BufReader::new(f)).map_err(|e| e.to_string()))
                     {
                         Ok(decoder) => {
-                            let dur = decoder
-                                .total_duration()
-                                .map(|d| d.as_secs_f64())
-                                .or(duration_hint.map(|d| d as f64));
+                            let is_wav = path
+                                .extension()
+                                .and_then(|e| e.to_str())
+                                .is_some_and(|e| e.eq_ignore_ascii_case("wav"));
+                            let dur = if is_wav {
+                                duration_hint
+                                    .filter(|&d| d > 0)
+                                    .map(|d| d as f64)
+                                    .or_else(|| decoder.total_duration().map(|d| d.as_secs_f64()))
+                            } else {
+                                decoder
+                                    .total_duration()
+                                    .map(|d| d.as_secs_f64())
+                                    .or_else(|| duration_hint.filter(|&d| d > 0).map(|d| d as f64))
+                            };
                             match Sink::try_new(handle) {
                                 Ok(new_sink) => {
                                     new_sink.set_volume(volume);
