@@ -570,6 +570,12 @@ fn open_progressive_stream(
                 .map_err(|_| "poisoned".to_string())?;
             guard = g;
         }
+        if let Some(err) = &guard.error {
+            return Err(err.clone());
+        }
+        if guard.written == 0 {
+            return Err("Stream vacío (0 bytes)".to_string());
+        }
     }
 
     Ok(ProgressiveFileReader {
