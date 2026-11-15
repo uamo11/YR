@@ -246,7 +246,9 @@ fn audio_thread_main(
                     let cache_file = cache_dir.join(format!("stream_{track_id}.tmp"));
 
                     match open_progressive_stream(&runtime, &url, cache_file, cancel) {
-                        Ok(reader) => match SymphoniaStreamDecoder::new(Box::new(reader)) {
+                        Ok(reader) => {
+                            let probed_flag = Arc::clone(&reader.probed);
+                            match SymphoniaStreamDecoder::new(Box::new(reader), Some(probed_flag)) {
                             Ok(decoder) => {
                                 let dur = decoder
                                     .total_duration()
@@ -275,7 +277,8 @@ fn audio_thread_main(
                             Err(e) => {
                                 set_status(&snapshot, PlaybackStatus::Error(e));
                             }
-                        },
+                            }
+                        }
                         Err(e) => {
                             set_status(&snapshot, PlaybackStatus::Error(e));
                         }
@@ -384,6 +387,7 @@ struct ProgressiveFileReader {
     state: Arc<(Mutex<StreamState>, Condvar)>,
     path: PathBuf,
     cancel: Arc<AtomicBool>,
+    probed: Arc<AtomicBool>,
 }
 
 impl Drop for ProgressiveFileReader {
@@ -458,6 +462,11 @@ impl Seek for ProgressiveFileReader {
 
 impl MediaSource for ProgressiveFileReader {
     fn is_seekable(&self) -> bool {
+        // Keep unseekable during format probing so `isomp4` starts playback immediately
+        // after `moov` instead of scanning every `mdat`/`moof` box across the file.
+        if !self.probed.load(Ordering::Acquire) {
+            return false;
+        }
         let (lock, _) = &*self.state;
         lock.lock()
             .map(|g| g.total.is_some() || g.finished)
@@ -465,6 +474,9 @@ impl MediaSource for ProgressiveFileReader {
     }
 
     fn byte_len(&self) -> Option<u64> {
+        if !self.probed.load(Ordering::Acquire) {
+            return None;
+        }
         let (lock, _) = &*self.state;
         lock.lock().ok().and_then(|g| g.total)
     }
@@ -482,7 +494,7 @@ struct SymphoniaStreamDecoder {
 }
 
 impl SymphoniaStreamDecoder {
-    fn new(source: Box<dyn MediaSource>) -> Result<Self, String> {
+    fn new(source: Box<dyn MediaSource>, probed_flag: Option<Arc<AtomicBool>>) -> Result<Self, String> {
         let mss = MediaSourceStream::new(source, Default::default());
         let mut hint = Hint::new();
         hint.with_extension("m4a");
@@ -497,6 +509,9 @@ impl SymphoniaStreamDecoder {
                 &MetadataOptions::default(),
             )
             .map_err(|e| e.to_string())?;
+        if let Some(flag) = probed_flag {
+            flag.store(true, Ordering::Release);
+        }
 
         let (track_id, codec_params, decoder) = probed
             .format
@@ -663,7 +678,7 @@ fn open_progressive_stream(
     let cancel_bg = Arc::clone(&cancel);
 
     runtime.spawn(async move {
-        const CHUNK_SIZE: u64 = 1_048_576;
+        const CHUNK_SIZE: u64 = 524_288;
         let client = shared_http_client();
 
         let set_err = |msg: String| {
@@ -830,11 +845,13 @@ fn open_progressive_stream(
         }
     }
 
+    let probed = Arc::new(AtomicBool::new(false));
     Ok(ProgressiveFileReader {
         file: reader_file,
         pos: 0,
         state,
         path,
         cancel,
+        probed,
     })
 }

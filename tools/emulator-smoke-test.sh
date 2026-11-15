@@ -91,7 +91,7 @@ sleep 1
 # 3. Open Settings (top right gear), trigger local audio demo (2 tracks)
 adb shell input tap 1000 135
 sleep 1
-adb shell input tap 300 1350
+adb shell input tap 300 1415
 sleep 4
 adb shell screencap -p /data/local/tmp/03_local_playing.png
 adb pull /data/local/tmp/03_local_playing.png screenshots/03_local_playing.png

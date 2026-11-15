@@ -3636,7 +3636,14 @@ impl YrApp {
         ui.painter().add(egui::Shape::mesh(mesh));
 
         let pad_x = 16.0;
-        let inner_rect = bg_rect.shrink2(Vec2::new(pad_x, 8.0));
+        #[cfg(target_os = "android")]
+        let (safe_top, safe_bottom) = (36.0_f32, 54.0_f32);
+        #[cfg(not(target_os = "android"))]
+        let (safe_top, safe_bottom) = (10.0_f32, 12.0_f32);
+        let inner_rect = egui::Rect::from_min_max(
+            egui::pos2(bg_rect.left() + pad_x, bg_rect.top() + safe_top),
+            egui::pos2(bg_rect.right() - pad_x, bg_rect.bottom() - safe_bottom),
+        );
         ui.allocate_new_ui(egui::UiBuilder::new().max_rect(inner_rect), |ui| {
             // Top bar: v chevron | optional sleep badge | more ⋮ button
             ui.horizontal(|ui| {
@@ -4068,7 +4075,7 @@ impl YrApp {
                 } else {
                     // Main Cover Now Playing view
                     ui.add_space(4.0);
-                    let art_size = (avail_w - 20.0).min(body_h * 0.46).clamp(168.0, 320.0);
+                    let art_size = (avail_w - 28.0).min(body_h * 0.43).clamp(155.0, 290.0);
                     ui.vertical_centered(|ui| {
                         let art_resp = if let Some(u) = track.thumbnail_url.as_deref() {
                             ui.add(

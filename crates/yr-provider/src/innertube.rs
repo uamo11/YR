@@ -712,17 +712,31 @@ pub async fn fetch_player_stream(
     let mut last_err = String::from("No stream returned");
 
     for (client_name, client_version, ua, client_id) in clients {
+        let client_obj = if client_name == "IOS" {
+            json!({
+                "clientName": client_name,
+                "clientVersion": client_version,
+                "deviceMake": "Apple",
+                "deviceModel": "iPhone16,2",
+                "hl": "es-419",
+                "gl": "MX",
+                "osName": "iOS",
+                "osVersion": "17.5.1.21F90"
+            })
+        } else {
+            json!({
+                "clientName": client_name,
+                "clientVersion": client_version,
+                "hl": "es-419",
+                "gl": "MX",
+                "androidSdkVersion": 32,
+                "osName": "Android",
+                "osVersion": "12"
+            })
+        };
         let body = json!({
             "context": {
-                "client": {
-                    "clientName": client_name,
-                    "clientVersion": client_version,
-                    "hl": "es-419",
-                    "gl": "MX",
-                    "androidSdkVersion": 32,
-                    "osName": if client_name == "IOS" { "iOS" } else { "Android" },
-                    "osVersion": if client_name == "IOS" { "17.5.1.21F90" } else { "12" }
-                }
+                "client": client_obj
             },
             "videoId": video_id,
             "contentCheckOk": true,
