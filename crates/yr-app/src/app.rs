@@ -411,16 +411,23 @@ impl YrApp {
                     }
                     let next = queue_tick.lock().ok().and_then(|mut q| q.next_track(false).cloned());
                     if let Some(track) = next {
-                        play_track_bg(
-                            track,
-                            quality_bg,
-                            Arc::clone(&dl_tick),
-                            Arc::clone(&provider_tick),
-                            audio_tick.clone(),
-                            ev_tx_tick.clone(),
-                            ctx_tick.clone(),
-                        )
-                        .await;
+                        let dl_next = Arc::clone(&dl_tick);
+                        let prov_next = Arc::clone(&provider_tick);
+                        let audio_next = audio_tick.clone();
+                        let ev_next = ev_tx_tick.clone();
+                        let ctx_next = ctx_tick.clone();
+                        tokio::spawn(async move {
+                            play_track_bg(
+                                track,
+                                quality_bg,
+                                dl_next,
+                                prov_next,
+                                audio_next,
+                                ev_next,
+                                ctx_next,
+                            )
+                            .await;
+                        });
                         continue;
                     }
                 }

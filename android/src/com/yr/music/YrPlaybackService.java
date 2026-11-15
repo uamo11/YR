@@ -107,6 +107,7 @@ public class YrPlaybackService extends Service {
         final Handler mainHandler = new Handler(Looper.getMainLooper());
         final CountDownLatch latch = new CountDownLatch(1);
         final AtomicReference<String> result = new AtomicReference<>(null);
+        final AtomicReference<String> fallbackMp4 = new AtomicReference<>(null);
         final AtomicReference<WebView> webRef = new AtomicReference<>(null);
 
         mainHandler.post(() -> {
@@ -159,6 +160,11 @@ public class YrPlaybackService extends Service {
                                     if (result.compareAndSet(null, clean)) {
                                         latch.countDown();
                                     }
+                                } else if (u.contains("mime=video/mp4")
+                                        || u.contains("mime%3Dvideo%2Fmp4")
+                                        || u.contains("itag=18")) {
+                                    String clean = u.replaceAll("&(range|rn|rbuf)=[^&]*", "");
+                                    fallbackMp4.compareAndSet(null, clean);
                                 }
                             }
                         } catch (Throwable ignored) {
@@ -185,7 +191,7 @@ public class YrPlaybackService extends Service {
         });
 
         try {
-            latch.await(10, TimeUnit.SECONDS);
+            latch.await(6, TimeUnit.SECONDS);
         } catch (InterruptedException ignored) {
         } finally {
             mainHandler.post(() -> {
@@ -200,8 +206,9 @@ public class YrPlaybackService extends Service {
                 }
             });
         }
-        Log.i("YR_WEB", "resolveAudioUrl end vid=" + videoId + " ok=" + (result.get() != null));
-        return result.get();
+        String finalUrl = result.get() != null ? result.get() : fallbackMp4.get();
+        Log.i("YR_WEB", "resolveAudioUrl end vid=" + videoId + " ok=" + (finalUrl != null));
+        return finalUrl;
     }
 
     @Override

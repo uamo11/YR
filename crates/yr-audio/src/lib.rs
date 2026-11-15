@@ -482,14 +482,18 @@ impl SymphoniaStreamDecoder {
             )
             .map_err(|e| e.to_string())?;
 
-        let track = probed
+        let (track_id, codec_params, decoder) = probed
             .format
             .tracks()
             .iter()
-            .find(|t| t.codec_params.codec != CODEC_TYPE_NULL)
+            .filter(|t| t.codec_params.codec != CODEC_TYPE_NULL)
+            .find_map(|t| {
+                symphonia::default::get_codecs()
+                    .make(&t.codec_params, &DecoderOptions::default())
+                    .ok()
+                    .map(|d| (t.id, t.codec_params.clone(), d))
+            })
             .ok_or_else(|| "Sin pista de audio compatible".to_string())?;
-        let track_id = track.id;
-        let codec_params = track.codec_params.clone();
         let total_duration = codec_params
             .time_base
             .zip(codec_params.n_frames)
@@ -497,10 +501,6 @@ impl SymphoniaStreamDecoder {
                 let t = tb.calc_time(frames);
                 Duration::from_secs(t.seconds) + Duration::from_secs_f64(t.frac)
             });
-
-        let decoder = symphonia::default::get_codecs()
-            .make(&codec_params, &DecoderOptions::default())
-            .map_err(|e| e.to_string())?;
 
         let spec = SignalSpec::new(
             codec_params.sample_rate.unwrap_or(44_100),
