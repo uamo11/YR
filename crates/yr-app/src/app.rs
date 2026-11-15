@@ -114,7 +114,7 @@ pub struct YrApp {
     show_settings: bool,
     new_playlist_name: String,
 
-    sleep_timer_until: Option<Instant>,
+    sleep_timer_until: Arc<std::sync::Mutex<Option<Instant>>>,
     sleep_after_track: Arc<std::sync::atomic::AtomicBool>,
     playlist_picker_track: Option<Track>,
 
@@ -238,7 +238,7 @@ impl YrApp {
             lyrics_loading: false,
             show_settings: false,
             new_playlist_name: String::new(),
-            sleep_timer_until: None,
+            sleep_timer_until: Arc::new(std::sync::Mutex::new(None)),
             sleep_after_track: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             playlist_picker_track: None,
             last_finished_counter: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -350,11 +350,39 @@ impl YrApp {
         let ctx_tick = cc.egui_ctx.clone();
         let fin_tick = Arc::clone(&app.last_finished_counter);
         let sleep_tick = Arc::clone(&app.sleep_after_track);
+        let timer_tick = Arc::clone(&app.sleep_timer_until);
         app.runtime.spawn(async move {
             use std::sync::atomic::Ordering;
             let mut interval = tokio::time::interval(Duration::from_secs(1));
             loop {
                 interval.tick().await;
+                let timer_expired = timer_tick
+                    .lock()
+                    .ok()
+                    .and_then(|mut g| {
+                        if let Some(until) = *g {
+                            if Instant::now() >= until {
+                                *g = None;
+                                return Some(true);
+                            }
+                        }
+                        None
+                    })
+                    .unwrap_or(false);
+                if timer_expired {
+                    audio_tick.pause();
+                    if let Some(t) = queue_tick.lock().ok().and_then(|q| q.current_track().cloned()) {
+                        let snap = audio_tick.snapshot();
+                        crate::android_media::update_playback(
+                            &t.title,
+                            &t.artist,
+                            false,
+                            (snap.position_secs * 1000.0) as u64,
+                            t.duration_secs.unwrap_or(0) * 1000,
+                        );
+                    }
+                    continue;
+                }
                 let snap = audio_tick.snapshot();
                 if snap.finished_counter > fin_tick.load(Ordering::SeqCst) {
                     fin_tick.store(snap.finished_counter, Ordering::SeqCst);
@@ -794,9 +822,10 @@ impl YrApp {
             self.maybe_fetch_suggestions(ctx);
         }
 
-        if let Some(until) = self.sleep_timer_until {
+        let active_timer = *self.sleep_timer_until.lock().unwrap();
+        if let Some(until) = active_timer {
             if Instant::now() >= until {
-                self.sleep_timer_until = None;
+                *self.sleep_timer_until.lock().unwrap() = None;
                 self.audio.pause();
                 self.set_banner("Temporizador de apagado: reproducción pausada");
             } else {
@@ -1979,7 +2008,8 @@ impl YrApp {
             }
 
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                let timer_label = if let Some(until) = self.sleep_timer_until {
+                let active_until = *self.sleep_timer_until.lock().unwrap();
+                let timer_label = if let Some(until) = active_until {
                     let rem = until
                         .saturating_duration_since(Instant::now())
                         .as_secs();
@@ -1995,7 +2025,7 @@ impl YrApp {
                 ui.menu_button(timer_label, |ui| {
                     for mins in [15_u64, 30, 45, 60] {
                         if ui.button(format!("{mins} minutos")).clicked() {
-                            self.sleep_timer_until =
+                            *self.sleep_timer_until.lock().unwrap() =
                                 Some(Instant::now() + Duration::from_secs(mins * 60));
                             self.sleep_after_track
                                 .store(false, std::sync::atomic::Ordering::SeqCst);
@@ -2004,19 +2034,19 @@ impl YrApp {
                         }
                     }
                     if ui.button("Al finalizar la canción").clicked() {
-                        self.sleep_timer_until = None;
+                        *self.sleep_timer_until.lock().unwrap() = None;
                         self.sleep_after_track
                             .store(true, std::sync::atomic::Ordering::SeqCst);
                         self.set_banner("Se detendrá al finalizar la canción");
                         ui.close_menu();
                     }
-                    if (self.sleep_timer_until.is_some()
+                    if (active_until.is_some()
                         || self
                             .sleep_after_track
                             .load(std::sync::atomic::Ordering::SeqCst))
                         && ui.button("Desactivar temporizador").clicked()
                     {
-                        self.sleep_timer_until = None;
+                        *self.sleep_timer_until.lock().unwrap() = None;
                         self.sleep_after_track
                             .store(false, std::sync::atomic::Ordering::SeqCst);
                         ui.close_menu();
