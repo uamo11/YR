@@ -12,8 +12,17 @@ import android.media.MediaMetadata;
 import android.media.session.MediaSession;
 import android.media.session.PlaybackState;
 import android.os.Build;
+import android.os.Handler;
 import android.os.IBinder;
+import android.os.Looper;
 import android.os.PowerManager;
+import android.webkit.WebResourceRequest;
+import android.webkit.WebSettings;
+import android.webkit.WebView;
+import android.webkit.WebViewClient;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 
 public class YrPlaybackService extends Service {
     private static final String CHANNEL_ID = "yr_playback_channel";
@@ -84,6 +93,85 @@ public class YrPlaybackService extends Service {
             ctx.stopService(new Intent(ctx, YrPlaybackService.class));
         } catch (Throwable ignored) {
         }
+    }
+
+    public static String resolveAudioUrl(final Context ctx, final String videoId) {
+        if (ctx == null || videoId == null || videoId.isEmpty()) return null;
+        if (Looper.myLooper() == Looper.getMainLooper()) return null;
+
+        final Handler mainHandler = new Handler(Looper.getMainLooper());
+        final CountDownLatch latch = new CountDownLatch(1);
+        final AtomicReference<String> result = new AtomicReference<>(null);
+        final AtomicReference<WebView> webRef = new AtomicReference<>(null);
+
+        mainHandler.post(() -> {
+            try {
+                WebView wv = new WebView(ctx.getApplicationContext());
+                webRef.set(wv);
+                WebSettings ws = wv.getSettings();
+                ws.setJavaScriptEnabled(true);
+                ws.setDomStorageEnabled(true);
+                ws.setMediaPlaybackRequiresUserGesture(false);
+                ws.setUserAgentString(
+                        "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 "
+                                + "(KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
+                );
+                wv.setWebViewClient(new WebViewClient() {
+                    @Override
+                    public android.webkit.WebResourceResponse shouldInterceptRequest(
+                            WebView view, WebResourceRequest request
+                    ) {
+                        try {
+                            String u = request.getUrl().toString();
+                            if (u.contains("googlevideo.com/videoplayback")
+                                    && (u.contains("mime=audio/mp4")
+                                            || u.contains("mime%3Daudio%2Fmp4")
+                                            || u.contains("itag=140")
+                                            || u.contains("itag=139"))) {
+                                String clean = u.replaceAll("&(range|rn|rbuf)=[^&]*", "");
+                                if (result.compareAndSet(null, clean)) {
+                                    latch.countDown();
+                                }
+                            }
+                        } catch (Throwable ignored) {
+                        }
+                        return super.shouldInterceptRequest(view, request);
+                    }
+
+                    @Override
+                    public void onPageFinished(WebView view, String url) {
+                        try {
+                            view.evaluateJavascript(
+                                    "try{var v=document.querySelector('video');if(v){v.muted=true;v.play();}}catch(e){}",
+                                    null
+                            );
+                        } catch (Throwable ignored) {
+                        }
+                    }
+                });
+                wv.loadUrl("https://www.youtube.com/embed/" + videoId + "?autoplay=1&mute=1&playsinline=1");
+            } catch (Throwable t) {
+                latch.countDown();
+            }
+        });
+
+        try {
+            latch.await(7, TimeUnit.SECONDS);
+        } catch (InterruptedException ignored) {
+        } finally {
+            mainHandler.post(() -> {
+                try {
+                    WebView wv = webRef.get();
+                    if (wv != null) {
+                        wv.stopLoading();
+                        wv.loadUrl("about:blank");
+                        wv.destroy();
+                    }
+                } catch (Throwable ignored) {
+                }
+            });
+        }
+        return result.get();
     }
 
     @Override

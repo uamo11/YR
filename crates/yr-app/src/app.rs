@@ -156,11 +156,21 @@ async fn play_track_bg(
         return;
     }
 
-    let res = provider
-        .resolve_audio_stream(&track.id, quality)
+    let vid = track.id.clone();
+    let webview_url = tokio::task::spawn_blocking(move || crate::android_media::resolve_audio_url(&vid))
         .await
-        .map(|s| s.url)
-        .map_err(|e| e.to_string());
+        .ok()
+        .flatten();
+
+    let res = if let Some(url) = webview_url {
+        Ok(url)
+    } else {
+        provider
+            .resolve_audio_stream(&track.id, quality)
+            .await
+            .map(|s| s.url)
+            .map_err(|e| e.to_string())
+    };
     match res {
         Ok(url) => {
             audio.play_url(url, track.id, track.duration_secs);
@@ -2023,8 +2033,13 @@ impl YrApp {
                     "🌙".to_string()
                 };
                 ui.menu_button(timer_label, |ui| {
-                    for mins in [15_u64, 30, 45, 60] {
-                        if ui.button(format!("{mins} minutos")).clicked() {
+                    for mins in [1_u64, 15, 30, 45, 60] {
+                        let label = if mins == 1 {
+                            "1 minuto".to_string()
+                        } else {
+                            format!("{mins} minutos")
+                        };
+                        if ui.button(label).clicked() {
                             *self.sleep_timer_until.lock().unwrap() =
                                 Some(Instant::now() + Duration::from_secs(mins * 60));
                             self.sleep_after_track

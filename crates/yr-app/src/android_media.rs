@@ -1,5 +1,3 @@
-use tokio::sync::mpsc;
-
 #[derive(Debug, Clone, Copy)]
 pub enum MediaAction {
     Play,
@@ -129,6 +127,37 @@ mod imp {
         );
     }
 
+    pub fn resolve_audio_url(video_id: &str) -> Option<String> {
+        let bridge = BRIDGE.get()?;
+        let mut env = bridge.vm.attach_current_thread().ok()?;
+        let j_vid = env.new_string(video_id).ok()?;
+        let service_cls: &JClass = bridge.service_class.as_obj().into();
+        let res = env.call_static_method(
+            service_cls,
+            "resolveAudioUrl",
+            "(Landroid/content/Context;Ljava/lang/String;)Ljava/lang/String;",
+            &[
+                JValue::Object(bridge.app_ctx.as_obj()),
+                JValue::Object(&j_vid),
+            ],
+        );
+        match res {
+            Ok(val) => {
+                let obj = val.l().ok()?;
+                if obj.is_null() {
+                    return None;
+                }
+                let jstr: jni::objects::JString = obj.into();
+                env.get_string(&jstr).ok().map(|s| s.into())
+            }
+            Err(e) => {
+                log::warn!("android_media: resolveAudioUrl failed: {e:?}");
+                let _ = env.exception_clear();
+                None
+            }
+        }
+    }
+
     #[no_mangle]
     pub extern "system" fn Java_com_yr_music_YrPlaybackService_nativeOnMediaAction(
         _env: JNIEnv,
@@ -161,8 +190,11 @@ mod imp {
     pub fn update_playback(_title: &str, _artist: &str, _playing: bool, _pos_ms: u64, _dur_ms: u64) {
     }
     pub fn stop_service() {}
+    pub fn resolve_audio_url(_video_id: &str) -> Option<String> {
+        None
+    }
 }
 
 #[cfg(target_os = "android")]
 pub use imp::init;
-pub use imp::{set_action_sender, stop_service, update_playback};
+pub use imp::{resolve_audio_url, set_action_sender, stop_service, update_playback};

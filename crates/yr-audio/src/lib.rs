@@ -478,30 +478,47 @@ fn open_progressive_stream(
     let cancel_bg = Arc::clone(&cancel);
 
     runtime.spawn(async move {
+        const CHUNK_SIZE: u64 = 262_144;
         let client = reqwest::Client::new();
-        let resp = match client.get(&url_owned).send().await {
-            Ok(r) if r.status().is_success() => r,
+
+        let set_err = |msg: String| {
+            let (lock, cvar) = &*state_bg;
+            if let Ok(mut g) = lock.lock() {
+                g.error = Some(msg);
+                g.finished = true;
+            }
+            cvar.notify_all();
+        };
+
+        let first_resp = match client
+            .get(&url_owned)
+            .header(reqwest::header::RANGE, format!("bytes=0-{}", CHUNK_SIZE - 1))
+            .send()
+            .await
+        {
+            Ok(r) if r.status().is_success() || r.status() == reqwest::StatusCode::PARTIAL_CONTENT => r,
             Ok(r) => {
-                let (lock, cvar) = &*state_bg;
-                if let Ok(mut g) = lock.lock() {
-                    g.error = Some(format!("HTTP {}", r.status()));
-                    g.finished = true;
-                }
-                cvar.notify_all();
+                set_err(format!("HTTP {}", r.status()));
                 return;
             }
             Err(e) => {
-                let (lock, cvar) = &*state_bg;
-                if let Ok(mut g) = lock.lock() {
-                    g.error = Some(e.to_string());
-                    g.finished = true;
-                }
-                cvar.notify_all();
+                set_err(e.to_string());
                 return;
             }
         };
 
-        let total = resp.content_length();
+        let is_partial = first_resp.status() == reqwest::StatusCode::PARTIAL_CONTENT;
+        let mut total = if is_partial {
+            first_resp
+                .headers()
+                .get(reqwest::header::CONTENT_RANGE)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.rsplit('/').next())
+                .and_then(|n| n.parse::<u64>().ok())
+        } else {
+            first_resp.content_length()
+        };
+
         {
             let (lock, cvar) = &*state_bg;
             if let Ok(mut g) = lock.lock() {
@@ -510,35 +527,85 @@ fn open_progressive_stream(
             cvar.notify_all();
         }
 
-        let mut stream = resp.bytes_stream();
-        while let Some(item) = stream.next().await {
-            if cancel_bg.load(Ordering::Relaxed) {
-                break;
-            }
-            match item {
-                Ok(bytes) => {
-                    if let Err(e) = writer.write_all(&bytes) {
+        let mut written_total: u64 = 0;
+        let mut current_resp = Some(first_resp);
+
+        while let Some(resp) = current_resp.take() {
+            let mut chunk_written: u64 = 0;
+            let mut stream = resp.bytes_stream();
+            while let Some(item) = stream.next().await {
+                if cancel_bg.load(Ordering::Relaxed) {
+                    break;
+                }
+                match item {
+                    Ok(bytes) => {
+                        if let Err(e) = writer.write_all(&bytes) {
+                            set_err(e.to_string());
+                            return;
+                        }
+                        let len = bytes.len() as u64;
+                        written_total += len;
+                        chunk_written += len;
                         let (lock, cvar) = &*state_bg;
                         if let Ok(mut g) = lock.lock() {
-                            g.error = Some(e.to_string());
-                            g.finished = true;
+                            g.written += len;
                         }
                         cvar.notify_all();
+                    }
+                    Err(e) => {
+                        set_err(e.to_string());
                         return;
                     }
-                    let (lock, cvar) = &*state_bg;
-                    if let Ok(mut g) = lock.lock() {
-                        g.written += bytes.len() as u64;
+                }
+            }
+
+            if cancel_bg.load(Ordering::Relaxed) || !is_partial || chunk_written == 0 {
+                break;
+            }
+            if let Some(t) = total {
+                if written_total >= t {
+                    break;
+                }
+            }
+
+            let end = match total {
+                Some(t) => (written_total + CHUNK_SIZE - 1).min(t.saturating_sub(1)),
+                None => written_total + CHUNK_SIZE - 1,
+            };
+            match client
+                .get(&url_owned)
+                .header(
+                    reqwest::header::RANGE,
+                    format!("bytes={written_total}-{end}"),
+                )
+                .send()
+                .await
+            {
+                Ok(r) if r.status() == reqwest::StatusCode::RANGE_NOT_SATISFIABLE => break,
+                Ok(r) if r.status().is_success() || r.status() == reqwest::StatusCode::PARTIAL_CONTENT => {
+                    if total.is_none() {
+                        total = r
+                            .headers()
+                            .get(reqwest::header::CONTENT_RANGE)
+                            .and_then(|v| v.to_str().ok())
+                            .and_then(|s| s.rsplit('/').next())
+                            .and_then(|n| n.parse::<u64>().ok());
+                        if let Some(t) = total {
+                            let (lock, cvar) = &*state_bg;
+                            if let Ok(mut g) = lock.lock() {
+                                g.total = Some(t);
+                            }
+                            cvar.notify_all();
+                        }
                     }
-                    cvar.notify_all();
+                    current_resp = Some(r);
+                }
+                Ok(r) => {
+                    set_err(format!("HTTP {}", r.status()));
+                    return;
                 }
                 Err(e) => {
-                    let (lock, cvar) = &*state_bg;
-                    if let Ok(mut g) = lock.lock() {
-                        g.error = Some(e.to_string());
-                        g.finished = true;
-                    }
-                    cvar.notify_all();
+                    set_err(e.to_string());
                     return;
                 }
             }
