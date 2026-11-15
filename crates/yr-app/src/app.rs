@@ -1452,10 +1452,15 @@ impl eframe::App for YrApp {
             egui::TopBottomPanel::bottom("yr_bottom_bar")
                 .frame(egui::Frame::new().fill(Color32::from_rgb(16, 16, 18)).inner_margin(6.0))
                 .show(ctx, |ui| {
+                    let in_samples_root = self.active_tab == NavTab::Samples
+                        && !self.show_settings
+                        && matches!(self.detail_view, DetailView::None);
                     let maybe_track = self.queue.lock().unwrap().current_track().cloned();
-                    if let Some(track) = maybe_track {
-                        self.render_mini_player(ui, ctx, &track, &snap);
-                        ui.add_space(4.0);
+                    if !in_samples_root {
+                        if let Some(track) = maybe_track {
+                            self.render_mini_player(ui, ctx, &track, &snap);
+                            ui.add_space(4.0);
+                        }
                     }
 
                     let dl_active = self
@@ -2663,6 +2668,7 @@ impl YrApp {
         self.sample_drag_y = 0.0;
         let deck = self.sample_tracks.clone();
         self.play_track_in_list(deck, clamped, ctx);
+        self.now_playing_open = false;
         if clamped + 1 < self.sample_tracks.len() {
             self.prewarm_sample_neighbor(clamped + 1);
         }
