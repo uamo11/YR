@@ -97,8 +97,12 @@ public class YrPlaybackService extends Service {
     }
 
     public static String resolveAudioUrl(final Context ctx, final String videoId) {
+        Log.i("YR_WEB", "resolveAudioUrl start vid=" + videoId);
         if (ctx == null || videoId == null || videoId.isEmpty()) return null;
-        if (Looper.myLooper() == Looper.getMainLooper()) return null;
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            Log.w("YR_WEB", "resolveAudioUrl called on main looper");
+            return null;
+        }
 
         final Handler mainHandler = new Handler(Looper.getMainLooper());
         final CountDownLatch latch = new CountDownLatch(1);
@@ -109,6 +113,7 @@ public class YrPlaybackService extends Service {
             try {
                 WebView wv = new WebView(ctx.getApplicationContext());
                 webRef.set(wv);
+                wv.layout(0, 0, 360, 200);
                 WebSettings ws = wv.getSettings();
                 ws.setJavaScriptEnabled(true);
                 ws.setDomStorageEnabled(true);
@@ -118,21 +123,42 @@ public class YrPlaybackService extends Service {
                                 + "(KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
                 );
                 wv.setWebViewClient(new WebViewClient() {
+                    private int gvCount = 0;
+
+                    @Override
+                    public void onPageStarted(WebView view, String url, android.graphics.Bitmap favicon) {
+                        try {
+                            view.evaluateJavascript(
+                                    "try{if(window.MediaSource&&MediaSource.isTypeSupported){"
+                                            + "var o=MediaSource.isTypeSupported.bind(MediaSource);"
+                                            + "MediaSource.isTypeSupported=function(t){"
+                                            + "if(t&&t.indexOf('webm')!==-1)return false;return o(t);};}}catch(e){}",
+                                    null
+                            );
+                        } catch (Throwable ignored) {
+                        }
+                    }
+
                     @Override
                     public android.webkit.WebResourceResponse shouldInterceptRequest(
                             WebView view, WebResourceRequest request
                     ) {
                         try {
                             String u = request.getUrl().toString();
-                            if (u.contains("googlevideo.com/videoplayback")
-                                    && (u.contains("mime=audio/mp4")
-                                            || u.contains("mime%3Daudio%2Fmp4")
-                                            || u.contains("itag=140")
-                                            || u.contains("itag=139"))) {
-                                String clean = u.replaceAll("&(range|rn|rbuf)=[^&]*", "");
-                                Log.i("YR_WEB", "Intercepted audio URL for " + videoId);
-                                if (result.compareAndSet(null, clean)) {
-                                    latch.countDown();
+                            if (u.contains("googlevideo.com/videoplayback")) {
+                                if (gvCount < 5) {
+                                    gvCount++;
+                                    Log.i("YR_WEB", "gv[" + gvCount + "]: " + u.substring(0, Math.min(180, u.length())));
+                                }
+                                if (u.contains("mime=audio/mp4")
+                                        || u.contains("mime%3Daudio%2Fmp4")
+                                        || u.contains("itag=140")
+                                        || u.contains("itag=139")) {
+                                    String clean = u.replaceAll("&(range|rn|rbuf)=[^&]*", "");
+                                    Log.i("YR_WEB", "Intercepted audio/mp4 URL for " + videoId);
+                                    if (result.compareAndSet(null, clean)) {
+                                        latch.countDown();
+                                    }
                                 }
                             }
                         } catch (Throwable ignored) {
@@ -151,7 +177,7 @@ public class YrPlaybackService extends Service {
                         }
                     }
                 });
-                wv.loadUrl("https://www.youtube.com/embed/" + videoId + "?autoplay=1&mute=1&playsinline=1");
+                wv.loadUrl("https://m.youtube.com/watch?v=" + videoId);
             } catch (Throwable t) {
                 Log.e("YR_WEB", "resolveAudioUrl failed", t);
                 latch.countDown();
@@ -159,7 +185,7 @@ public class YrPlaybackService extends Service {
         });
 
         try {
-            latch.await(7, TimeUnit.SECONDS);
+            latch.await(10, TimeUnit.SECONDS);
         } catch (InterruptedException ignored) {
         } finally {
             mainHandler.post(() -> {
@@ -174,6 +200,7 @@ public class YrPlaybackService extends Service {
                 }
             });
         }
+        Log.i("YR_WEB", "resolveAudioUrl end vid=" + videoId + " ok=" + (result.get() != null));
         return result.get();
     }
 
