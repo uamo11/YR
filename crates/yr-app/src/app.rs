@@ -115,7 +115,7 @@ pub struct YrApp {
     new_playlist_name: String,
 
     sleep_timer_until: Option<Instant>,
-    sleep_after_track: bool,
+    sleep_after_track: Arc<std::sync::atomic::AtomicBool>,
     playlist_picker_track: Option<Track>,
 
     last_finished_counter: Arc<std::sync::atomic::AtomicU64>,
@@ -239,7 +239,7 @@ impl YrApp {
             show_settings: false,
             new_playlist_name: String::new(),
             sleep_timer_until: None,
-            sleep_after_track: false,
+            sleep_after_track: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             playlist_picker_track: None,
             last_finished_counter: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             last_media_sync: None,
@@ -349,6 +349,7 @@ impl YrApp {
         let ev_tx_tick = app.event_tx.clone();
         let ctx_tick = cc.egui_ctx.clone();
         let fin_tick = Arc::clone(&app.last_finished_counter);
+        let sleep_tick = Arc::clone(&app.sleep_after_track);
         app.runtime.spawn(async move {
             use std::sync::atomic::Ordering;
             let mut interval = tokio::time::interval(Duration::from_secs(1));
@@ -357,6 +358,19 @@ impl YrApp {
                 let snap = audio_tick.snapshot();
                 if snap.finished_counter > fin_tick.load(Ordering::SeqCst) {
                     fin_tick.store(snap.finished_counter, Ordering::SeqCst);
+                    if sleep_tick.swap(false, Ordering::SeqCst) {
+                        audio_tick.pause();
+                        if let Some(t) = queue_tick.lock().ok().and_then(|q| q.current_track().cloned()) {
+                            crate::android_media::update_playback(
+                                &t.title,
+                                &t.artist,
+                                false,
+                                0,
+                                t.duration_secs.unwrap_or(0) * 1000,
+                            );
+                        }
+                        continue;
+                    }
                     let next = queue_tick.lock().ok().and_then(|mut q| q.next_track(false).cloned());
                     if let Some(track) = next {
                         play_track_bg(
@@ -809,8 +823,10 @@ impl YrApp {
         if snap.finished_counter > self.last_finished_counter.load(std::sync::atomic::Ordering::SeqCst) {
             self.last_finished_counter
                 .store(snap.finished_counter, std::sync::atomic::Ordering::SeqCst);
-            if self.sleep_after_track {
-                self.sleep_after_track = false;
+            if self
+                .sleep_after_track
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
                 self.audio.pause();
                 self.set_banner("Temporizador: detenido al finalizar la canción");
             } else if self.queue.lock().unwrap().next_track(false).is_some() {
@@ -1968,7 +1984,10 @@ impl YrApp {
                         .saturating_duration_since(Instant::now())
                         .as_secs();
                     format!("🌙 {}:{:02}", rem / 60, rem % 60)
-                } else if self.sleep_after_track {
+                } else if self
+                    .sleep_after_track
+                    .load(std::sync::atomic::Ordering::SeqCst)
+                {
                     "🌙 Fin".to_string()
                 } else {
                     "🌙".to_string()
@@ -1978,22 +1997,28 @@ impl YrApp {
                         if ui.button(format!("{mins} minutos")).clicked() {
                             self.sleep_timer_until =
                                 Some(Instant::now() + Duration::from_secs(mins * 60));
-                            self.sleep_after_track = false;
+                            self.sleep_after_track
+                                .store(false, std::sync::atomic::Ordering::SeqCst);
                             self.set_banner(format!("Temporizador: {mins} min"));
                             ui.close_menu();
                         }
                     }
                     if ui.button("Al finalizar la canción").clicked() {
                         self.sleep_timer_until = None;
-                        self.sleep_after_track = true;
+                        self.sleep_after_track
+                            .store(true, std::sync::atomic::Ordering::SeqCst);
                         self.set_banner("Se detendrá al finalizar la canción");
                         ui.close_menu();
                     }
-                    if (self.sleep_timer_until.is_some() || self.sleep_after_track)
+                    if (self.sleep_timer_until.is_some()
+                        || self
+                            .sleep_after_track
+                            .load(std::sync::atomic::Ordering::SeqCst))
                         && ui.button("Desactivar temporizador").clicked()
                     {
                         self.sleep_timer_until = None;
-                        self.sleep_after_track = false;
+                        self.sleep_after_track
+                            .store(false, std::sync::atomic::Ordering::SeqCst);
                         ui.close_menu();
                     }
                 });
