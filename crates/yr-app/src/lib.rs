@@ -1,5 +1,6 @@
 pub mod android_media;
 pub mod app;
+pub mod icons;
 pub mod theme;
 
 pub use app::YrApp;

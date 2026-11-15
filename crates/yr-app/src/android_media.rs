@@ -12,7 +12,7 @@ pub enum MediaAction {
 #[cfg(target_os = "android")]
 mod imp {
     use super::MediaAction;
-    use jni::objects::{GlobalRef, JClass, JObject, JValue};
+    use jni::objects::{GlobalRef, JClass, JObject, JString, JValue};
     use jni::sys::{jint, jlong};
     use jni::{JNIEnv, JavaVM};
     use std::ffi::c_void;
@@ -27,9 +27,14 @@ mod imp {
 
     static BRIDGE: OnceLock<AndroidBridge> = OnceLock::new();
     static ACTION_TX: OnceLock<mpsc::UnboundedSender<MediaAction>> = OnceLock::new();
+    static COOKIE_TX: OnceLock<mpsc::UnboundedSender<String>> = OnceLock::new();
 
     pub fn set_action_sender(tx: mpsc::UnboundedSender<MediaAction>) {
         let _ = ACTION_TX.set(tx);
+    }
+
+    pub fn set_cookie_sender(tx: mpsc::UnboundedSender<String>) {
+        let _ = COOKIE_TX.set(tx);
     }
 
     pub unsafe fn init(vm_ptr: *mut c_void, activity_ptr: *mut c_void) {
@@ -189,6 +194,39 @@ mod imp {
             let _ = tx.send(mapped);
         }
     }
+
+    pub fn open_google_login() {
+        let Some(bridge) = BRIDGE.get() else {
+            return;
+        };
+        let Ok(mut env) = bridge.vm.attach_current_thread() else {
+            return;
+        };
+        let service_cls: &JClass = bridge.service_class.as_obj().into();
+        if let Err(e) = env.call_static_method(
+            service_cls,
+            "openGoogleLogin",
+            "(Landroid/content/Context;)V",
+            &[JValue::Object(bridge.app_ctx.as_obj())],
+        ) {
+            log::warn!("android_media: openGoogleLogin failed: {e:?}");
+            let _ = env.exception_clear();
+        }
+    }
+
+    #[no_mangle]
+    pub extern "system" fn Java_com_yr_music_YrPlaybackService_nativeOnGoogleCookie(
+        mut env: JNIEnv,
+        _class: JClass,
+        cookie: JString,
+    ) {
+        if let Ok(s) = env.get_string(&cookie) {
+            let val: String = s.into();
+            if let Some(tx) = COOKIE_TX.get() {
+                let _ = tx.send(val);
+            }
+        }
+    }
 }
 
 #[cfg(not(target_os = "android"))]
@@ -197,6 +235,8 @@ mod imp {
     use tokio::sync::mpsc;
 
     pub fn set_action_sender(_tx: mpsc::UnboundedSender<MediaAction>) {}
+    pub fn set_cookie_sender(_tx: mpsc::UnboundedSender<String>) {}
+    pub fn open_google_login() {}
     pub fn update_playback(_title: &str, _artist: &str, _playing: bool, _pos_ms: u64, _dur_ms: u64) {
     }
     pub fn stop_service() {}
@@ -207,4 +247,7 @@ mod imp {
 
 #[cfg(target_os = "android")]
 pub use imp::init;
-pub use imp::{resolve_audio_url, set_action_sender, stop_service, update_playback};
+pub use imp::{
+    open_google_login, resolve_audio_url, set_action_sender, set_cookie_sender, stop_service,
+    update_playback,
+};

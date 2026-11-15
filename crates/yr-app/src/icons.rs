@@ -1,0 +1,308 @@
+use eframe::egui::{self, Color32, Pos2, Rect, Response, Sense, Stroke, Ui, Vec2};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Icon {
+    ChevronDown,
+    ChevronUp,
+    Close,
+    Play,
+    Pause,
+    SkipNext,
+    SkipPrev,
+    Shuffle,
+    Repeat,
+    RepeatOne,
+    Heart,
+    HeartFilled,
+    Download,
+    Check,
+    Radio,
+    PlaylistAdd,
+    MoreVert,
+    Home,
+    Search,
+    Library,
+    DownloadsNav,
+    Settings,
+    Account,
+    Moon,
+    Refresh,
+    Plus,
+}
+
+/// Renders a crisp vector icon centered inside `rect`.
+pub fn draw_icon(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
+    let c = rect.center();
+    let s = rect.width().min(rect.height()) * 0.5;
+    let stroke_w = (s * 0.19).max(1.4);
+    let stroke = Stroke::new(stroke_w, color);
+
+    let pt = |dx: f32, dy: f32| Pos2::new(c.x + dx * s, c.y + dy * s);
+
+    match icon {
+        Icon::ChevronDown => {
+            painter.line_segment([pt(-0.48, -0.18), pt(0.0, 0.30)], stroke);
+            painter.line_segment([pt(0.0, 0.30), pt(0.48, -0.18)], stroke);
+        }
+        Icon::ChevronUp => {
+            painter.line_segment([pt(-0.48, 0.18), pt(0.0, -0.30)], stroke);
+            painter.line_segment([pt(0.0, -0.30), pt(0.48, 0.18)], stroke);
+        }
+        Icon::Close => {
+            painter.line_segment([pt(-0.38, -0.38), pt(0.38, 0.38)], stroke);
+            painter.line_segment([pt(0.38, -0.38), pt(-0.38, 0.38)], stroke);
+        }
+        Icon::Plus => {
+            painter.line_segment([pt(-0.45, 0.0), pt(0.45, 0.0)], stroke);
+            painter.line_segment([pt(0.0, -0.45), pt(0.0, 0.45)], stroke);
+        }
+        Icon::Play => {
+            let pts = vec![pt(-0.32, -0.46), pt(0.48, 0.0), pt(-0.32, 0.46)];
+            painter.add(egui::Shape::convex_polygon(pts, color, Stroke::NONE));
+        }
+        Icon::Pause => {
+            let bar_w = (s * 0.28).max(2.5);
+            let left = Rect::from_center_size(pt(-0.26, 0.0), Vec2::new(bar_w, s * 0.96));
+            let right = Rect::from_center_size(pt(0.26, 0.0), Vec2::new(bar_w, s * 0.96));
+            painter.rect_filled(left, 2.0, color);
+            painter.rect_filled(right, 2.0, color);
+        }
+        Icon::SkipNext => {
+            let pts = vec![pt(-0.45, -0.40), pt(0.18, 0.0), pt(-0.45, 0.40)];
+            painter.add(egui::Shape::convex_polygon(pts, color, Stroke::NONE));
+            let bar = Rect::from_center_size(pt(0.34, 0.0), Vec2::new((s * 0.20).max(2.2), s * 0.80));
+            painter.rect_filled(bar, 1.5, color);
+        }
+        Icon::SkipPrev => {
+            let pts = vec![pt(0.45, -0.40), pt(-0.18, 0.0), pt(0.45, 0.40)];
+            painter.add(egui::Shape::convex_polygon(pts, color, Stroke::NONE));
+            let bar = Rect::from_center_size(pt(-0.34, 0.0), Vec2::new((s * 0.20).max(2.2), s * 0.80));
+            painter.rect_filled(bar, 1.5, color);
+        }
+        Icon::Shuffle => {
+            painter.line_segment([pt(-0.52, -0.30), pt(-0.15, -0.30)], stroke);
+            painter.line_segment([pt(-0.15, -0.30), pt(0.18, 0.30)], stroke);
+            painter.line_segment([pt(0.18, 0.30), pt(0.50, 0.30)], stroke);
+            painter.line_segment([pt(-0.52, 0.30), pt(-0.15, 0.30)], stroke);
+            painter.line_segment([pt(-0.15, 0.30), pt(0.18, -0.30)], stroke);
+            painter.line_segment([pt(0.18, -0.30), pt(0.50, -0.30)], stroke);
+            // Arrowheads
+            painter.line_segment([pt(0.36, -0.44), pt(0.52, -0.30)], stroke);
+            painter.line_segment([pt(0.36, -0.16), pt(0.52, -0.30)], stroke);
+            painter.line_segment([pt(0.36, 0.16), pt(0.52, 0.30)], stroke);
+            painter.line_segment([pt(0.36, 0.44), pt(0.52, 0.30)], stroke);
+        }
+        Icon::Repeat | Icon::RepeatOne => {
+            // Top & bottom horizontal bars with rounded corners
+            painter.line_segment([pt(-0.38, -0.30), pt(0.36, -0.30)], stroke);
+            painter.line_segment([pt(-0.46, -0.05), pt(-0.46, -0.22)], stroke);
+            painter.line_segment([pt(-0.46, -0.22), pt(-0.38, -0.30)], stroke);
+            painter.line_segment([pt(0.24, -0.44), pt(0.40, -0.30)], stroke);
+            painter.line_segment([pt(0.24, -0.16), pt(0.40, -0.30)], stroke);
+
+            painter.line_segment([pt(-0.36, 0.30), pt(0.38, 0.30)], stroke);
+            painter.line_segment([pt(0.46, 0.05), pt(0.46, 0.22)], stroke);
+            painter.line_segment([pt(0.46, 0.22), pt(0.38, 0.30)], stroke);
+            painter.line_segment([pt(-0.24, 0.16), pt(-0.40, 0.30)], stroke);
+            painter.line_segment([pt(-0.24, 0.44), pt(-0.40, 0.30)], stroke);
+
+            if matches!(icon, Icon::RepeatOne) {
+                painter.line_segment([pt(0.0, -0.16), pt(0.0, 0.16)], stroke);
+            }
+        }
+        Icon::Heart | Icon::HeartFilled => {
+            let pts = vec![
+                pt(0.0, 0.48),
+                pt(-0.46, 0.05),
+                pt(-0.48, -0.22),
+                pt(-0.26, -0.42),
+                pt(0.0, -0.22),
+                pt(0.26, -0.42),
+                pt(0.48, -0.22),
+                pt(0.46, 0.05),
+            ];
+            if matches!(icon, Icon::HeartFilled) {
+                painter.add(egui::Shape::closed_line(pts.clone(), stroke));
+                painter.circle_filled(pt(-0.22, -0.15), s * 0.24, color);
+                painter.circle_filled(pt(0.22, -0.15), s * 0.24, color);
+                let tri = vec![pt(-0.42, -0.02), pt(0.42, -0.02), pt(0.0, 0.46)];
+                painter.add(egui::Shape::convex_polygon(tri, color, Stroke::NONE));
+            } else {
+                painter.add(egui::Shape::closed_line(pts, stroke));
+            }
+        }
+        Icon::Download => {
+            painter.line_segment([pt(0.0, -0.46), pt(0.0, 0.20)], stroke);
+            painter.line_segment([pt(-0.28, -0.06), pt(0.0, 0.22)], stroke);
+            painter.line_segment([pt(0.28, -0.06), pt(0.0, 0.22)], stroke);
+            painter.line_segment([pt(-0.44, 0.44), pt(0.44, 0.44)], stroke);
+            painter.line_segment([pt(-0.44, 0.26), pt(-0.44, 0.44)], stroke);
+            painter.line_segment([pt(0.44, 0.26), pt(0.44, 0.44)], stroke);
+        }
+        Icon::Check => {
+            painter.line_segment([pt(-0.42, 0.02), pt(-0.12, 0.34)], stroke);
+            painter.line_segment([pt(-0.12, 0.34), pt(0.46, -0.30)], stroke);
+        }
+        Icon::Radio => {
+            painter.circle_filled(c, s * 0.16, color);
+            for r in [0.38_f32, 0.62_f32] {
+                let mut left_arc = Vec::new();
+                let mut right_arc = Vec::new();
+                for i in -3..=3 {
+                    let a = (i as f32) * 0.22;
+                    left_arc.push(pt(-r * a.cos(), r * a.sin()));
+                    right_arc.push(pt(r * a.cos(), r * a.sin()));
+                }
+                painter.add(egui::Shape::line(left_arc, stroke));
+                painter.add(egui::Shape::line(right_arc, stroke));
+            }
+        }
+        Icon::PlaylistAdd => {
+            painter.line_segment([pt(-0.50, -0.30), pt(0.20, -0.30)], stroke);
+            painter.line_segment([pt(-0.50, 0.0), pt(0.20, 0.0)], stroke);
+            painter.line_segment([pt(-0.50, 0.30), pt(0.0, 0.30)], stroke);
+            painter.line_segment([pt(0.20, 0.26), pt(0.56, 0.26)], stroke);
+            painter.line_segment([pt(0.38, 0.08), pt(0.38, 0.44)], stroke);
+        }
+        Icon::MoreVert => {
+            let r = (s * 0.14).max(1.8);
+            painter.circle_filled(pt(0.0, -0.40), r, color);
+            painter.circle_filled(pt(0.0, 0.0), r, color);
+            painter.circle_filled(pt(0.0, 0.40), r, color);
+        }
+        Icon::Home => {
+            let roof = vec![pt(-0.52, -0.02), pt(0.0, -0.48), pt(0.52, -0.02)];
+            painter.add(egui::Shape::line(roof, stroke));
+            let body = vec![
+                pt(-0.36, -0.08),
+                pt(-0.36, 0.44),
+                pt(0.36, 0.44),
+                pt(0.36, -0.08),
+            ];
+            painter.add(egui::Shape::line(body, stroke));
+        }
+        Icon::Search => {
+            painter.circle_stroke(pt(-0.10, -0.10), s * 0.34, stroke);
+            painter.line_segment([pt(0.14, 0.14), pt(0.46, 0.46)], stroke);
+        }
+        Icon::Library => {
+            painter.rect_stroke(
+                Rect::from_min_max(pt(-0.44, -0.18), pt(0.22, 0.46)),
+                2.0,
+                stroke,
+                egui::StrokeKind::Middle,
+            );
+            painter.line_segment([pt(-0.22, -0.34), pt(0.38, -0.34)], stroke);
+            painter.line_segment([pt(0.38, -0.34), pt(0.38, 0.26)], stroke);
+        }
+        Icon::DownloadsNav => {
+            painter.circle_stroke(c, s * 0.48, stroke);
+            painter.line_segment([pt(0.0, -0.26), pt(0.0, 0.18)], stroke);
+            painter.line_segment([pt(-0.20, 0.0), pt(0.0, 0.20)], stroke);
+            painter.line_segment([pt(0.20, 0.0), pt(0.0, 0.20)], stroke);
+        }
+        Icon::Settings => {
+            painter.circle_stroke(c, s * 0.26, stroke);
+            for i in 0..8 {
+                let ang = (i as f32) * std::f32::consts::FRAC_PI_4;
+                let (sin, cos) = ang.sin_cos();
+                painter.line_segment([pt(cos * 0.34, sin * 0.34), pt(cos * 0.50, sin * 0.50)], stroke);
+            }
+        }
+        Icon::Account => {
+            painter.circle_stroke(c, s * 0.48, stroke);
+            painter.circle_stroke(pt(0.0, -0.12), s * 0.18, stroke);
+            let arc: Vec<Pos2> = (-3..=3)
+                .map(|i| {
+                    let x = (i as f32) * 0.10;
+                    let y = 0.36 - (1.0 - (x / 0.32).powi(2)).max(0.0).sqrt() * 0.16;
+                    pt(x, y)
+                })
+                .collect();
+            painter.add(egui::Shape::line(arc, stroke));
+        }
+        Icon::Moon => {
+            let mut pts = Vec::new();
+            for i in 0..=10 {
+                let a = -0.9 + (i as f32) * 0.32;
+                pts.push(pt(-0.08 + a.cos() * 0.42, a.sin() * 0.42));
+            }
+            painter.add(egui::Shape::line(pts, stroke));
+        }
+        Icon::Refresh => {
+            let mut pts = Vec::new();
+            for i in 0..=12 {
+                let a = -0.3 + (i as f32) * 0.42;
+                pts.push(pt(a.cos() * 0.40, a.sin() * 0.40));
+            }
+            painter.add(egui::Shape::line(pts, stroke));
+            painter.line_segment([pt(0.22, -0.34), pt(0.42, -0.14)], stroke);
+            painter.line_segment([pt(0.42, -0.38), pt(0.42, -0.14)], stroke);
+        }
+    }
+}
+
+/// Square clickable icon button with rounded hover/fill surface.
+pub fn icon_button(
+    ui: &mut Ui,
+    icon: Icon,
+    box_size: f32,
+    icon_size: f32,
+    fill: Color32,
+    fg: Color32,
+    rounding: f32,
+) -> Response {
+    let (rect, resp) = ui.allocate_exact_size(Vec2::splat(box_size), Sense::click());
+    if ui.is_rect_visible(rect) {
+        let bg = if resp.hovered() {
+            fill.gamma_multiply(1.25)
+        } else {
+            fill
+        };
+        if bg != Color32::TRANSPARENT {
+            ui.painter().rect_filled(rect, rounding, bg);
+        }
+        let icon_rect = Rect::from_center_size(rect.center(), Vec2::splat(icon_size));
+        draw_icon(ui.painter(), icon_rect, icon, fg);
+    }
+    resp
+}
+
+/// Pill button with a leading vector icon and short text label.
+pub fn icon_pill_button(
+    ui: &mut Ui,
+    icon: Icon,
+    label: &str,
+    fill: Color32,
+    fg: Color32,
+) -> Response {
+    let font_id = egui::FontId::proportional(13.0);
+    let galley = ui.painter().layout_no_wrap(label.to_string(), font_id, fg);
+    let pad_x = 12.0;
+    let icon_sz = 15.0;
+    let gap = if label.is_empty() { 0.0 } else { 6.0 };
+    let w = pad_x * 2.0 + icon_sz + gap + galley.size().x;
+    let h = 32.0;
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, h), Sense::click());
+    if ui.is_rect_visible(rect) {
+        let bg = if resp.hovered() {
+            fill.gamma_multiply(1.2)
+        } else {
+            fill
+        };
+        ui.painter().rect_filled(rect, 16.0, bg);
+        let icon_rect = Rect::from_center_size(
+            Pos2::new(rect.left() + pad_x + icon_sz * 0.5, rect.center().y),
+            Vec2::splat(icon_sz),
+        );
+        draw_icon(ui.painter(), icon_rect, icon, fg);
+        if !label.is_empty() {
+            let text_pos = Pos2::new(
+                icon_rect.right() + gap,
+                rect.center().y - galley.size().y * 0.5,
+            );
+            ui.painter().galley(text_pos, galley, fg);
+        }
+    }
+    resp
+}

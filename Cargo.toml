@@ -28,7 +28,7 @@ log = "0.4"
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 url = "2"
-rustypipe = { version = "0.11", default-features = false, features = ["rustls-tls-webpki-roots"] }
+rustypipe = { version = "0.11", default-features = false, features = ["rustls-tls-webpki-roots", "userdata"] }
 rodio = { version = "0.20", default-features = false, features = ["symphonia-aac", "symphonia-isomp4", "symphonia-mp3", "symphonia-flac", "symphonia-vorbis", "symphonia-wav"] }
 symphonia = { version = "0.5", features = ["aac", "isomp4", "mp3", "flac", "ogg", "vorbis", "wav"] }
 eframe = { version = "0.31", default-features = false, features = ["default_fonts", "glow"] }

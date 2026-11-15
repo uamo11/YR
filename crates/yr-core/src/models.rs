@@ -126,11 +126,30 @@ pub struct MoodGenre {
     pub title: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GoogleDeviceAuth {
+    pub user_code: String,
+    pub verification_url: String,
+    pub interval_secs: u64,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct HomeFeed {
     pub quick_picks: Vec<Track>,
+    #[serde(default)]
+    pub listen_again: Vec<Track>,
+    #[serde(default)]
+    pub recommended_tracks: Vec<Track>,
+    #[serde(default)]
+    pub trending_tracks: Vec<Track>,
     pub new_albums: Vec<AlbumSummary>,
+    #[serde(default)]
+    pub user_playlists: Vec<PlaylistSummary>,
+    #[serde(default)]
+    pub recommended_playlists: Vec<PlaylistSummary>,
     pub moods: Vec<MoodGenre>,
+    #[serde(default)]
+    pub is_logged_in: bool,
 }
 
 /// Resolved direct audio stream metadata.

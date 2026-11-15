@@ -1,5 +1,6 @@
 package com.yr.music;
 
+import android.app.Dialog;
 import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
@@ -17,10 +18,14 @@ import android.os.IBinder;
 import android.os.Looper;
 import android.os.PowerManager;
 import android.util.Log;
+import android.webkit.CookieManager;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
+import android.widget.Button;
+import android.widget.LinearLayout;
+import android.widget.TextView;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
@@ -57,6 +62,7 @@ public class YrPlaybackService extends Service {
     }
 
     private static native void nativeOnMediaAction(int action, long arg);
+    private static native void nativeOnGoogleCookie(String cookie);
 
     private MediaSession mediaSession;
     private PowerManager.WakeLock wakeLock;
@@ -209,6 +215,87 @@ public class YrPlaybackService extends Service {
         String finalUrl = result.get() != null ? result.get() : fallbackMp4.get();
         Log.i("YR_WEB", "resolveAudioUrl end vid=" + videoId + " ok=" + (finalUrl != null));
         return finalUrl;
+    }
+
+    public static void openGoogleLogin(final Context ctx) {
+        if (ctx == null) return;
+        new Handler(Looper.getMainLooper()).post(() -> {
+            try {
+                final Dialog dialog = new Dialog(ctx, android.R.style.Theme_Black_NoTitleBar_Fullscreen);
+                LinearLayout root = new LinearLayout(ctx);
+                root.setOrientation(LinearLayout.VERTICAL);
+                root.setBackgroundColor(0xFF0A0A0A);
+
+                LinearLayout bar = new LinearLayout(ctx);
+                bar.setOrientation(LinearLayout.HORIZONTAL);
+                bar.setBackgroundColor(0xFF181818);
+                bar.setPadding(24, 16, 24, 16);
+
+                TextView title = new TextView(ctx);
+                title.setText("Conectar cuenta de Google");
+                title.setTextColor(0xFFFFFFFF);
+                title.setTextSize(16);
+                LinearLayout.LayoutParams tp = new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.0f);
+                bar.addView(title, tp);
+
+                Button closeBtn = new Button(ctx);
+                closeBtn.setText("Cerrar");
+                bar.addView(closeBtn);
+                root.addView(bar, new LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.MATCH_PARENT,
+                        LinearLayout.LayoutParams.WRAP_CONTENT
+                ));
+
+                final WebView wv = new WebView(ctx);
+                WebSettings ws = wv.getSettings();
+                ws.setJavaScriptEnabled(true);
+                ws.setDomStorageEnabled(true);
+                CookieManager cm = CookieManager.getInstance();
+                cm.setAcceptCookie(true);
+                cm.setAcceptThirdPartyCookies(wv, true);
+
+                closeBtn.setOnClickListener(v -> {
+                    try {
+                        wv.stopLoading();
+                        wv.destroy();
+                    } catch (Throwable ignored) {
+                    }
+                    dialog.dismiss();
+                });
+
+                wv.setWebViewClient(new WebViewClient() {
+                    private boolean sent = false;
+
+                    @Override
+                    public void onPageFinished(WebView view, String url) {
+                        if (sent) return;
+                        try {
+                            if (url != null && url.contains("music.youtube.com")) {
+                                String cookies = CookieManager.getInstance().getCookie("https://music.youtube.com");
+                                if (cookies != null && (cookies.contains("SAPISID=") || cookies.contains("__Secure-3PAPISID="))) {
+                                    sent = true;
+                                    nativeOnGoogleCookie(cookies);
+                                    wv.stopLoading();
+                                    wv.destroy();
+                                    dialog.dismiss();
+                                }
+                            }
+                        } catch (Throwable ignored) {
+                        }
+                    }
+                });
+
+                root.addView(wv, new LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.MATCH_PARENT,
+                        LinearLayout.LayoutParams.MATCH_PARENT
+                ));
+                dialog.setContentView(root);
+                dialog.show();
+                wv.loadUrl("https://accounts.google.com/ServiceLogin?continue=https%3A%2F%2Fmusic.youtube.com");
+            } catch (Throwable t) {
+                Log.e("YR_WEB", "openGoogleLogin failed", t);
+            }
+        });
     }
 
     @Override
