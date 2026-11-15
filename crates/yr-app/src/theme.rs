@@ -10,6 +10,7 @@ pub const TEXT_SECONDARY: Color32 = Color32::from_rgb(165, 165, 165);
 pub const GREEN_OK: Color32 = Color32::from_rgb(46, 204, 113);
 
 pub fn apply_ytm_theme(ctx: &egui::Context) {
+    install_clean_fonts(ctx);
     let mut style: Style = (*ctx.style()).clone();
     let mut visuals = Visuals::dark();
 
@@ -43,4 +44,26 @@ pub fn apply_ytm_theme(ctx: &egui::Context) {
     style.spacing.window_margin = Margin::same(12);
 
     ctx.set_style(style);
+}
+
+fn install_clean_fonts(ctx: &egui::Context) {
+    let candidates = [
+        "/system/fonts/RobotoStatic-Regular.ttf",
+        "/system/fonts/Roboto-Regular.ttf",
+        "/system/fonts/NotoSans-Regular.ttf",
+    ];
+    for path in candidates {
+        if let Ok(bytes) = std::fs::read(path) {
+            let mut fonts = egui::FontDefinitions::default();
+            fonts.font_data.insert(
+                "system_sans".to_owned(),
+                std::sync::Arc::new(egui::FontData::from_owned(bytes)),
+            );
+            if let Some(prop) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
+                prop.insert(0, "system_sans".to_owned());
+            }
+            ctx.set_fonts(fonts);
+            return;
+        }
+    }
 }
