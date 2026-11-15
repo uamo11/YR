@@ -16,6 +16,7 @@ import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
 import android.os.PowerManager;
+import android.util.Log;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
@@ -129,6 +130,7 @@ public class YrPlaybackService extends Service {
                                             || u.contains("itag=140")
                                             || u.contains("itag=139"))) {
                                 String clean = u.replaceAll("&(range|rn|rbuf)=[^&]*", "");
+                                Log.i("YR_WEB", "Intercepted audio URL for " + videoId);
                                 if (result.compareAndSet(null, clean)) {
                                     latch.countDown();
                                 }
@@ -151,6 +153,7 @@ public class YrPlaybackService extends Service {
                 });
                 wv.loadUrl("https://www.youtube.com/embed/" + videoId + "?autoplay=1&mute=1&playsinline=1");
             } catch (Throwable t) {
+                Log.e("YR_WEB", "resolveAudioUrl failed", t);
                 latch.countDown();
             }
         });

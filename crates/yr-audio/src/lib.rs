@@ -227,8 +227,12 @@ fn audio_thread_main(
                     let cache_file = cache_dir.join(format!("stream_{track_id}.tmp"));
 
                     match open_progressive_stream(&runtime, &url, cache_file, cancel) {
-                        Ok(reader) => match Decoder::new(BufReader::new(reader)) {
-                            Ok(decoder) => {
+                        Ok(reader) => {
+                            let decoded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+                                || Decoder::new(BufReader::new(reader)),
+                            ));
+                            match decoded {
+                                Ok(Ok(decoder)) => {
                                 let dur = decoder
                                     .total_duration()
                                     .map(|d| d.as_secs_f64())
@@ -253,10 +257,17 @@ fn audio_thread_main(
                                     }
                                 }
                             }
-                            Err(e) => {
-                                set_status(&snapshot, PlaybackStatus::Error(e.to_string()));
+                                Ok(Err(e)) => {
+                                    set_status(&snapshot, PlaybackStatus::Error(e.to_string()));
+                                }
+                                Err(_) => {
+                                    set_status(
+                                        &snapshot,
+                                        PlaybackStatus::Error("Decoder panic".to_string()),
+                                    );
+                                }
                             }
-                        },
+                        }
                         Err(e) => {
                             set_status(&snapshot, PlaybackStatus::Error(e));
                         }
@@ -432,19 +443,7 @@ impl Seek for ProgressiveFileReader {
         }
 
         let target_u64 = target as u64;
-        let mut guard = lock.lock().map_err(|_| io::Error::other("poisoned"))?;
-        while target_u64 > guard.written && !guard.finished {
-            if self.cancel.load(Ordering::Relaxed) {
-                break;
-            }
-            if let Some(err) = &guard.error {
-                return Err(io::Error::other(err.clone()));
-            }
-            guard = cvar
-                .wait(guard)
-                .map_err(|_| io::Error::other("poisoned"))?;
-        }
-        self.pos = target_u64.min(guard.written);
+        self.pos = target_u64;
         Ok(self.pos)
     }
 }
