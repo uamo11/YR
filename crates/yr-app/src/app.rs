@@ -3818,8 +3818,13 @@ impl YrApp {
                             .show(ui, |ui| {
                                 for (order_pos, (idx, t)) in ordered.into_iter().enumerate() {
                                     let is_curr = current_idx == Some(idx);
+                                    let drag_id = ui.make_persistent_id(("q_drag", &t.id, idx));
+                                    let is_dragging =
+                                        ui.ctx().is_being_dragged(drag_id);
                                     egui::Frame::new()
-                                        .fill(if is_curr {
+                                        .fill(if is_dragging {
+                                            Color32::from_white_alpha(48)
+                                        } else if is_curr {
                                             Color32::from_white_alpha(26)
                                         } else {
                                             Color32::TRANSPARENT
@@ -3828,10 +3833,60 @@ impl YrApp {
                                         .inner_margin(6.0)
                                         .show(ui, |ui| {
                                             ui.horizontal(|ui| {
+                                                let (grip_rect, grip_resp) =
+                                                    ui.allocate_exact_size(
+                                                        Vec2::new(20.0, 44.0),
+                                                        Sense::drag(),
+                                                    );
+                                                let grip_color = if is_dragging {
+                                                    Color32::WHITE
+                                                } else {
+                                                    Color32::from_white_alpha(120)
+                                                };
+                                                let cx = grip_rect.center().x;
+                                                let cy = grip_rect.center().y;
+                                                for dy in [-5.0_f32, 0.0, 5.0] {
+                                                    ui.painter().rect_filled(
+                                                        egui::Rect::from_center_size(
+                                                            egui::pos2(cx, cy + dy),
+                                                            Vec2::new(12.0, 1.8),
+                                                        ),
+                                                        CornerRadius::same(1),
+                                                        grip_color,
+                                                    );
+                                                }
+                                                if grip_resp.dragged() {
+                                                    let delta_y = grip_resp.drag_delta().y;
+                                                    let mut accum = ui.data_mut(|d| {
+                                                        let v = d.get_temp::<f32>(drag_id).unwrap_or(0.0)
+                                                            + delta_y;
+                                                        d.insert_temp(drag_id, v);
+                                                        v
+                                                    });
+                                                    const STEP_PX: f32 = 38.0;
+                                                    if accum >= STEP_PX && order_pos + 1 < total_ordered {
+                                                        self.queue
+                                                            .lock()
+                                                            .unwrap()
+                                                            .move_in_order(order_pos, 1);
+                                                        accum -= STEP_PX;
+                                                        ui.data_mut(|d| d.insert_temp(drag_id, accum));
+                                                    } else if accum <= -STEP_PX && order_pos > 0 {
+                                                        self.queue
+                                                            .lock()
+                                                            .unwrap()
+                                                            .move_in_order(order_pos, -1);
+                                                        accum += STEP_PX;
+                                                        ui.data_mut(|d| d.insert_temp(drag_id, accum));
+                                                    }
+                                                } else if grip_resp.drag_stopped() {
+                                                    ui.data_mut(|d| d.remove::<f32>(drag_id));
+                                                }
+
                                                 let row_start = ui.next_widget_position();
                                                 render_thumb(ui, t.thumbnail_url.as_deref(), 44.0);
                                                 ui.add_space(6.0);
-                                                let tw = (ui.available_width() - 104.0).max(80.0);
+                                                let tw = (ui.available_width() - 96.0).max(70.0);
                                                 ui.allocate_ui(Vec2::new(tw, 44.0), |ui| {
                                                     ui.vertical(|ui| {
                                                         ui.set_max_width(tw);
@@ -4525,13 +4580,55 @@ impl YrApp {
 
             // Bottom drag handle + 3 YTM drawer tabs: SIGUIENTE | LETRA | RELACIONADO
             ui.vertical_centered(|ui| {
-                let (pill_rect, _) =
-                    ui.allocate_exact_size(Vec2::new(36.0, 4.0), Sense::hover());
+                let (handle_rect, handle_resp) =
+                    ui.allocate_exact_size(Vec2::new(96.0, 18.0), Sense::click_and_drag());
+                let pill_rect = egui::Rect::from_center_size(
+                    handle_rect.center(),
+                    Vec2::new(36.0, 4.0),
+                );
                 ui.painter().rect_filled(
                     pill_rect,
                     CornerRadius::same(2),
-                    Color32::from_white_alpha(95),
+                    if handle_resp.dragged() {
+                        Color32::from_white_alpha(180)
+                    } else {
+                        Color32::from_white_alpha(110)
+                    },
                 );
+                let drawer_open = self.show_queue || self.show_lyrics || self.show_related;
+                if handle_resp.clicked() {
+                    if drawer_open {
+                        self.show_queue = false;
+                        self.show_lyrics = false;
+                        self.show_related = false;
+                    } else {
+                        self.now_playing_open = false;
+                    }
+                }
+                let handle_drag_id = egui::Id::new("yr_player_handle_drag");
+                if handle_resp.dragged() {
+                    let accum = ui.data_mut(|d| {
+                        let v = d.get_temp::<f32>(handle_drag_id).unwrap_or(0.0)
+                            + handle_resp.drag_delta().y;
+                        d.insert_temp(handle_drag_id, v);
+                        v
+                    });
+                    if accum >= 32.0 {
+                        if drawer_open {
+                            self.show_queue = false;
+                            self.show_lyrics = false;
+                            self.show_related = false;
+                        } else {
+                            self.now_playing_open = false;
+                        }
+                        ui.data_mut(|d| d.insert_temp(handle_drag_id, 0.0_f32));
+                    } else if accum <= -32.0 && !drawer_open {
+                        self.show_queue = true;
+                        ui.data_mut(|d| d.insert_temp(handle_drag_id, 0.0_f32));
+                    }
+                } else if handle_resp.drag_stopped() {
+                    ui.data_mut(|d| d.remove::<f32>(handle_drag_id));
+                }
             });
             ui.add_space(6.0);
             ui.columns(3, |cols| {
@@ -4720,17 +4817,9 @@ impl YrApp {
         };
 
         let screen = ctx.screen_rect();
-        egui::Area::new(egui::Id::new("yr_action_sheet_scrim"))
-            .fixed_pos(screen.min)
-            .order(egui::Order::Middle)
-            .show(ctx, |ui| {
-                let (_, scrim_resp) = ui.allocate_exact_size(screen.size(), Sense::click());
-                ui.painter()
-                    .rect_filled(screen, CornerRadius::ZERO, Color32::from_black_alpha(165));
-                if scrim_resp.clicked() {
-                    self.action_sheet_track = None;
-                }
-            });
+        if render_modal_scrim(ctx, "yr_action_sheet_scrim") {
+            self.action_sheet_track = None;
+        }
 
         egui::Area::new(egui::Id::new("yr_action_sheet_panel"))
             .anchor(egui::Align2::CENTER_BOTTOM, Vec2::ZERO)
@@ -4996,55 +5085,170 @@ impl YrApp {
         let Some(track) = self.playlist_picker_track.clone() else {
             return;
         };
-        let mut open = true;
-        egui::Window::new("Añadir a playlist")
-            .open(&mut open)
-            .collapsible(false)
-            .resizable(false)
-            .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
+        let screen = ctx.screen_rect();
+        let mut close_sheet = render_modal_scrim(ctx, "yr_playlist_picker_scrim");
+
+        egui::Area::new(egui::Id::new("yr_playlist_picker_panel"))
+            .anchor(egui::Align2::CENTER_BOTTOM, Vec2::ZERO)
+            .order(egui::Order::Foreground)
+            .interactable(true)
             .show(ctx, |ui| {
-                ui.set_min_width(260.0);
-                ui.label(RichText::new(&track.title).strong());
-                ui.add_space(6.0);
-                let pls = self.store.data.playlists.clone();
-                if pls.is_empty() {
-                    ui.label(
-                        RichText::new("No tienes playlists aún.")
-                            .small()
-                            .color(TEXT_SECONDARY),
-                    );
-                } else {
-                    for pl in pls {
-                        if ui
-                            .button(format!("{} ({})", pl.name, pl.tracks.len()))
-                            .clicked()
-                        {
-                            self.store.add_to_playlist(&pl.id, track.clone());
-                            self.set_banner(format!("Añadida a '{}'", pl.name));
-                            self.playlist_picker_track = None;
+                ui.set_width(screen.width());
+                egui::Frame::new()
+                    .fill(Color32::from_rgb(24, 24, 28))
+                    .stroke(Stroke::new(0.8_f32, Color32::from_rgb(48, 48, 54)))
+                    .corner_radius(CornerRadius {
+                        nw: 18,
+                        ne: 18,
+                        sw: 0,
+                        se: 0,
+                    })
+                    .inner_margin(egui::Margin::symmetric(14, 12))
+                    .show(ui, |ui| {
+                        let content_w = (screen.width() - 28.0).max(180.0);
+                        ui.set_width(content_w);
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new("Guardar en playlist")
+                                    .size(16.0)
+                                    .strong()
+                                    .color(Color32::WHITE),
+                            );
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                if icons::icon_button(
+                                    ui,
+                                    icons::Icon::Close,
+                                    32.0,
+                                    16.0,
+                                    Color32::TRANSPARENT,
+                                    Color32::WHITE,
+                                    16.0,
+                                )
+                                .clicked()
+                                {
+                                    close_sheet = true;
+                                }
+                            });
+                        });
+                        render_clamped_label(
+                            ui,
+                            &format!("{} • {}", track.title, track.artist),
+                            12.5,
+                            TEXT_SECONDARY,
+                            content_w,
+                            2,
+                        );
+                        ui.add_space(10.0);
+
+                        let pls = self.store.data.playlists.clone();
+                        if pls.is_empty() {
+                            ui.label(
+                                RichText::new("No tienes playlists aún.")
+                                    .size(13.0)
+                                    .color(TEXT_SECONDARY),
+                            );
+                        } else {
+                            egui::ScrollArea::vertical()
+                                .id_salt("yr_playlist_picker_scroll")
+                                .max_height((screen.height() * 0.34).max(140.0))
+                                .show(ui, |ui| {
+                                    for pl in pls {
+                                        let clicked = egui::Frame::new()
+                                            .fill(BG_ELEVATED)
+                                            .corner_radius(CornerRadius::same(10))
+                                            .inner_margin(egui::Margin::symmetric(12, 9))
+                                            .show(ui, |ui| {
+                                                ui.set_width(ui.available_width());
+                                                let resp = ui.horizontal(|ui| {
+                                                    draw_inline_icon(
+                                                        ui,
+                                                        icons::Icon::PlaylistAdd,
+                                                        18.0,
+                                                        Color32::WHITE,
+                                                    );
+                                                    ui.add_space(8.0);
+                                                    ui.label(
+                                                        RichText::new(&pl.name)
+                                                            .size(14.5)
+                                                            .strong()
+                                                            .color(Color32::WHITE),
+                                                    );
+                                                    ui.with_layout(
+                                                        Layout::right_to_left(Align::Center),
+                                                        |ui| {
+                                                            ui.label(
+                                                                RichText::new(format!(
+                                                                    "{} pistas",
+                                                                    pl.tracks.len()
+                                                                ))
+                                                                .size(12.0)
+                                                                .color(TEXT_SECONDARY),
+                                                            );
+                                                        },
+                                                    );
+                                                });
+                                                ui.interact(
+                                                    resp.response.rect,
+                                                    ui.make_persistent_id(("pl_pick", &pl.id)),
+                                                    Sense::click(),
+                                                )
+                                                .clicked()
+                                            })
+                                            .inner;
+                                        if clicked {
+                                            self.store.add_to_playlist(&pl.id, track.clone());
+                                            self.set_banner(format!("Añadida a '{}'", pl.name));
+                                            close_sheet = true;
+                                        }
+                                        ui.add_space(4.0);
+                                    }
+                                });
                         }
-                    }
-                }
-                ui.separator();
-                ui.horizontal(|ui| {
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.new_playlist_name)
-                            .hint_text("Nueva playlist...")
-                            .desired_width(150.0),
-                    );
-                    if ui.button("Crear y añadir").clicked()
-                        && !self.new_playlist_name.trim().is_empty()
-                    {
-                        let name = self.new_playlist_name.trim().to_string();
-                        let created = self.store.create_playlist(name);
-                        self.store.add_to_playlist(&created.id, track.clone());
-                        self.new_playlist_name.clear();
-                        self.set_banner(format!("Añadida a '{}'", created.name));
-                        self.playlist_picker_track = None;
-                    }
-                });
+
+                        ui.add_space(6.0);
+                        ui.separator();
+                        ui.add_space(8.0);
+                        ui.horizontal(|ui| {
+                            let input_w = (content_w - 134.0).max(120.0);
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.new_playlist_name)
+                                    .hint_text("Nueva playlist...")
+                                    .desired_width(input_w),
+                            );
+                            let can_create = !self.new_playlist_name.trim().is_empty();
+                            if ui
+                                .add(
+                                    egui::Button::new(
+                                        RichText::new("Crear y añadir")
+                                            .size(13.0)
+                                            .strong()
+                                            .color(Color32::WHITE),
+                                    )
+                                    .fill(if can_create {
+                                        ACCENT_RED
+                                    } else {
+                                        BG_ELEVATED
+                                    })
+                                    .corner_radius(CornerRadius::same(18))
+                                    .min_size(Vec2::new(112.0, 34.0)),
+                                )
+                                .clicked()
+                                && can_create
+                            {
+                                let name = self.new_playlist_name.trim().to_string();
+                                let created = self.store.create_playlist(name);
+                                self.store.add_to_playlist(&created.id, track.clone());
+                                self.new_playlist_name.clear();
+                                self.set_banner(format!("Añadida a '{}'", created.name));
+                                close_sheet = true;
+                            }
+                        });
+                        #[cfg(target_os = "android")]
+                        ui.add_space(46.0);
+                    });
             });
-        if !open {
+
+        if close_sheet {
             self.playlist_picker_track = None;
         }
     }
@@ -5053,171 +5257,246 @@ impl YrApp {
         if !self.show_google_login {
             return;
         }
-        let mut open = true;
-        egui::Window::new("Cuenta de Google / YT Music")
-            .open(&mut open)
-            .collapsible(false)
-            .resizable(false)
-            .frame(
-                egui::Frame::window(&ctx.style())
-                    .fill(BG_SURFACE)
-                    .inner_margin(14.0),
-            )
-            .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
-            .show(ctx, |ui| {
-                ui.set_min_width(280.0);
-                ui.set_max_width(320.0);
+        let screen = ctx.screen_rect();
+        let mut close_modal = render_modal_scrim(ctx, "yr_google_login_scrim");
+        let card_w = (screen.width() - 36.0).clamp(270.0, 340.0);
 
-                if self.home_feed.is_logged_in {
-                    ui.label(
-                        RichText::new("Sesión de Google conectada")
-                            .strong()
-                            .size(16.0)
-                            .color(GREEN_OK),
-                    );
-                    ui.add_space(4.0);
-                    ui.label(
-                        RichText::new(
-                            "Tus listas, historial y recomendaciones personalizadas de YouTube Music están activas.",
-                        )
-                        .small()
-                        .color(TEXT_SECONDARY),
-                    );
-                    ui.add_space(10.0);
-                    ui.horizontal(|ui| {
-                        if icons::icon_pill_button(
-                            ui,
-                            icons::Icon::Refresh,
-                            "Sincronizar",
-                            BG_ELEVATED,
-                            TEXT_PRIMARY,
-                        )
-                        .clicked()
-                        {
-                            self.refresh_home(ctx);
-                            self.show_google_login = false;
-                        }
-                        if ui
-                            .add(
-                                egui::Button::new(
-                                    RichText::new("Cerrar sesión").color(ACCENT_RED),
+        egui::Area::new(egui::Id::new("yr_google_login_panel"))
+            .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
+            .order(egui::Order::Foreground)
+            .interactable(true)
+            .show(ctx, |ui| {
+                egui::Frame::new()
+                    .fill(Color32::from_rgb(24, 24, 28))
+                    .stroke(Stroke::new(0.8_f32, Color32::from_rgb(48, 48, 54)))
+                    .corner_radius(CornerRadius::same(18))
+                    .inner_margin(egui::Margin::symmetric(16, 14))
+                    .show(ui, |ui| {
+                        ui.set_width(card_w);
+                        ui.horizontal(|ui| {
+                            draw_inline_icon(ui, icons::Icon::Account, 20.0, ACCENT_RED);
+                            ui.add_space(6.0);
+                            ui.label(
+                                RichText::new("Cuenta de Google")
+                                    .size(17.0)
+                                    .strong()
+                                    .color(Color32::WHITE),
+                            );
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                if icons::icon_button(
+                                    ui,
+                                    icons::Icon::Close,
+                                    30.0,
+                                    15.0,
+                                    Color32::TRANSPARENT,
+                                    Color32::WHITE,
+                                    15.0,
                                 )
-                                .fill(BG_ELEVATED)
-                                .corner_radius(CornerRadius::same(16)),
+                                .clicked()
+                                {
+                                    close_modal = true;
+                                }
+                            });
+                        });
+                        ui.add_space(8.0);
+
+                        if self.home_feed.is_logged_in {
+                            ui.label(
+                                RichText::new("Sesión de Google conectada")
+                                    .strong()
+                                    .size(15.5)
+                                    .color(GREEN_OK),
+                            );
+                            ui.add_space(4.0);
+                            ui.label(
+                                RichText::new(
+                                    "Tus listas, historial y recomendaciones personalizadas de YouTube Music están activas.",
+                                )
+                                .small()
+                                .color(TEXT_SECONDARY),
+                            );
+                            ui.add_space(12.0);
+                            ui.horizontal(|ui| {
+                                if icons::icon_pill_button(
+                                    ui,
+                                    icons::Icon::Refresh,
+                                    "Sincronizar",
+                                    BG_ELEVATED,
+                                    TEXT_PRIMARY,
+                                )
+                                .clicked()
+                                {
+                                    self.refresh_home(ctx);
+                                    close_modal = true;
+                                }
+                                if ui
+                                    .add(
+                                        egui::Button::new(
+                                            RichText::new("Cerrar sesión").color(ACCENT_RED),
+                                        )
+                                        .fill(BG_ELEVATED)
+                                        .corner_radius(CornerRadius::same(18))
+                                        .min_size(Vec2::new(108.0, 34.0)),
+                                    )
+                                    .clicked()
+                                {
+                                    self.logout_google(ctx);
+                                    close_modal = true;
+                                }
+                            });
+                        } else {
+                            ui.label(
+                                RichText::new("Mantén tus recomendaciones de Google")
+                                    .strong()
+                                    .size(15.0)
+                                    .color(TEXT_PRIMARY),
+                            );
+                            ui.add_space(2.0);
+                            ui.label(
+                                RichText::new(
+                                    "Inicia sesión para cargar Tus listas, Escuchar de nuevo y tus mixes de YouTube Music.",
+                                )
+                                .small()
+                                .color(TEXT_SECONDARY),
+                            );
+                            ui.add_space(10.0);
+
+                            if icons::icon_pill_button(
+                                ui,
+                                icons::Icon::Account,
+                                "Iniciar sesión con Google",
+                                ACCENT_RED,
+                                Color32::WHITE,
                             )
                             .clicked()
-                        {
-                            self.logout_google(ctx);
-                            self.show_google_login = false;
+                            {
+                                crate::android_media::open_google_login();
+                            }
+
+                            ui.add_space(10.0);
+                            ui.separator();
+                            ui.add_space(6.0);
+                            ui.label(
+                                RichText::new("O conecta con código de dispositivo:")
+                                    .small()
+                                    .color(TEXT_SECONDARY),
+                            );
+                            if let Some(auth) = self.google_device_auth.clone() {
+                                ui.add_space(4.0);
+                                ui.label(
+                                    RichText::new(format!("1. Abre: {}", auth.verification_url))
+                                        .small()
+                                        .color(TEXT_PRIMARY),
+                                );
+                                ui.label(
+                                    RichText::new(&auth.user_code)
+                                        .size(22.0)
+                                        .strong()
+                                        .color(ACCENT_RED),
+                                );
+                                ui.horizontal(|ui| {
+                                    if self.google_login_loading {
+                                        ui.spinner();
+                                    }
+                                    if ui
+                                        .add(
+                                            egui::Button::new(
+                                                RichText::new("Verificar ahora")
+                                                    .color(Color32::WHITE),
+                                            )
+                                            .fill(ACCENT_RED)
+                                            .corner_radius(CornerRadius::same(16)),
+                                        )
+                                        .clicked()
+                                    {
+                                        self.poll_google_device_auth(ctx);
+                                    }
+                                });
+                            } else if ui
+                                .add(
+                                    egui::Button::new(
+                                        RichText::new(if self.google_login_loading {
+                                            "Generando código..."
+                                        } else {
+                                            "Generar código (google.com/device)"
+                                        })
+                                        .color(TEXT_PRIMARY),
+                                    )
+                                    .fill(BG_ELEVATED)
+                                    .corner_radius(CornerRadius::same(16)),
+                                )
+                                .clicked()
+                                && !self.google_login_loading
+                            {
+                                self.start_google_device_auth(ctx);
+                            }
+
+                            ui.add_space(8.0);
+                            ui.separator();
+                            ui.add_space(6.0);
+                            ui.label(
+                                RichText::new("Cookie manual de music.youtube.com (opcional):")
+                                    .small()
+                                    .color(TEXT_SECONDARY),
+                            );
+                            ui.horizontal(|ui| {
+                                let cookie_w = (card_w - 92.0).max(150.0);
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut self.google_cookie_input)
+                                        .hint_text("SAPISID=...; ...")
+                                        .desired_width(cookie_w),
+                                );
+                                if ui
+                                    .add(
+                                        egui::Button::new(
+                                            RichText::new("Guardar").color(Color32::WHITE),
+                                        )
+                                        .fill(BG_ELEVATED)
+                                        .corner_radius(CornerRadius::same(16))
+                                        .min_size(Vec2::new(76.0, 32.0)),
+                                    )
+                                    .clicked()
+                                    && !self.google_login_loading
+                                {
+                                    let c = self.google_cookie_input.clone();
+                                    self.login_with_cookie(c, ctx);
+                                }
+                            });
+
+                            if let Some(err) = &self.google_auth_error {
+                                ui.add_space(6.0);
+                                ui.label(RichText::new(err).small().color(ACCENT_RED));
+                            }
                         }
                     });
-                    return;
-                }
-
-                ui.label(
-                    RichText::new("Mantén tus recomendaciones de Google")
-                        .strong()
-                        .size(15.0)
-                        .color(TEXT_PRIMARY),
-                );
-                ui.label(
-                    RichText::new(
-                        "Inicia sesión para cargar Tus listas, Escuchar de nuevo y tus mixes de YouTube Music.",
-                    )
-                    .small()
-                    .color(TEXT_SECONDARY),
-                );
-                ui.add_space(10.0);
-
-                if icons::icon_pill_button(
-                    ui,
-                    icons::Icon::Account,
-                    "Iniciar sesión con Google",
-                    ACCENT_RED,
-                    Color32::WHITE,
-                )
-                .clicked()
-                {
-                    crate::android_media::open_google_login();
-                }
-
-                ui.add_space(10.0);
-                ui.separator();
-                ui.add_space(6.0);
-                ui.label(
-                    RichText::new("O conecta con código de dispositivo:")
-                        .small()
-                        .color(TEXT_SECONDARY),
-                );
-                if let Some(auth) = self.google_device_auth.clone() {
-                    ui.add_space(4.0);
-                    ui.label(
-                        RichText::new(format!("1. Abre: {}", auth.verification_url))
-                            .small()
-                            .color(TEXT_PRIMARY),
-                    );
-                    ui.label(
-                        RichText::new(&auth.user_code)
-                            .size(22.0)
-                            .strong()
-                            .color(ACCENT_RED),
-                    );
-                    ui.horizontal(|ui| {
-                        if self.google_login_loading {
-                            ui.spinner();
-                        }
-                        if ui.button("Verificar ahora").clicked() {
-                            self.poll_google_device_auth(ctx);
-                        }
-                    });
-                } else if ui
-                    .button(if self.google_login_loading {
-                        "Generando código..."
-                    } else {
-                        "Generar código (google.com/device)"
-                    })
-                    .clicked()
-                    && !self.google_login_loading
-                {
-                    self.start_google_device_auth(ctx);
-                }
-
-                ui.add_space(8.0);
-                ui.separator();
-                ui.add_space(6.0);
-                ui.label(
-                    RichText::new("Cookie manual de music.youtube.com (opcional):")
-                        .small()
-                        .color(TEXT_SECONDARY),
-                );
-                ui.horizontal(|ui| {
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.google_cookie_input)
-                            .hint_text("SAPISID=...; ...")
-                            .desired_width(180.0),
-                    );
-                    if ui.button("Guardar").clicked() && !self.google_login_loading {
-                        let c = self.google_cookie_input.clone();
-                        self.login_with_cookie(c, ctx);
-                    }
-                });
-
-                if let Some(err) = &self.google_auth_error {
-                    ui.add_space(6.0);
-                    ui.label(RichText::new(err).small().color(ACCENT_RED));
-                }
-
-                ui.add_space(6.0);
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if ui.button("Cerrar").clicked() {
-                        self.show_google_login = false;
-                    }
-                });
             });
-        if !open {
+
+        if close_modal {
             self.show_google_login = false;
         }
     }
+}
+
+fn draw_inline_icon(ui: &mut egui::Ui, icon: icons::Icon, size: f32, color: Color32) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
+    icons::draw_icon(ui.painter(), rect, icon, color);
+}
+
+fn render_modal_scrim(ctx: &egui::Context, id_salt: &str) -> bool {
+    let screen = ctx.screen_rect();
+    let mut dismissed = false;
+    egui::Area::new(egui::Id::new(id_salt))
+        .fixed_pos(screen.min)
+        .order(egui::Order::Middle)
+        .show(ctx, |ui| {
+            let (_, scrim_resp) = ui.allocate_exact_size(screen.size(), Sense::click());
+            ui.painter()
+                .rect_filled(screen, CornerRadius::ZERO, Color32::from_black_alpha(165));
+            if scrim_resp.clicked() {
+                dismissed = true;
+            }
+        });
+    dismissed
 }
 
 fn render_clamped_label(

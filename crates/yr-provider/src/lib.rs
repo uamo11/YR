@@ -261,13 +261,28 @@ impl MusicProvider for YtMusicProvider {
         if feed.quick_picks.is_empty() && !feed.recommended_tracks.is_empty() {
             feed.quick_picks = feed.recommended_tracks.clone();
         }
+        if feed.quick_picks.is_empty() && !feed.trending_tracks.is_empty() {
+            feed.quick_picks = feed.trending_tracks.clone();
+        }
         if feed.quick_picks.is_empty() && mood_params.is_none() {
-            if let Ok(charts) = self.client.query().music_charts(Some(Country::Us)).await {
+            let q = self.client.query();
+            let (charts_res, new_videos_res) =
+                tokio::join!(q.music_charts(Some(Country::Us)), q.music_new_videos());
+            if let Ok(charts) = charts_res {
                 feed.quick_picks
                     .extend(charts.top_tracks.into_iter().map(Self::map_track));
                 if feed.trending_tracks.is_empty() {
                     feed.trending_tracks
                         .extend(charts.trending_tracks.into_iter().map(Self::map_track));
+                }
+            }
+            if feed.quick_picks.is_empty() && !feed.trending_tracks.is_empty() {
+                feed.quick_picks = feed.trending_tracks.clone();
+            }
+            if feed.quick_picks.is_empty() {
+                if let Ok(videos) = new_videos_res {
+                    feed.quick_picks
+                        .extend(videos.into_iter().map(Self::map_track));
                 }
             }
         }
