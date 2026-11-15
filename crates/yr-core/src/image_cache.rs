@@ -1,8 +1,9 @@
 use std::collections::HashMap;
 
-pub const MAX_CACHED_IMAGES: usize = 36;
-pub const IDLE_SOFT_LIMIT: usize = 24;
+pub const MAX_CACHED_IMAGES: usize = 96;
+pub const IDLE_SOFT_LIMIT: usize = 36;
 pub const IDLE_FORGET_FRAMES: u64 = 180;
+pub const MIN_ACTIVE_FRAMES: u64 = 60;
 
 #[derive(Default)]
 pub struct ImageLru {
@@ -38,10 +39,14 @@ impl ImageLru {
                 evicted.push(k);
             }
         }
+        // Never evict actively-rendered entries (< MIN_ACTIVE_FRAMES old), preventing
+        // per-frame forget_image -> ehttp refetch loops when > MAX_CACHED_IMAGES appear at once.
+        let active_cutoff = self.frame.saturating_sub(MIN_ACTIVE_FRAMES);
         while self.last_seen.len() > MAX_CACHED_IMAGES {
             let Some(oldest) = self
                 .last_seen
                 .iter()
+                .filter(|(_, seen)| **seen < active_cutoff)
                 .min_by(|(ka, sa), (kb, sb)| sa.cmp(sb).then_with(|| ka.cmp(kb)))
                 .map(|(k, _)| k.clone())
             else {
@@ -150,20 +155,32 @@ mod tests {
     }
 
     #[test]
-    fn image_lru_caps_entries_and_evicts_stale() {
+    fn image_lru_preserves_active_entries_and_evicts_stale() {
         let mut lru = ImageLru::default();
-        for i in 0..50 {
+        // Even when > MAX_CACHED_IMAGES are touched in the same frame, active items are NOT evicted.
+        for i in 0..110 {
             lru.touch(&format!("https://img/{i}"));
         }
-        let evicted = lru.advance_and_collect_evictions();
-        assert_eq!(lru.len(), MAX_CACHED_IMAGES);
-        assert_eq!(evicted.len(), 50 - MAX_CACHED_IMAGES);
+        assert!(lru.advance_and_collect_evictions().is_empty());
+        assert_eq!(lru.len(), 110);
 
-        for _ in 1..IDLE_FORGET_FRAMES {
-            assert!(lru.advance_and_collect_evictions().is_empty());
+        // Advance past MIN_ACTIVE_FRAMES while keeping items 50..110 actively touched:
+        // only the inactive entries (0..50) get trimmed down to MAX_CACHED_IMAGES.
+        for _ in 0..MIN_ACTIVE_FRAMES {
+            for i in 50..110 {
+                lru.touch(&format!("https://img/{i}"));
+            }
+            let evicted = lru.advance_and_collect_evictions();
+            if lru.len() == MAX_CACHED_IMAGES {
+                assert_eq!(evicted.len(), 110 - MAX_CACHED_IMAGES);
+            }
         }
-        let evicted_stale = lru.advance_and_collect_evictions();
-        assert_eq!(evicted_stale.len(), MAX_CACHED_IMAGES);
+        assert_eq!(lru.len(), MAX_CACHED_IMAGES);
+
+        // Once nothing is touched past IDLE_FORGET_FRAMES, all entries evict cleanly.
+        for _ in 0..(IDLE_FORGET_FRAMES + 2) {
+            lru.advance_and_collect_evictions();
+        }
         assert!(lru.is_empty());
     }
 }
