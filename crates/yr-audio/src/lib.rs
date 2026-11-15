@@ -682,6 +682,8 @@ fn open_progressive_stream(
         let client = shared_http_client();
         let ua: Option<&'static str> = if url_owned.contains("c=MWEB") || url_owned.contains("c=WEB") {
             Some("Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36")
+        } else if url_owned.contains("c=VISIONOS") {
+            Some("Mozilla/5.0 (Macintosh; Intel Mac OS X 14_6) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15")
         } else if url_owned.contains("c=IOS") {
             Some("com.google.ios.youtube/19.29.1 (iPhone16,2; U; CPU iOS 17_5_1 like Mac OS X;)")
         } else {

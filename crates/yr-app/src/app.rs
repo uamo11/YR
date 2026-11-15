@@ -218,7 +218,10 @@ async fn play_track_bg(
     let res = match provider.resolve_audio_stream(&track.id, quality).await {
         Ok(s) => {
             #[cfg(target_os = "android")]
-            if !s.url.contains("pot=") && s.content_length.unwrap_or(0) > 1_048_576 {
+            if !s.url.contains("pot=")
+                && !s.url.contains("c=VISIONOS")
+                && s.content_length.unwrap_or(0) > 1_048_576
+            {
                 let vid = track.id.clone();
                 if let Some(wv) =
                     tokio::task::spawn_blocking(move || crate::android_media::resolve_audio_url(&vid))

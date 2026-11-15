@@ -3,6 +3,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha1::{Digest, Sha1};
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+use std::time::{Duration, Instant};
+use tokio::sync::RwLock;
 use yr_core::{
     AlbumSummary, AudioQuality, ExploreFeed, GoogleAccountInfo, HomeFeed, HomeShelf,
     HomeShelfCard, HomeShelfLayout, LyricLine, LyricsData, MoodGenre, PlaylistSummary,
@@ -686,13 +689,192 @@ fn non_empty(s: String) -> Option<String> {
     }
 }
 
-/// Fast direct stream extraction via InnerTube `ANDROID_VR` / `IOS` player clients.
-/// Both return direct unencrypted `url` streams without signature/n-sig JS evaluation.
+const VISIONOS_UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_6) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15";
+static VISITOR_DATA_CACHE: OnceLock<RwLock<Option<(String, Instant)>>> = OnceLock::new();
+
+fn decode_visitor_data(raw: &str) -> String {
+    raw.replace("\\u003d", "=")
+        .replace("\\u003D", "=")
+        .replace("%3D", "=")
+        .replace("%3d", "=")
+        .replace("%2B", "+")
+        .replace("%2b", "+")
+        .replace("%2F", "/")
+        .replace("%2f", "/")
+}
+
+async fn get_or_fetch_visitor_data(
+    http: &reqwest::Client,
+    force_refresh: bool,
+) -> Result<String, String> {
+    let cache = VISITOR_DATA_CACHE.get_or_init(|| RwLock::new(None));
+    if !force_refresh {
+        let guard = cache.read().await;
+        if let Some((ref vd, fetched_at)) = *guard {
+            if fetched_at.elapsed() < Duration::from_secs(1800) {
+                return Ok(vd.clone());
+            }
+        }
+    }
+
+    for page_url in [YTM_ORIGIN, "https://www.youtube.com/"] {
+        let Ok(resp) = http
+            .get(page_url)
+            .header(USER_AGENT, WEB_UA)
+            .header("Accept-Language", "es-419,es;q=0.9,en;q=0.8")
+            .send()
+            .await
+        else {
+            continue;
+        };
+        if let Ok(html) = resp.text().await {
+            if let Some(raw) = find_json_field(&html, "VISITOR_DATA")
+                .or_else(|| find_json_field(&html, "visitorData"))
+            {
+                let vd = decode_visitor_data(&raw);
+                if !vd.is_empty() {
+                    let mut guard = cache.write().await;
+                    *guard = Some((vd.clone(), Instant::now()));
+                    return Ok(vd);
+                }
+            }
+        }
+    }
+    Err("visitorData unavailable".to_string())
+}
+
+fn pick_best_audio_stream(video_id: &str, val: &Value, quality: AudioQuality) -> Option<StreamInfo> {
+    let target_bps = quality.target_bitrate_kbps() * 1000;
+    let formats = val
+        .pointer("/streamingData/adaptiveFormats")
+        .and_then(|v| v.as_array())?;
+
+    let mut candidates: Vec<(u64, StreamInfo)> = Vec::new();
+    for f in formats {
+        let Some(mime) = f.get("mimeType").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        if !mime.starts_with("audio/") {
+            continue;
+        }
+        let Some(url) = f.get("url").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let bitrate = f
+            .get("bitrate")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(128_000) as u32;
+        let content_length = f
+            .get("contentLength")
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse::<u64>().ok());
+        let is_m4a = mime.contains("mp4") || mime.contains("m4a");
+        let ext = if is_m4a {
+            "m4a"
+        } else if mime.contains("webm") {
+            "webm"
+        } else {
+            "audio"
+        };
+        // Strongly prefer M4A/AAC since yr-audio decodes isomp4+aac natively.
+        let penalty = if is_m4a { 0_u64 } else { 50_000_000_u64 };
+        let diff = (bitrate as i64 - target_bps as i64).unsigned_abs();
+        candidates.push((
+            penalty + diff,
+            StreamInfo {
+                track_id: video_id.to_string(),
+                url: url.to_string(),
+                mime_type: mime.to_string(),
+                extension: ext.to_string(),
+                bitrate_bps: bitrate,
+                content_length,
+            },
+        ));
+    }
+
+    candidates
+        .into_iter()
+        .min_by_key(|(score, _)| *score)
+        .map(|(_, best)| best)
+}
+
+async fn fetch_visionos_stream(
+    http: &reqwest::Client,
+    video_id: &str,
+    quality: AudioQuality,
+) -> Result<StreamInfo, String> {
+    let mut last_err = "VISIONOS stream failed".to_string();
+    for attempt in 0..2 {
+        let vd = get_or_fetch_visitor_data(http, attempt > 0).await?;
+        let body = json!({
+            "videoId": video_id,
+            "context": {
+                "client": {
+                    "clientName": "VISIONOS",
+                    "clientVersion": "0.1",
+                    "osName": "VISION_OS",
+                    "osVersion": "1.3",
+                    "deviceMake": "Apple",
+                    "deviceModel": "RealityDevice14,1",
+                    "platform": "MOBILE",
+                    "hl": "es",
+                    "gl": "US",
+                    "visitorData": vd
+                }
+            },
+            "contentCheckOk": true,
+            "racyCheckOk": true
+        });
+        for endpoint in [
+            "https://music.youtube.com/youtubei/v1/player?prettyPrint=false",
+            "https://www.youtube.com/youtubei/v1/player?prettyPrint=false",
+        ] {
+            let resp = match http
+                .post(endpoint)
+                .header(CONTENT_TYPE, "application/json")
+                .header(USER_AGENT, VISIONOS_UA)
+                .header("X-Goog-Visitor-Id", &vd)
+                .json(&body)
+                .send()
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    last_err = e.to_string();
+                    continue;
+                }
+            };
+            if !resp.status().is_success() {
+                last_err = format!("HTTP {}", resp.status());
+                continue;
+            }
+            let Ok(val) = resp.json::<Value>().await else {
+                last_err = "Invalid JSON from VISIONOS player".to_string();
+                continue;
+            };
+            if let Some(best) = pick_best_audio_stream(video_id, &val, quality) {
+                return Ok(best);
+            }
+            let status = val
+                .pointer("/playabilityStatus/status")
+                .and_then(|v| v.as_str())
+                .unwrap_or("UNKNOWN");
+            last_err = format!("VISIONOS playabilityStatus={status}");
+        }
+    }
+    Err(last_err)
+}
+
+/// Fast direct stream extraction via InnerTube `VISIONOS 0.1` (+ visitorData),
+/// falling back to `ANDROID_VR` / `IOS` player clients.
 pub async fn fetch_player_stream(
     http: &reqwest::Client,
     video_id: &str,
     quality: AudioQuality,
 ) -> Result<StreamInfo, String> {
+    if let Ok(stream) = fetch_visionos_stream(http, video_id, quality).await {
+        return Ok(stream);
+    }
     let clients = [
         (
             "ANDROID_VR",
@@ -708,7 +890,6 @@ pub async fn fetch_player_stream(
         ),
     ];
 
-    let target_bps = quality.target_bitrate_kbps() * 1000;
     let mut last_err = String::from("No stream returned");
 
     for (client_name, client_version, ua, client_id) in clients {
@@ -778,57 +959,7 @@ pub async fn fetch_player_stream(
                 .to_string();
             continue;
         }
-        let Some(formats) = val
-            .pointer("/streamingData/adaptiveFormats")
-            .and_then(|v| v.as_array())
-        else {
-            continue;
-        };
-
-        let mut candidates: Vec<(u64, StreamInfo)> = Vec::new();
-        for f in formats {
-            let Some(mime) = f.get("mimeType").and_then(|v| v.as_str()) else {
-                continue;
-            };
-            if !mime.starts_with("audio/") {
-                continue;
-            }
-            let Some(url) = f.get("url").and_then(|v| v.as_str()) else {
-                continue;
-            };
-            let bitrate = f
-                .get("bitrate")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(128_000) as u32;
-            let content_length = f
-                .get("contentLength")
-                .and_then(|v| v.as_str())
-                .and_then(|s| s.parse::<u64>().ok());
-            let is_m4a = mime.contains("mp4") || mime.contains("m4a");
-            let ext = if is_m4a {
-                "m4a"
-            } else if mime.contains("webm") {
-                "webm"
-            } else {
-                "audio"
-            };
-            // Strongly prefer M4A/AAC since yr-audio decodes isomp4+aac natively.
-            let penalty = if is_m4a { 0_u64 } else { 50_000_000_u64 };
-            let diff = (bitrate as i64 - target_bps as i64).unsigned_abs();
-            candidates.push((
-                penalty + diff,
-                StreamInfo {
-                    track_id: video_id.to_string(),
-                    url: url.to_string(),
-                    mime_type: mime.to_string(),
-                    extension: ext.to_string(),
-                    bitrate_bps: bitrate,
-                    content_length,
-                },
-            ));
-        }
-
-        if let Some((_, best)) = candidates.into_iter().min_by_key(|(score, _)| *score) {
+        if let Some(best) = pick_best_audio_stream(video_id, &val, quality) {
             return Ok(best);
         }
     }
