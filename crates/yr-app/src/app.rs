@@ -1074,8 +1074,15 @@ impl YrApp {
                     Ok(tracks) if !tracks.is_empty() => {
                         {
                             let mut q = self.queue.lock().unwrap();
-                            for t in tracks {
-                                q.enqueue_or_enrich(t);
+                            for t in &tracks {
+                                q.enqueue_or_enrich(t.clone());
+                            }
+                        }
+                        let mut existing: HashSet<String> =
+                            self.sample_tracks.iter().map(|t| t.id.clone()).collect();
+                        for t in tracks {
+                            if !t.id.starts_with("local_demo_") && existing.insert(t.id.clone()) {
+                                self.sample_tracks.push(t);
                             }
                         }
                         self.set_banner("Radio añadida a la cola");
@@ -2994,7 +3001,7 @@ impl YrApp {
             // Bottom title, artist, step buttons & progress strip
             ui.horizontal(|ui| {
                 let info_w = (inner_rect.width() - 96.0).max(120.0);
-                ui.allocate_ui(Vec2::new(info_w, 58.0), |ui| {
+                ui.allocate_ui(Vec2::new(info_w, 66.0), |ui| {
                     ui.vertical(|ui| {
                         ui.spacing_mut().item_spacing.y = 2.0;
                         render_clamped_label(ui, &track.title, 17.0, Color32::WHITE, info_w, 2);
@@ -3010,6 +3017,16 @@ impl YrApp {
                             )
                             .truncate(),
                         );
+                        if let Some(next_t) = self.sample_tracks.get(idx + 1) {
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(format!("Siguiente: {}", next_t.title))
+                                        .size(11.0)
+                                        .color(Color32::from_white_alpha(145)),
+                                )
+                                .truncate(),
+                            );
+                        }
                     });
                 });
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -4886,33 +4903,47 @@ impl YrApp {
                     });
 
                     ui.add_space(16.0);
-                    // Left-aligned Title > and Artist
-                    ui.horizontal(|ui| {
-                        let title_resp = ui.add(
-                            egui::Label::new(
-                                RichText::new(&track.title)
-                                    .size(22.0)
-                                    .strong()
-                                    .color(Color32::WHITE),
-                            )
-                            .wrap()
-                            .sense(Sense::click()),
-                        );
-                        ui.label(
-                            RichText::new(" ›")
-                                .size(22.0)
-                                .strong()
-                                .color(Color32::from_white_alpha(210)),
-                        );
-                        if title_resp.clicked() {
-                            if let Some(album_id) = track.album_id.clone() {
-                                self.now_playing_open = false;
-                                self.open_album(album_id, ctx);
-                            } else {
-                                self.action_sheet_track = Some(track.clone());
+                    // Left-aligned Title > and Artist constrained to avail_w
+                    let title_w = (avail_w - 22.0).max(140.0);
+                    let mut title_clicked = false;
+                    ui.allocate_ui(Vec2::new(avail_w, 0.0), |ui| {
+                        ui.horizontal(|ui| {
+                            ui.allocate_ui(Vec2::new(title_w, 0.0), |ui| {
+                                let job = clamped_layout_job(
+                                    &track.title,
+                                    21.0,
+                                    Color32::WHITE,
+                                    title_w,
+                                    2,
+                                );
+                                if ui.add(egui::Label::new(job).sense(Sense::click())).clicked() {
+                                    title_clicked = true;
+                                }
+                            });
+                            if ui
+                                .add(
+                                    egui::Label::new(
+                                        RichText::new(" ›")
+                                            .size(21.0)
+                                            .strong()
+                                            .color(Color32::from_white_alpha(210)),
+                                    )
+                                    .sense(Sense::click()),
+                                )
+                                .clicked()
+                            {
+                                title_clicked = true;
                             }
-                        }
+                        });
                     });
+                    if title_clicked {
+                        if let Some(album_id) = track.album_id.clone() {
+                            self.now_playing_open = false;
+                            self.open_album(album_id, ctx);
+                        } else {
+                            self.action_sheet_track = Some(track.clone());
+                        }
+                    }
                     ui.add_space(2.0);
                     if let Some(artist_id) = track.artist_id.clone() {
                         if ui
@@ -4964,9 +4995,10 @@ impl YrApp {
                     ui.add_space(12.0);
                     // Scrollable Action Pills row matching YTM: ThumbUp|ThumbDown, Letra, Guardar, Compartir, Descargar, Radio
                     let pill_bg = Color32::from_white_alpha(26);
-                    egui::ScrollArea::horizontal()
-                        .id_salt("np_action_pills")
-                        .show(ui, |ui| {
+                    ui.allocate_ui(Vec2::new(avail_w, 38.0), |ui| {
+                        egui::ScrollArea::horizontal()
+                            .id_salt("np_action_pills")
+                            .show(ui, |ui| {
                             ui.horizontal(|ui| {
                                 let liked = self.store.is_liked(&track.id);
                                 let disliked = self.store.is_disliked(&track.id);
@@ -5115,6 +5147,7 @@ impl YrApp {
                                 }
                             });
                         });
+                    });
 
                     ui.add_space(12.0);
                     let total = snap
@@ -5123,7 +5156,7 @@ impl YrApp {
                         .unwrap_or(1.0)
                         .max(1.0);
                     let pos = self.seeking_secs.unwrap_or(snap.position_secs).min(total);
-                    let slider_w = (avail_w - 8.0).max(160.0);
+                    let slider_w = avail_w.max(160.0);
                     let (bar_rect, bar_resp) = ui.allocate_exact_size(
                         Vec2::new(slider_w, 24.0),
                         Sense::click_and_drag(),
@@ -5179,18 +5212,20 @@ impl YrApp {
                     }
                     let pos = display_pos;
 
-                    ui.horizontal(|ui| {
-                        ui.label(
-                            RichText::new(format_seconds(pos as u64))
-                                .size(12.0)
-                                .color(Color32::from_white_alpha(180)),
-                        );
-                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    ui.allocate_ui(Vec2::new(avail_w, 18.0), |ui| {
+                        ui.horizontal(|ui| {
                             ui.label(
-                                RichText::new(format_seconds(total as u64))
+                                RichText::new(format_seconds(pos as u64))
                                     .size(12.0)
                                     .color(Color32::from_white_alpha(180)),
                             );
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                ui.label(
+                                    RichText::new(format_seconds(total as u64))
+                                        .size(12.0)
+                                        .color(Color32::from_white_alpha(180)),
+                                );
+                            });
                         });
                     });
 
