@@ -258,6 +258,20 @@ impl MusicProvider for YtMusicProvider {
             }
         };
 
+        if feed.quick_picks.is_empty() && !feed.recommended_tracks.is_empty() {
+            feed.quick_picks = feed.recommended_tracks.clone();
+        }
+        if feed.quick_picks.is_empty() && mood_params.is_none() {
+            if let Ok(charts) = self.client.query().music_charts(Some(Country::Us)).await {
+                feed.quick_picks
+                    .extend(charts.top_tracks.into_iter().map(Self::map_track));
+                if feed.trending_tracks.is_empty() {
+                    feed.trending_tracks
+                        .extend(charts.trending_tracks.into_iter().map(Self::map_track));
+                }
+            }
+        }
+
         feed.is_logged_in = logged_in;
         if feed.account.is_none() {
             feed.account = session.as_ref().and_then(|s| s.account.clone());
