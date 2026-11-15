@@ -680,8 +680,33 @@ fn open_progressive_stream(
     runtime.spawn(async move {
         const CHUNK_SIZE: u64 = 524_288;
         let client = shared_http_client();
+        let ua: Option<&'static str> = if url_owned.contains("c=MWEB") || url_owned.contains("c=WEB") {
+            Some("Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36")
+        } else if url_owned.contains("c=IOS") {
+            Some("com.google.ios.youtube/19.29.1 (iPhone16,2; U; CPU iOS 17_5_1 like Mac OS X;)")
+        } else {
+            None
+        };
+        let is_web_client = url_owned.contains("c=MWEB") || url_owned.contains("c=WEB");
+
+        let build_req = |range_val: Option<String>| {
+            let mut r = client.get(&url_owned);
+            if let Some(u) = ua {
+                r = r.header(reqwest::header::USER_AGENT, u);
+            }
+            if is_web_client {
+                r = r
+                    .header(reqwest::header::ORIGIN, "https://m.youtube.com")
+                    .header(reqwest::header::REFERER, "https://m.youtube.com/");
+            }
+            if let Some(rv) = range_val {
+                r = r.header(reqwest::header::RANGE, rv);
+            }
+            r
+        };
 
         let set_err = |msg: String| {
+            tracing::warn!("progressive stream error: {msg}");
             let (lock, cvar) = &*state_bg;
             if let Ok(mut g) = lock.lock() {
                 g.error = Some(msg);
@@ -690,9 +715,7 @@ fn open_progressive_stream(
             cvar.notify_all();
         };
 
-        let first_resp = match client
-            .get(&url_owned)
-            .header(reqwest::header::RANGE, format!("bytes=0-{}", CHUNK_SIZE - 1))
+        let first_resp = match build_req(Some(format!("bytes=0-{}", CHUNK_SIZE - 1)))
             .send()
             .await
         {
@@ -772,12 +795,7 @@ fn open_progressive_stream(
                 Some(t) => (written_total + CHUNK_SIZE - 1).min(t.saturating_sub(1)),
                 None => written_total + CHUNK_SIZE - 1,
             };
-            match client
-                .get(&url_owned)
-                .header(
-                    reqwest::header::RANGE,
-                    format!("bytes={written_total}-{end}"),
-                )
+            match build_req(Some(format!("bytes={written_total}-{end}")))
                 .send()
                 .await
             {

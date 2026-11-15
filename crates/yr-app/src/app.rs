@@ -176,7 +176,7 @@ pub struct YrApp {
     pending_color_urls: HashSet<String>,
 
     last_finished_counter: Arc<std::sync::atomic::AtomicU64>,
-    last_media_sync: Option<(String, bool, Instant)>,
+    last_media_sync: Option<(String, bool, u64, Instant)>,
     status_banner: Option<(String, Instant)>,
     seeking_secs: Option<f64>,
     home_v_drag_id: Option<egui::Id>,
@@ -216,7 +216,28 @@ async fn play_track_bg(
     }
 
     let res = match provider.resolve_audio_stream(&track.id, quality).await {
-        Ok(s) => Ok(s.url),
+        Ok(s) => {
+            #[cfg(target_os = "android")]
+            if !s.url.contains("pot=") && s.content_length.unwrap_or(0) > 1_048_576 {
+                let vid = track.id.clone();
+                if let Some(wv) =
+                    tokio::task::spawn_blocking(move || crate::android_media::resolve_audio_url(&vid))
+                        .await
+                        .ok()
+                        .flatten()
+                {
+                    Ok(wv)
+                } else {
+                    Ok(s.url)
+                }
+            } else {
+                Ok(s.url)
+            }
+            #[cfg(not(target_os = "android"))]
+            {
+                Ok(s.url)
+            }
+        }
         Err(rust_err) => {
             let vid = track.id.clone();
             let webview_url =
@@ -1230,21 +1251,22 @@ impl YrApp {
 
         if let Some(track) = self.queue.lock().unwrap().current_track().cloned() {
             let is_playing = snap.status == PlaybackStatus::Playing;
+            let pos_ms = (snap.position_secs * 1000.0).max(0.0) as u64;
+            let dur_ms = snap
+                .duration_secs
+                .or(track.duration_secs.map(|d| d as f64))
+                .map(|d| (d * 1000.0).max(0.0) as u64)
+                .unwrap_or(0);
             let should_sync = match &self.last_media_sync {
-                Some((id, prev_playing, at)) => {
+                Some((id, prev_playing, prev_dur_ms, at)) => {
                     id != &track.id
                         || *prev_playing != is_playing
+                        || (*prev_dur_ms == 0 && dur_ms > 0)
                         || (is_playing && at.elapsed() >= Duration::from_secs(2))
                 }
                 None => true,
             };
             if should_sync {
-                let pos_ms = (snap.position_secs * 1000.0).max(0.0) as u64;
-                let dur_ms = snap
-                    .duration_secs
-                    .or(track.duration_secs.map(|d| d as f64))
-                    .map(|d| (d * 1000.0).max(0.0) as u64)
-                    .unwrap_or(0);
                 crate::android_media::update_playback(
                     &track.title,
                     &track.artist,
@@ -1252,7 +1274,8 @@ impl YrApp {
                     pos_ms,
                     dur_ms,
                 );
-                self.last_media_sync = Some((track.id.clone(), is_playing, Instant::now()));
+                self.last_media_sync =
+                    Some((track.id.clone(), is_playing, dur_ms, Instant::now()));
             }
         }
     }

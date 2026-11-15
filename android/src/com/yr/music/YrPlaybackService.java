@@ -109,8 +109,9 @@ public class YrPlaybackService extends Service {
             return;
         }
         currentArtworkUrl = normalized;
+        // Clear previous track's bitmap immediately so notification/lockscreen never pairs old art with new title.
+        currentArtworkBitmap = null;
         if (normalized.isEmpty()) {
-            currentArtworkBitmap = null;
             return;
         }
         new Thread(() -> {
@@ -190,6 +191,8 @@ public class YrPlaybackService extends Service {
                 WebView wv = new WebView(ctx.getApplicationContext());
                 webRef.set(wv);
                 wv.layout(0, 0, 360, 200);
+                wv.onResume();
+                wv.resumeTimers();
                 WebSettings ws = wv.getSettings();
                 ws.setJavaScriptEnabled(true);
                 ws.setDomStorageEnabled(true);
@@ -222,23 +225,29 @@ public class YrPlaybackService extends Service {
                         try {
                             String u = request.getUrl().toString();
                             if (u.contains("googlevideo.com/videoplayback")) {
-                                if (gvCount < 5) {
+                                if (gvCount < 8) {
                                     gvCount++;
-                                    Log.i("YR_WEB", "gv[" + gvCount + "]: " + u.substring(0, Math.min(180, u.length())));
+                                    Log.i("YR_WEB", "gv[" + gvCount + "] hasPot=" + u.contains("pot=")
+                                            + " hasUmp=" + u.contains("ump=")
+                                            + ": " + u.substring(0, Math.min(200, u.length())));
                                 }
                                 if (u.contains("mime=audio/mp4")
                                         || u.contains("mime%3Daudio%2Fmp4")
                                         || u.contains("itag=140")
                                         || u.contains("itag=139")) {
-                                    String clean = u.replaceAll("&(range|rn|rbuf)=[^&]*", "");
-                                    Log.i("YR_WEB", "Intercepted audio/mp4 URL for " + videoId);
+                                    String clean = u.replaceAll("([?&])(range|rn|rbuf|ump|srfvp)=[^&]*", "$1")
+                                            .replace("?&", "?")
+                                            .replaceAll("&&+", "&");
+                                    Log.i("YR_WEB", "Intercepted audio/mp4 URL for " + videoId + " hasPot=" + clean.contains("pot="));
                                     if (result.compareAndSet(null, clean)) {
                                         latch.countDown();
                                     }
                                 } else if (u.contains("mime=video/mp4")
                                         || u.contains("mime%3Dvideo%2Fmp4")
                                         || u.contains("itag=18")) {
-                                    String clean = u.replaceAll("&(range|rn|rbuf)=[^&]*", "");
+                                    String clean = u.replaceAll("([?&])(range|rn|rbuf|ump|srfvp)=[^&]*", "$1")
+                                            .replace("?&", "?")
+                                            .replaceAll("&&+", "&");
                                     fallbackMp4.compareAndSet(null, clean);
                                 }
                             }
@@ -251,7 +260,7 @@ public class YrPlaybackService extends Service {
                     public void onPageFinished(WebView view, String url) {
                         try {
                             view.evaluateJavascript(
-                                    "try{var v=document.querySelector('video');if(v){v.muted=true;v.play();}}catch(e){}",
+                                    "(function(){function poke(){try{var v=document.querySelector('video');if(v){v.muted=true;v.play();}var b=document.querySelector('.ytp-large-play-button,.ytp-play-button,button[aria-label*=\"Play\"],button[aria-label*=\"Reproducir\"]');if(b)b.click();}catch(e){}}poke();setTimeout(poke,400);setTimeout(poke,1200);})();",
                                     null
                             );
                         } catch (Throwable ignored) {
@@ -266,7 +275,7 @@ public class YrPlaybackService extends Service {
         });
 
         try {
-            latch.await(6, TimeUnit.SECONDS);
+            latch.await(8, TimeUnit.SECONDS);
         } catch (InterruptedException ignored) {
         } finally {
             mainHandler.post(() -> {
