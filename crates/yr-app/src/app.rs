@@ -160,6 +160,7 @@ pub struct YrApp {
 
     show_settings: bool,
     show_google_login: bool,
+    dismiss_google_banner: bool,
     google_device_auth: Option<GoogleDeviceAuth>,
     google_login_loading: bool,
     google_cookie_input: String,
@@ -348,6 +349,7 @@ impl YrApp {
             sponsor_skipped_idx: None,
             show_settings: false,
             show_google_login: false,
+            dismiss_google_banner: false,
             google_device_auth: None,
             google_login_loading: false,
             google_cookie_input: String::new(),
@@ -2572,16 +2574,16 @@ impl YrApp {
                 ui.add_space(6.0);
             }
 
-            if !self.home_feed.is_logged_in {
+            if !self.home_feed.is_logged_in && !self.dismiss_google_banner {
                 egui::Frame::new()
                     .fill(BG_SURFACE)
                     .stroke(Stroke::new(1.0_f32, Color32::from_rgb(48, 48, 54)))
                     .corner_radius(CornerRadius::same(10))
-                    .inner_margin(egui::Margin::symmetric(10, 8))
+                    .inner_margin(egui::Margin::symmetric(10, 6))
                     .show(ui, |ui| {
-                        let text_w = (ui.available_width() - 122.0).max(140.0);
+                        let text_w = (ui.available_width() - 154.0).max(120.0);
                         ui.horizontal(|ui| {
-                            ui.allocate_ui(Vec2::new(text_w, 38.0), |ui| {
+                            ui.allocate_ui(Vec2::new(text_w, 36.0), |ui| {
                                 ui.vertical(|ui| {
                                     ui.set_max_width(text_w);
                                     ui.label(
@@ -2603,6 +2605,20 @@ impl YrApp {
                                 });
                             });
                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                if icons::icon_button(
+                                    ui,
+                                    icons::Icon::Close,
+                                    26.0,
+                                    13.0,
+                                    Color32::TRANSPARENT,
+                                    TEXT_SECONDARY,
+                                    13.0,
+                                )
+                                .clicked()
+                                {
+                                    self.dismiss_google_banner = true;
+                                }
+                                ui.add_space(4.0);
                                 if icons::icon_pill_button(
                                     ui,
                                     icons::Icon::Account,
@@ -2682,6 +2698,55 @@ impl YrApp {
                         };
                         self.render_speed_dial_grid_shelf(ui, ctx, "home_synth_sd", &sd_shelf);
                     }
+                }
+            }
+
+            let has_listen_again = shelves.iter().any(|s| {
+                let low = s.title.to_lowercase();
+                low.contains("volver a escuchar")
+                    || low.contains("escucha de nuevo")
+                    || low.contains("listen again")
+            });
+            if !has_listen_again {
+                let mut seen_la = std::collections::HashSet::new();
+                let mut la_tracks = Vec::new();
+                for t in self
+                    .home_feed
+                    .listen_again
+                    .iter()
+                    .chain(
+                        self.store
+                            .data
+                            .recent_tracks
+                            .iter()
+                            .filter(|t| !t.id.starts_with("local_demo_")),
+                    )
+                {
+                    if seen_la.insert(t.id.clone()) {
+                        la_tracks.push(t.clone());
+                        if la_tracks.len() >= 12 {
+                            break;
+                        }
+                    }
+                }
+                if la_tracks.len() >= 2 {
+                    let la_cards = la_tracks
+                        .iter()
+                        .map(|t| HomeShelfCard {
+                            title: t.title.clone(),
+                            subtitle: t.artist.clone(),
+                            thumbnail_url: t.thumbnail_url.clone(),
+                            kind: ShelfCardKind::Track(t.clone()),
+                        })
+                        .collect();
+                    let la_shelf = HomeShelf {
+                        title: "Volver a escuchar".to_string(),
+                        eyebrow: Some("TU HISTORIAL".to_string()),
+                        layout: HomeShelfLayout::CarouselCards,
+                        tracks: la_tracks,
+                        cards: la_cards,
+                    };
+                    self.render_carousel_cards_shelf(ui, ctx, "home_listen_again", &la_shelf);
                 }
             }
 
