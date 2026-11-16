@@ -2261,21 +2261,19 @@ impl YrApp {
                                 }
                                 let title_job = clamped_layout_job(
                                     &card.title,
-                                    11.0,
+                                    11.5,
                                     Color32::WHITE,
                                     tile_size - 12.0,
-                                    2,
+                                    1,
                                 );
                                 let galley = ui.painter().layout_job(title_job);
-                                let overlay_h =
-                                    (galley.size().y + 13.0).clamp(32.0, tile_size * 0.46);
+                                let overlay_h = (galley.size().y + 10.0).clamp(24.0, 28.0);
                                 let overlay_rect = egui::Rect::from_min_max(
                                     egui::pos2(rect.left(), rect.bottom() - overlay_h),
                                     rect.max,
                                 );
-                                // Strong multi-band bottom scrim so bold cover art letters never clash with card titles.
-                                let band_h = 7.0;
-                                for (idx, alpha) in [48_u8, 115, 185, 232].into_iter().enumerate() {
+                                let band_h = 5.0;
+                                for (idx, alpha) in [24_u8, 64, 118, 168].into_iter().enumerate() {
                                     let band_bottom = overlay_rect.top() - (3 - idx) as f32 * band_h;
                                     let band_top = (band_bottom - band_h).max(rect.top());
                                     if band_bottom > band_top {
@@ -2297,14 +2295,13 @@ impl YrApp {
                                         sw: 8,
                                         se: 8,
                                     },
-                                    Color32::from_rgba_unmultiplied(0, 0, 0, 248),
+                                    Color32::from_rgba_unmultiplied(0, 0, 0, 200),
                                 );
                                 let clipped_painter = ui.painter().with_clip_rect(overlay_rect);
                                 clipped_painter.galley(
                                     egui::pos2(
                                         rect.left() + 6.0,
-                                        (rect.bottom() - galley.size().y - 5.0)
-                                            .max(overlay_rect.top() + 3.0),
+                                        overlay_rect.center().y - galley.size().y * 0.5,
                                     ),
                                     galley,
                                     Color32::WHITE,
@@ -5293,7 +5290,7 @@ impl YrApp {
                     let art_size = (avail_w - 28.0).min(body_h * 0.43).clamp(155.0, 290.0);
                     ui.vertical_centered(|ui| {
                         let (art_rect, art_resp) =
-                            ui.allocate_exact_size(Vec2::splat(art_size), Sense::drag());
+                            ui.allocate_exact_size(Vec2::splat(art_size), Sense::click_and_drag());
                         ui.painter().rect_filled(
                             art_rect,
                             CornerRadius::same(14),
@@ -5337,6 +5334,27 @@ impl YrApp {
                             } else if d.x > 55.0 && self.queue.lock().unwrap().prev_track().is_some()
                             {
                                 self.play_current_queue_track(ctx);
+                            }
+                        } else if art_resp.double_clicked() {
+                            if let Some(pos) = art_resp.interact_pointer_pos() {
+                                let total_dur = snap
+                                    .duration_secs
+                                    .or(track.duration_secs.map(|d| d as f64))
+                                    .unwrap_or(0.0);
+                                let delta = if pos.x < art_rect.center().x {
+                                    -10.0
+                                } else {
+                                    10.0
+                                };
+                                let target = (snap.position_secs + delta)
+                                    .clamp(0.0, total_dur.max(snap.position_secs + 10.0));
+                                self.audio.seek(Duration::from_secs_f64(target));
+                                self.last_media_sync = None;
+                                self.set_banner(if delta < 0.0 {
+                                    "-10s"
+                                } else {
+                                    "+10s"
+                                });
                             }
                         }
                     });
