@@ -54,6 +54,13 @@ impl PlaybackQueue {
         self.tracks.len()
     }
 
+    /// Clears all tracks and resets playback position.
+    pub fn clear(&mut self) {
+        self.tracks.clear();
+        self.order.clear();
+        self.current_pos = None;
+    }
+
     pub fn current_track(&self) -> Option<&Track> {
         let pos = self.current_pos?;
         let idx = *self.order.get(pos)?;

@@ -6,4 +6,4 @@ pub mod store;
 pub use image_cache::{optimize_thumb_url, ImageLru};
 pub use models::*;
 pub use queue::{PlaybackQueue, RepeatMode};
-pub use store::{AppConfig, LibraryData, LibraryStore};
+pub use store::{AppConfig, EqualizerConfig, LibraryData, LibraryStore};

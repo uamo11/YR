@@ -15,6 +15,63 @@ pub struct SearchHistoryItem {
     pub thumbnail_url: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EqualizerConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_preset_name")]
+    pub preset_name: String,
+    #[serde(default)]
+    pub bass_boost_db: f32,
+    #[serde(default = "default_eq_bands")]
+    pub bands_db: [f32; 5],
+}
+
+fn default_preset_name() -> String {
+    "Plano".to_string()
+}
+
+fn default_eq_bands() -> [f32; 5] {
+    [0.0, 0.0, 0.0, 0.0, 0.0]
+}
+
+impl Default for EqualizerConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            preset_name: default_preset_name(),
+            bass_boost_db: 0.0,
+            bands_db: default_eq_bands(),
+        }
+    }
+}
+
+impl EqualizerConfig {
+    pub const BAND_FREQS: [u32; 5] = [60, 230, 910, 3600, 14000];
+    pub const BAND_LABELS: [&'static str; 5] =
+        ["60 Hz", "230 Hz", "910 Hz", "3.6 kHz", "14 kHz"];
+
+    pub fn presets() -> &'static [(&'static str, [f32; 5], f32)] {
+        &[
+            ("Plano", [0.0, 0.0, 0.0, 0.0, 0.0], 0.0),
+            ("Graves +", [6.0, 4.0, 1.0, 0.0, -1.0], 6.0),
+            ("Rock", [4.5, 2.5, -1.0, 2.5, 4.0], 2.0),
+            ("Pop", [-1.0, 2.0, 3.5, 2.0, -1.0], 1.0),
+            ("Electrónica", [5.0, 3.5, -1.0, 2.5, 4.5], 4.0),
+            ("Vocal", [-2.0, 0.0, 4.0, 3.5, 1.0], 0.0),
+            ("Acústico", [3.0, 2.0, 1.5, 2.5, 3.0], 0.0),
+        ]
+    }
+
+    pub fn apply_preset(&mut self, name: &str) {
+        if let Some((_, bands, bass)) = Self::presets().iter().find(|(n, _, _)| *n == name) {
+            self.preset_name = name.to_string();
+            self.bands_db = *bands;
+            self.bass_boost_db = *bass;
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
     pub stream_quality: AudioQuality,
@@ -27,6 +84,8 @@ pub struct AppConfig {
     pub autoplay_radio: bool,
     #[serde(default = "default_true")]
     pub sponsorblock_enabled: bool,
+    #[serde(default)]
+    pub equalizer: EqualizerConfig,
 }
 
 fn default_true() -> bool {
@@ -47,6 +106,7 @@ impl Default for AppConfig {
             playback_speed: 1.0,
             autoplay_radio: true,
             sponsorblock_enabled: true,
+            equalizer: EqualizerConfig::default(),
         }
     }
 }
@@ -643,6 +703,28 @@ mod tests {
         assert!((reloaded.data.config.playback_speed - 1.25).abs() < 0.001);
         assert_eq!(reloaded.data.last_queue.len(), 2);
         assert_eq!(reloaded.data.last_queue_index, Some(1));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn equalizer_config_presets_and_persistence() {
+        let dir = std::env::temp_dir().join(format!("yr_eq_test_{}", Uuid::new_v4()));
+        let mut store = LibraryStore::load_or_default(&dir);
+        assert!(!store.data.config.equalizer.enabled);
+        assert_eq!(store.data.config.equalizer.preset_name, "Plano");
+
+        store.data.config.equalizer.enabled = true;
+        store.data.config.equalizer.apply_preset("Rock");
+        assert_eq!(store.data.config.equalizer.preset_name, "Rock");
+        assert_eq!(store.data.config.equalizer.bands_db[0], 4.5);
+        assert_eq!(store.data.config.equalizer.bass_boost_db, 2.0);
+        store.save().unwrap();
+
+        let reloaded = LibraryStore::load_or_default(&dir);
+        assert!(reloaded.data.config.equalizer.enabled);
+        assert_eq!(reloaded.data.config.equalizer.preset_name, "Rock");
+        assert_eq!(reloaded.data.config.equalizer.bands_db[0], 4.5);
+        assert_eq!(reloaded.data.config.equalizer.bass_boost_db, 2.0);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

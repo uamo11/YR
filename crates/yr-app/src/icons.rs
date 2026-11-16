@@ -46,6 +46,7 @@ pub enum Icon {
     ArrowBack,
     MusicNote,
     Samples,
+    Equalizer,
 }
 
 /// Renders a crisp vector icon centered inside `rect`.
@@ -416,6 +417,13 @@ pub fn draw_icon(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32
             let back = [pt(-0.46, -0.34), pt(0.02, 0.0), pt(-0.46, 0.34)];
             painter.line_segment([back[0], back[1]], stroke);
             painter.line_segment([back[1], back[2]], stroke);
+        }
+        Icon::Equalizer => {
+            // 3 vertical slider tracks with knobs (equalizer faders)
+            for &(x_rel, knob_y) in &[(-0.30, -0.10), (0.0, 0.20), (0.30, -0.25)] {
+                painter.line_segment([pt(x_rel, -0.42), pt(x_rel, 0.42)], stroke);
+                painter.circle_filled(pt(x_rel, knob_y), s * 0.12, color);
+            }
         }
     }
 }

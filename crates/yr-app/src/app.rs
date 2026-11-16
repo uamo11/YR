@@ -14,7 +14,7 @@ use tokio::sync::mpsc;
 use yr_audio::{AudioEngine, AudioSnapshot};
 use yr_core::{
     format_seconds, image_cache::track_thumb_url, optimize_thumb_url, AlbumDetail, ArtistDetail,
-    AudioQuality, ExploreFeed, GoogleDeviceAuth, HomeFeed, HomeShelf, HomeShelfCard,
+    AudioQuality, EqualizerConfig, ExploreFeed, GoogleDeviceAuth, HomeFeed, HomeShelf, HomeShelfCard,
     HomeShelfLayout, ImageLru, LibraryStore, LyricsData, PlaybackQueue, PlaybackStatus,
     PlaylistDetail, PlaylistSummary, SearchResults, ShelfCardKind, SponsorSegment, Track,
 };
@@ -172,6 +172,7 @@ pub struct YrApp {
     sleep_timer_until: Arc<std::sync::Mutex<Option<Instant>>>,
     sleep_after_track: Arc<std::sync::atomic::AtomicBool>,
     show_sleep_timer_sheet: bool,
+    show_equalizer_modal: bool,
     stream_cache_bytes: u64,
     playlist_picker_track: Option<Track>,
     action_sheet_track: Option<Track>,
@@ -317,6 +318,7 @@ impl YrApp {
             cache_dir,
             runtime.handle().clone(),
             store.data.config.volume,
+            store.data.config.equalizer.clone(),
         );
 
         let stream_cache_bytes = dir_size_bytes(&data_dir.join("stream_cache"));
@@ -381,6 +383,7 @@ impl YrApp {
             sleep_timer_until: Arc::new(std::sync::Mutex::new(None)),
             sleep_after_track: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             show_sleep_timer_sheet: false,
+            show_equalizer_modal: false,
             stream_cache_bytes,
             playlist_picker_track: None,
             action_sheet_track: None,
@@ -1671,6 +1674,7 @@ impl eframe::App for YrApp {
 
         self.render_action_sheet_modal(ctx);
         self.render_sleep_timer_modal(ctx);
+        self.render_equalizer_modal(ctx);
         self.render_playlist_picker_modal(ctx);
         self.render_google_login_modal(ctx);
         self.render_status_toast(ctx);
@@ -1737,6 +1741,7 @@ impl YrApp {
             && self.action_sheet_track.is_none()
             && self.playlist_picker_track.is_none()
             && !self.show_sleep_timer_sheet
+            && !self.show_equalizer_modal
             && !self.show_google_login
             && !self.show_new_playlist_dialog
     }
@@ -1747,7 +1752,9 @@ impl YrApp {
             || !self.search_results.artists.is_empty()
             || !self.search_results.playlists.is_empty();
 
-        if self.show_sleep_timer_sheet {
+        if self.show_equalizer_modal {
+            self.show_equalizer_modal = false;
+        } else if self.show_sleep_timer_sheet {
             self.show_sleep_timer_sheet = false;
         } else if self.action_sheet_track.take().is_some() {
             self.action_sheet_context = None;
@@ -5244,6 +5251,20 @@ impl YrApp {
                     {
                         self.action_sheet_track = Some(track.clone());
                     }
+                    let eq_active = self.store.data.config.equalizer.enabled;
+                    if icons::icon_button(
+                        ui,
+                        icons::Icon::Equalizer,
+                        34.0,
+                        17.0,
+                        Color32::TRANSPARENT,
+                        if eq_active { ACCENT_RED } else { Color32::from_white_alpha(180) },
+                        17.0,
+                    )
+                    .clicked()
+                    {
+                        self.show_equalizer_modal = true;
+                    }
                     if !has_timer
                         && icons::icon_button(
                             ui,
@@ -6618,6 +6639,51 @@ impl YrApp {
             }
         });
 
+        ui.add_space(10.0);
+        let eq_active = self.store.data.config.equalizer.enabled;
+        let eq_preset = self.store.data.config.equalizer.preset_name.clone();
+        egui::Frame::new()
+            .fill(Color32::from_white_alpha(14))
+            .stroke(Stroke::new(0.8_f32, Color32::from_white_alpha(28)))
+            .corner_radius(CornerRadius::same(12))
+            .inner_margin(egui::Margin::symmetric(14, 10))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    let (r, _) = ui.allocate_exact_size(Vec2::splat(20.0), Sense::hover());
+                    icons::draw_icon(
+                        ui.painter(),
+                        r,
+                        icons::Icon::Equalizer,
+                        if eq_active { ACCENT_RED } else { Color32::WHITE },
+                    );
+                    ui.vertical(|ui| {
+                        ui.label(RichText::new("Ecualizador & Bass Boost").strong());
+                        ui.label(
+                            RichText::new(if eq_active {
+                                format!("Activo • Preset: {}", eq_preset)
+                            } else {
+                                "Desactivado (bypass)".to_string()
+                            })
+                            .size(12.0)
+                            .color(TEXT_SECONDARY),
+                        );
+                    });
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if icons::icon_pill_button(
+                            ui,
+                            icons::Icon::Equalizer,
+                            "Ajustar",
+                            Color32::from_white_alpha(24),
+                            Color32::WHITE,
+                        )
+                        .clicked()
+                        {
+                            self.show_equalizer_modal = true;
+                        }
+                    });
+                });
+            });
+
         ui.add_space(12.0);
         if ui
             .checkbox(
@@ -6978,6 +7044,25 @@ impl YrApp {
                     self.action_sheet_track = None;
                 }
 
+                let eq_active = self.store.data.config.equalizer.enabled;
+                let eq_label = if eq_active {
+                    format!("Ecualizador ({})", self.store.data.config.equalizer.preset_name)
+                } else {
+                    "Ecualizador (Desactivado)".to_string()
+                };
+                if sheet_row(ui, icons::Icon::Equalizer, &eq_label) {
+                    self.show_equalizer_modal = true;
+                    self.action_sheet_track = None;
+                }
+
+                let queue_not_empty = !self.queue.lock().unwrap().is_empty();
+                if queue_not_empty && sheet_row(ui, icons::Icon::Close, "Descartar fila") {
+                    self.queue.lock().unwrap().clear();
+                    self.audio.stop();
+                    self.set_banner("Fila descartada");
+                    self.action_sheet_track = None;
+                }
+
                         #[cfg(target_os = "android")]
                         ui.add_space(46.0);
                     });
@@ -7140,6 +7225,170 @@ impl YrApp {
                         ui.add_space(46.0);
                     });
             });
+    }
+
+    fn render_equalizer_modal(&mut self, ctx: &egui::Context) {
+        if !self.show_equalizer_modal {
+            return;
+        }
+        let screen = ctx.screen_rect();
+        if render_modal_scrim(ctx, "yr_equalizer_scrim") {
+            self.show_equalizer_modal = false;
+        }
+
+        let mut changed = false;
+        egui::Area::new(egui::Id::new("yr_equalizer_panel"))
+            .anchor(egui::Align2::CENTER_BOTTOM, Vec2::ZERO)
+            .order(egui::Order::Foreground)
+            .interactable(true)
+            .show(ctx, |ui| {
+                ui.set_width(screen.width());
+                egui::Frame::new()
+                    .fill(Color32::from_rgb(22, 22, 26))
+                    .stroke(Stroke::new(0.8_f32, Color32::from_rgb(48, 48, 54)))
+                    .corner_radius(CornerRadius {
+                        nw: 20,
+                        ne: 20,
+                        sw: 0,
+                        se: 0,
+                    })
+                    .inner_margin(egui::Margin::symmetric(16, 14))
+                    .show(ui, |ui| {
+                        ui.set_width((screen.width() - 32.0).max(180.0));
+
+                        // Header
+                        ui.horizontal(|ui| {
+                            let (mr, _) = ui.allocate_exact_size(Vec2::splat(20.0), Sense::hover());
+                            icons::draw_icon(ui.painter(), mr, icons::Icon::Equalizer, ACCENT_RED);
+                            ui.label(
+                                RichText::new("Ecualizador & Bass Boost")
+                                    .size(16.5)
+                                    .strong()
+                                    .color(Color32::WHITE),
+                            );
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                if icons::icon_button(
+                                    ui,
+                                    icons::Icon::Close,
+                                    32.0,
+                                    16.0,
+                                    Color32::TRANSPARENT,
+                                    Color32::WHITE,
+                                    16.0,
+                                )
+                                .clicked()
+                                {
+                                    self.show_equalizer_modal = false;
+                                }
+                            });
+                        });
+
+                        ui.add_space(8.0);
+
+                        // Master enable toggle + reset button
+                        ui.horizontal(|ui| {
+                            let mut eq_enabled = self.store.data.config.equalizer.enabled;
+                            if ui.checkbox(&mut eq_enabled, "Activar ecualizador").changed() {
+                                self.store.data.config.equalizer.enabled = eq_enabled;
+                                changed = true;
+                            }
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                if ui.small_button("Reiniciar a Plano").clicked() {
+                                    self.store.data.config.equalizer.apply_preset("Plano");
+                                    changed = true;
+                                }
+                            });
+                        });
+
+                        ui.add_space(8.0);
+                        ui.label(RichText::new("Preajustes de sonido:").size(12.5).color(TEXT_SECONDARY));
+                        ui.horizontal_wrapped(|ui| {
+                            let current_preset = self.store.data.config.equalizer.preset_name.clone();
+                            for &(name, _, _) in EqualizerConfig::presets() {
+                                let selected = current_preset == name;
+                                let pill = egui::Button::new(
+                                    RichText::new(name)
+                                        .size(12.0)
+                                        .strong()
+                                        .color(if selected { Color32::WHITE } else { Color32::from_white_alpha(200) }),
+                                )
+                                .fill(if selected { ACCENT_RED } else { Color32::from_white_alpha(24) })
+                                .corner_radius(CornerRadius::same(14))
+                                .min_size(Vec2::new(32.0, 26.0));
+                                if ui.add(pill).clicked() {
+                                    self.store.data.config.equalizer.apply_preset(name);
+                                    if !self.store.data.config.equalizer.enabled {
+                                        self.store.data.config.equalizer.enabled = true;
+                                    }
+                                    changed = true;
+                                }
+                            }
+                        });
+
+                        ui.add_space(10.0);
+
+                        // Bass Boost Slider
+                        let mut bass = self.store.data.config.equalizer.bass_boost_db;
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new("Bass Boost:").size(13.0).color(Color32::WHITE));
+                            let slider_resp = ui.add(
+                                egui::Slider::new(&mut bass, 0.0..=10.0)
+                                    .custom_formatter(|v, _| format!("+{:.1} dB", v))
+                                    .step_by(0.5),
+                            );
+                            if slider_resp.changed() {
+                                self.store.data.config.equalizer.bass_boost_db = bass;
+                                self.store.data.config.equalizer.preset_name = "Personalizado".to_string();
+                                changed = true;
+                            }
+                        });
+
+                        ui.add_space(8.0);
+
+                        // 5 Bands faders
+                        ui.label(RichText::new("Bandas de frecuencia (-12 dB a +12 dB):").size(12.5).color(TEXT_SECONDARY));
+                        ui.add_space(4.0);
+
+                        let band_labels = EqualizerConfig::BAND_LABELS;
+                        let band_w = (ui.available_width() / 5.0 - 4.0).clamp(42.0, 68.0);
+
+                        ui.horizontal(|ui| {
+                            for i in 0..5 {
+                                ui.vertical_centered(|ui| {
+                                    ui.set_width(band_w);
+                                    let mut gain = self.store.data.config.equalizer.bands_db[i];
+                                    let val_str = if gain >= 0.0 {
+                                        format!("+{:.1}", gain)
+                                    } else {
+                                        format!("{:.1}", gain)
+                                    };
+                                    ui.label(RichText::new(val_str).size(11.0).monospace().color(Color32::from_white_alpha(200)));
+
+                                    let v_slider = egui::Slider::new(&mut gain, -12.0..=12.0)
+                                        .vertical()
+                                        .show_value(false)
+                                        .step_by(0.5);
+                                    let resp = ui.add_sized(Vec2::new(band_w, 100.0), v_slider);
+                                    if resp.changed() {
+                                        self.store.data.config.equalizer.bands_db[i] = gain;
+                                        self.store.data.config.equalizer.preset_name = "Personalizado".to_string();
+                                        changed = true;
+                                    }
+
+                                    ui.label(RichText::new(band_labels[i]).size(11.0).strong().color(Color32::WHITE));
+                                });
+                            }
+                        });
+
+                        #[cfg(target_os = "android")]
+                        ui.add_space(46.0);
+                    });
+            });
+
+        if changed {
+            self.audio.set_equalizer(self.store.data.config.equalizer.clone());
+            let _ = self.store.save();
+        }
     }
 
     fn render_playlist_picker_modal(&mut self, ctx: &egui::Context) {

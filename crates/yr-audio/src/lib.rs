@@ -72,6 +72,7 @@ enum AudioCommand {
         url: String,
         track_id: String,
     },
+    SetEqualizer(yr_core::EqualizerConfig),
 }
 
 /// Pure-Rust audio playback engine running on a dedicated OS thread.
@@ -82,7 +83,12 @@ pub struct AudioEngine {
 }
 
 impl AudioEngine {
-    pub fn new(cache_dir: PathBuf, runtime: tokio::runtime::Handle, initial_volume: f32) -> Self {
+    pub fn new(
+        cache_dir: PathBuf,
+        runtime: tokio::runtime::Handle,
+        initial_volume: f32,
+        initial_eq: yr_core::EqualizerConfig,
+    ) -> Self {
         let _ = std::fs::create_dir_all(&cache_dir);
         let (tx, rx) = mpsc::channel::<AudioCommand>();
         let snapshot = Arc::new(Mutex::new(AudioSnapshot {
@@ -93,7 +99,7 @@ impl AudioEngine {
 
         std::thread::Builder::new()
             .name("yr-audio-thread".to_string())
-            .spawn(move || audio_thread_main(rx, snap_clone, cache_dir, runtime))
+            .spawn(move || audio_thread_main(rx, snap_clone, cache_dir, runtime, initial_eq))
             .expect("failed to spawn yr-audio-thread");
 
         Self { tx, snapshot }
@@ -148,6 +154,10 @@ impl AudioEngine {
     pub fn prefetch_url(&self, url: String, track_id: String) {
         let _ = self.tx.send(AudioCommand::PrefetchUrl { url, track_id });
     }
+
+    pub fn set_equalizer(&self, eq: yr_core::EqualizerConfig) {
+        let _ = self.tx.send(AudioCommand::SetEqualizer(eq));
+    }
 }
 
 fn prune_stream_cache(cache_dir: &std::path::Path, max_bytes: u64, target_bytes: u64) {
@@ -189,8 +199,10 @@ fn audio_thread_main(
     snapshot: Arc<Mutex<AudioSnapshot>>,
     cache_dir: PathBuf,
     runtime: tokio::runtime::Handle,
+    initial_eq: yr_core::EqualizerConfig,
 ) {
     prune_stream_cache(&cache_dir, 128 * 1024 * 1024, 64 * 1024 * 1024);
+    let eq_processor = Arc::new(Mutex::new(EqualizerProcessor::new(initial_eq)));
     let mut output: Option<(OutputStream, OutputStreamHandle)> = None;
     let mut sink: Option<Sink> = None;
     let mut active_cancel: Option<Arc<AtomicBool>> = None;
@@ -253,7 +265,12 @@ fn audio_thread_main(
                         .as_deref()
                         .is_some_and(|e| e.eq_ignore_ascii_case("wav"));
                     match File::open(&path).map_err(|e| e.to_string()).and_then(|f| {
-                        SymphoniaStreamDecoder::new(Box::new(f), ext_str.as_deref(), None)
+                        SymphoniaStreamDecoder::new(
+                            Box::new(f),
+                            ext_str.as_deref(),
+                            None,
+                            Arc::clone(&eq_processor),
+                        )
                     }) {
                         Ok(decoder) => {
                             let codec_badge = decoder.codec_label.clone();
@@ -338,7 +355,14 @@ fn audio_thread_main(
                     let decoder_res = if cached_ready {
                         File::open(&final_cache)
                             .map_err(|e| e.to_string())
-                            .and_then(|f| SymphoniaStreamDecoder::new(Box::new(f), Some("m4a"), None))
+                            .and_then(|f| {
+                                SymphoniaStreamDecoder::new(
+                                    Box::new(f),
+                                    Some("m4a"),
+                                    None,
+                                    Arc::clone(&eq_processor),
+                                )
+                            })
                     } else {
                         let cancel = Arc::new(AtomicBool::new(false));
                         active_cancel = Some(Arc::clone(&cancel));
@@ -356,6 +380,7 @@ fn audio_thread_main(
                                 Box::new(reader),
                                 Some("m4a"),
                                 Some(probed_flag),
+                                Arc::clone(&eq_processor),
                             )
                         })
                     };
@@ -493,6 +518,11 @@ fn audio_thread_main(
                     speed = clamped;
                     if let Ok(mut g) = snapshot.lock() {
                         g.speed = speed;
+                    }
+                }
+                AudioCommand::SetEqualizer(eq_cfg) => {
+                    if let Ok(mut ep) = eq_processor.lock() {
+                        ep.set_config(eq_cfg);
                     }
                 }
             },
@@ -640,6 +670,216 @@ impl MediaSource for ProgressiveFileReader {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct BiquadCoeffs {
+    b0: f32,
+    b1: f32,
+    b2: f32,
+    a1: f32,
+    a2: f32,
+}
+
+impl BiquadCoeffs {
+    fn identity() -> Self {
+        Self {
+            b0: 1.0,
+            b1: 0.0,
+            b2: 0.0,
+            a1: 0.0,
+            a2: 0.0,
+        }
+    }
+
+    fn peaking(sample_rate: f32, f0: f32, gain_db: f32, q: f32) -> Self {
+        if gain_db.abs() < 0.05 {
+            return Self::identity();
+        }
+        let a = 10.0_f32.powf(gain_db / 40.0);
+        let w0 = 2.0 * std::f32::consts::PI * (f0 / sample_rate).clamp(0.0001, 0.499);
+        let alpha = w0.sin() / (2.0 * q.max(0.1));
+        let cos_w0 = w0.cos();
+
+        let b0 = 1.0 + alpha * a;
+        let b1 = -2.0 * cos_w0;
+        let b2 = 1.0 - alpha * a;
+        let a0 = 1.0 + alpha / a;
+        let a1 = -2.0 * cos_w0;
+        let a2 = 1.0 - alpha / a;
+
+        Self {
+            b0: b0 / a0,
+            b1: b1 / a0,
+            b2: b2 / a0,
+            a1: a1 / a0,
+            a2: a2 / a0,
+        }
+    }
+
+    fn low_shelf(sample_rate: f32, f0: f32, gain_db: f32, q: f32) -> Self {
+        if gain_db.abs() < 0.05 {
+            return Self::identity();
+        }
+        let a = 10.0_f32.powf(gain_db / 40.0);
+        let w0 = 2.0 * std::f32::consts::PI * (f0 / sample_rate).clamp(0.0001, 0.499);
+        let alpha = w0.sin() / (2.0 * q.max(0.1));
+        let cos_w0 = w0.cos();
+        let two_sqrt_a_alpha = 2.0 * a.sqrt() * alpha;
+
+        let b0 = a * ((a + 1.0) - (a - 1.0) * cos_w0 + two_sqrt_a_alpha);
+        let b1 = 2.0 * a * ((a - 1.0) - (a + 1.0) * cos_w0);
+        let b2 = a * ((a + 1.0) - (a - 1.0) * cos_w0 - two_sqrt_a_alpha);
+        let a0 = (a + 1.0) + (a - 1.0) * cos_w0 + two_sqrt_a_alpha;
+        let a1 = -2.0 * ((a - 1.0) + (a + 1.0) * cos_w0);
+        let a2 = (a + 1.0) + (a - 1.0) * cos_w0 - two_sqrt_a_alpha;
+
+        Self {
+            b0: b0 / a0,
+            b1: b1 / a0,
+            b2: b2 / a0,
+            a1: a1 / a0,
+            a2: a2 / a0,
+        }
+    }
+
+    fn high_shelf(sample_rate: f32, f0: f32, gain_db: f32, q: f32) -> Self {
+        if gain_db.abs() < 0.05 {
+            return Self::identity();
+        }
+        let a = 10.0_f32.powf(gain_db / 40.0);
+        let w0 = 2.0 * std::f32::consts::PI * (f0 / sample_rate).clamp(0.0001, 0.499);
+        let alpha = w0.sin() / (2.0 * q.max(0.1));
+        let cos_w0 = w0.cos();
+        let two_sqrt_a_alpha = 2.0 * a.sqrt() * alpha;
+
+        let b0 = a * ((a + 1.0) + (a - 1.0) * cos_w0 + two_sqrt_a_alpha);
+        let b1 = -2.0 * a * ((a - 1.0) + (a + 1.0) * cos_w0);
+        let b2 = a * ((a + 1.0) + (a - 1.0) * cos_w0 - two_sqrt_a_alpha);
+        let a0 = (a + 1.0) - (a - 1.0) * cos_w0 + two_sqrt_a_alpha;
+        let a1 = 2.0 * ((a - 1.0) - (a + 1.0) * cos_w0);
+        let a2 = (a + 1.0) - (a - 1.0) * cos_w0 - two_sqrt_a_alpha;
+
+        Self {
+            b0: b0 / a0,
+            b1: b1 / a0,
+            b2: b2 / a0,
+            a1: a1 / a0,
+            a2: a2 / a0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct FilterChannelState {
+    x1: f32,
+    x2: f32,
+    y1: f32,
+    y2: f32,
+}
+
+impl FilterChannelState {
+    #[inline(always)]
+    fn process(&mut self, x: f32, c: &BiquadCoeffs) -> f32 {
+        let y = c.b0 * x + c.b1 * self.x1 + c.b2 * self.x2 - c.a1 * self.y1 - c.a2 * self.y2;
+        self.x2 = self.x1;
+        self.x1 = x;
+        self.y2 = self.y1;
+        self.y1 = y;
+        y
+    }
+}
+
+pub struct EqualizerProcessor {
+    pub config: yr_core::EqualizerConfig,
+    sample_rate: u32,
+    channels: usize,
+    coeffs: Vec<BiquadCoeffs>,
+    states: Vec<Vec<FilterChannelState>>,
+}
+
+impl EqualizerProcessor {
+    pub fn new(config: yr_core::EqualizerConfig) -> Self {
+        let mut ep = Self {
+            config,
+            sample_rate: 44100,
+            channels: 2,
+            coeffs: Vec::new(),
+            states: Vec::new(),
+        };
+        ep.recompute();
+        ep
+    }
+
+    pub fn set_config(&mut self, config: yr_core::EqualizerConfig) {
+        let changed = self.config != config;
+        self.config = config;
+        if changed {
+            self.recompute();
+        }
+    }
+
+    fn recompute(&mut self) {
+        self.coeffs.clear();
+        if !self.config.enabled {
+            return;
+        }
+        let sr = self.sample_rate as f32;
+        if self.config.bass_boost_db.abs() >= 0.05 {
+            self.coeffs.push(BiquadCoeffs::low_shelf(sr, 80.0, self.config.bass_boost_db, 0.707));
+        }
+        if self.config.bands_db[0].abs() >= 0.05 {
+            self.coeffs.push(BiquadCoeffs::low_shelf(sr, 60.0, self.config.bands_db[0], 0.9));
+        }
+        if self.config.bands_db[1].abs() >= 0.05 {
+            self.coeffs.push(BiquadCoeffs::peaking(sr, 230.0, self.config.bands_db[1], 1.2));
+        }
+        if self.config.bands_db[2].abs() >= 0.05 {
+            self.coeffs.push(BiquadCoeffs::peaking(sr, 910.0, self.config.bands_db[2], 1.2));
+        }
+        if self.config.bands_db[3].abs() >= 0.05 {
+            self.coeffs.push(BiquadCoeffs::peaking(sr, 3600.0, self.config.bands_db[3], 1.2));
+        }
+        if self.config.bands_db[4].abs() >= 0.05 {
+            self.coeffs.push(BiquadCoeffs::high_shelf(sr, 14000.0, self.config.bands_db[4], 0.9));
+        }
+        self.states = vec![vec![FilterChannelState::default(); self.channels]; self.coeffs.len()];
+    }
+
+    pub fn process(&mut self, samples: &mut [i16], rate: u32, channels: usize) {
+        if !self.config.enabled {
+            return;
+        }
+        let safe_ch = channels.clamp(1, 8);
+        if self.sample_rate != rate || self.channels != safe_ch {
+            self.sample_rate = rate.max(8000);
+            self.channels = safe_ch;
+            self.recompute();
+        }
+        if self.coeffs.is_empty() {
+            return;
+        }
+        for (i, s) in samples.iter_mut().enumerate() {
+            let ch = i % safe_ch;
+            let mut x = *s as f32 / 32768.0;
+            for (stage_idx, c) in self.coeffs.iter().enumerate() {
+                if let Some(ch_states) = self.states.get_mut(stage_idx) {
+                    if let Some(st) = ch_states.get_mut(ch) {
+                        x = st.process(x, c);
+                    }
+                }
+            }
+            let clamped = x.clamp(-1.2, 1.2);
+            let soft = if clamped > 1.0 {
+                1.0 - (-clamped + 1.0).exp() * 0.1
+            } else if clamped < -1.0 {
+                -1.0 + (clamped + 1.0).exp() * 0.1
+            } else {
+                clamped
+            };
+            *s = (soft * 32767.0).clamp(-32768.0, 32767.0) as i16;
+        }
+    }
+}
+
 struct SymphoniaStreamDecoder {
     format: Box<dyn FormatReader>,
     decoder: Box<dyn symphonia::core::codecs::Decoder>,
@@ -650,6 +890,7 @@ struct SymphoniaStreamDecoder {
     sample_idx: usize,
     total_duration: Option<Duration>,
     eof: bool,
+    eq: Arc<Mutex<EqualizerProcessor>>,
 }
 
 impl SymphoniaStreamDecoder {
@@ -657,6 +898,7 @@ impl SymphoniaStreamDecoder {
         source: Box<dyn MediaSource>,
         ext_hint: Option<&str>,
         probed_flag: Option<Arc<AtomicBool>>,
+        eq: Arc<Mutex<EqualizerProcessor>>,
     ) -> Result<Self, String> {
         let mss = MediaSourceStream::new(source, Default::default());
         let mut hint = Hint::new();
@@ -726,6 +968,7 @@ impl SymphoniaStreamDecoder {
             sample_idx: 0,
             total_duration,
             eof: false,
+            eq,
         };
         out.decode_next_packet();
         Ok(out)
@@ -759,6 +1002,9 @@ impl SymphoniaStreamDecoder {
                     buf.copy_interleaved_ref(decoded);
                     self.samples.extend_from_slice(buf.samples());
                     if !self.samples.is_empty() {
+                        if let Ok(mut ep) = self.eq.lock() {
+                            ep.process(&mut self.samples, self.spec.rate, self.spec.channels.count());
+                        }
                         return true;
                     }
                 }
