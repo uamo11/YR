@@ -1,25 +1,85 @@
-# YR
+# 🎵 YR Music
 
-YT Music Rust — Cliente de música **100% en Rust** para Android (y escritorio), con interfaz oscura estilo YT Music, reproducción en streaming/offline y gestor de descargas concurrente.
+[![YR CI & Android APK](https://github.com/uamo11/YR/actions/workflows/ci.yml/badge.svg)](https://github.com/uamo11/YR/actions/workflows/ci.yml)
+[![Latest Release](https://img.shields.io/github/v/release/uamo11/YR?color=red&label=release)](https://github.com/uamo11/YR/releases)
+[![Rust](https://img.shields.io/badge/rust-2021-orange.svg)](https://www.rust-lang.org/)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-## Arquitectura (Cargo Workspace)
+**YR Music** es un cliente de música de alto rendimiento para Android y escritorio desarrollado **100% en Rust**. Diseñado para superar la experiencia de YouTube Music en velocidad, fluidez y consumo de recursos, sin WebViews ni frameworks pesados, con soporte offline completo y procesamiento digital de señales (DSP) en tiempo real.
 
-- [`yr-core`](crates/yr-core): Modelos de dominio (`Track`, `AlbumSummary`, `PlaylistSummary`, `AudioQuality`), cola de reproducción (`PlaybackQueue` con shuffle y modos de repetición) y almacenamiento persistente atómico (`LibraryStore`: favoritos, historial y playlists locales).
-- [`yr-provider`](crates/yr-provider): Trait `MusicProvider` e implementación `YtMusicProvider` sobre `rustypipe` (Rust puro + `rustls`), con búsqueda de canciones/álbumes/playlists, tendencias y resolución de streams de audio.
-- [`yr-download`](crates/yr-download): Gestor de descargas concurrente (`DownloadManager`) con cola por prioridad, reanudación HTTP `Range` sobre archivos `.part`, reintentos con backoff exponencial, cálculo de velocidad/ETA e índice offline con metadatos.
-- [`yr-audio`](crates/yr-audio): Motor de audio en hilo dedicado (`AudioEngine`) usando `rodio` + `symphonia` (AAC/M4A, MP3, FLAC, Vorbis, WAV) con reproducción local instantánea y lector HTTP progresivo (`Read + Seek`).
-- [`yr-app`](crates/yr-app): Interfaz gráfica nativa en Rust puro con `egui` / `eframe` (`android-native-activity` para Android + binario de escritorio).
+---
 
-## Compilación
+## ✨ Características Principales
 
-### GitHub Actions (APK Android)
+- 🎛️ **Ecualizador paramétrico de 5 bandas & Bass Boost:** Motor de audio DSP puro en Rust con filtros biquad de segundo orden en tiempo real (`60 Hz`, `230 Hz`, `910 Hz`, `3.6 kHz`, `14 kHz`), saturación suave anti-clipping (`tanh`) y preajustes audiófilos (*Plano*, *Graves +*, *Rock*, *Pop*, *Electrónica*, *Vocal*, *Acústico*).
+- ⚡ **Prefetch predictivo de audio en disco:** Resuelve y descarga automáticamente el audio de la siguiente canción de la cola en segundo plano, logrando saltos de pista instantáneos con latencia cero de red.
+- 🎨 **Experiencia visual estilo YouTube Music:**
+  - Hoja de acciones inferior rápida con accesos directos (*Reproducir a continuación*, *Guardar en playlist*, *Compartir*, *Descartar fila*, *Temporizador de apagado* y *Ecualizador*).
+  - Carrusel horizontal de búsquedas recientes con portadas cuadradas e historial táctil.
+  - Tarjetas de descubrimiento rápido: *Nuevos lanzamientos*, *Rankings* y *Estados de ánimo y géneros*.
+  - Vista de Biblioteca con filtros (*Descargas*, *Playlists*, *Canciones*, *Álbumes*, *Artistas*), botón flotante `+ Nueva` y tarjeta gradiente para *"Música que te gustó"*.
+- 📥 **Gestor de descargas paralelo con reanudación por bloques:** Descargas aceleradas mediante chunks concurrentes de 1 MB, verificación por hash SHA-256, rollback automático ante fallos de conexión y modo de reproducción offline con shuffle.
+- 🛡️ **SponsorBlock integrado:** Omisión automática de intros, interludios no musicales y anuncios patrocinados dentro del audio.
+- 🌙 **Temporizador de apagado:** Modo de apagado programable (15, 30, 45, 60 minutos o al finalizar la canción actual).
+- 🔊 **Control de volumen interno:** Ajuste de volumen independiente del sistema operativo para máxima fidelidad de escucha.
 
-El workflow [`.github/workflows/ci.yml`](.github/workflows/ci.yml) ejecuta automáticamente:
-1. Pruebas unitarias (`cargo test -p yr-core -p yr-provider -p yr-download`).
-2. Compilación del APK release firmado para `aarch64-linux-android` y `armv7-linux-androideabi` usando `cargo-apk`, publicado como artefacto `yr-music-android-apk`.
+---
 
-### Escritorio (Local)
+## 📸 Capturas de Pantalla (Android)
 
+| Biblioteca | Explorar y Búsqueda | Tendencias |
+|:---:|:---:|:---:|
+| <img src="docs/screenshots/01_library.png" width="240" alt="Biblioteca" /> | <img src="docs/screenshots/02_search_explore.png" width="240" alt="Búsqueda" /> | <img src="docs/screenshots/03_trending_results.png" width="240" alt="Tendencias" /> |
+
+| Resultados y Filtros | Ajustes y Ecualizador |
+|:---:|:---:|
+| <img src="docs/screenshots/04_songs_filter.png" width="240" alt="Canciones" /> | <img src="docs/screenshots/05_equalizer_settings.png" width="240" alt="Ajustes y Ecualizador" /> |
+
+---
+
+## 🏗️ Arquitectura (Cargo Workspace)
+
+El proyecto está modularizado en un espacio de trabajo de Cargo limpio y desacoplado:
+
+- [`crates/yr-core`](crates/yr-core): Modelos de dominio (`Track`, `AlbumDetail`, `PlaylistSummary`, `AudioQuality`), cola de reproducción inteligente (`PlaybackQueue` con shuffle determinista y modos de repetición), persistencia atómica en disco (`LibraryStore`) y configuración de ecualizador (`EqualizerConfig`).
+- [`crates/yr-audio`](crates/yr-audio): Motor de reproducción en hilo dedicado de baja latencia (`AudioEngine`) implementado con `symphonia` + decodificadores PCM nativos (AAC/M4A, MP3, FLAC, Opus, WAV). Incluye procesador de biquads para ecualización en tiempo real y prefetch en caché local.
+- [`crates/yr-provider`](crates/yr-provider): Trait asíncrono `MusicProvider` e implementación `YtMusicProvider` sobre llamadas directas HTTPS (InnerTube API), resolviendo transmisiones de audio cifradas, feeds de inicio, exploración y letras sincronizadas (LRC).
+- [`crates/yr-download`](crates/yr-download): Gestor de descargas concurrente multi-hilo (`DownloadManager`) con soporte para peticiones HTTP `Range`, archivos `.part` transaccionales y reanudación automática.
+- [`crates/yr-app`](crates/yr-app): Interfaz gráfica nativa construida con `egui` y `eframe` (`android-native-activity` en Android y binario nativo en Linux/macOS/Windows).
+
+---
+
+## 📦 Descargas e Instalación
+
+Puedes descargar el APK precompilado y firmado para Android en la sección de [Releases de GitHub](https://github.com/uamo11/YR/releases).
+
+1. Descarga el archivo `yr-music-v0.4.0-android.apk`.
+2. Habilita la instalación desde orígenes desconocidos si tu dispositivo lo solicita.
+3. Instala y disfruta de música sin publicidad y con la máxima velocidad de respuesta.
+
+---
+
+## 🛠️ Compilación Local
+
+### Requisitos
+- **Rust:** Versión stable 1.80 o superior (`rustup default stable`).
+- **Android NDK:** r26b o superior (para compilación Android cruzada con `cargo-apk`).
+- **Java JDK:** OpenJDK 17+.
+
+### Compilar APK para Android
+```bash
+cargo install cargo-apk
+cargo apk build --release
+```
+El APK resultante se genera en `target/release/apk/yr_app.apk`.
+
+### Ejecutar en Escritorio
 ```bash
 cargo run -p yr-app --bin yr
 ```
+
+---
+
+## 📄 Licencia
+
+Este proyecto está bajo la Licencia MIT. Consulta el archivo [LICENSE](LICENSE) para más información.
