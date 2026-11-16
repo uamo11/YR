@@ -3319,6 +3319,35 @@ impl YrApp {
         egui::ScrollArea::vertical()
             .id_salt("search_scroll")
             .show(ui, |ui| {
+                let q_trimmed = self.search_query.trim().to_string();
+                if q_trimmed.len() >= 2 {
+                    let mut local_hits = self.store.search_local(&q_trimmed);
+                    let q_low = q_trimmed.to_lowercase();
+                    for dl in &self.downloads {
+                        if dl.status == DownloadStatus::Completed
+                            && (dl.track.title.to_lowercase().contains(&q_low)
+                                || dl.track.artist.to_lowercase().contains(&q_low))
+                            && !local_hits.iter().any(|t| t.id == dl.track.id)
+                        {
+                            local_hits.push(dl.track.clone());
+                        }
+                    }
+                    if !local_hits.is_empty() {
+                        ui.add_space(6.0);
+                        ui.label(
+                            RichText::new("En tu biblioteca (instantáneo)")
+                                .size(13.0)
+                                .strong()
+                                .color(GREEN_OK),
+                        );
+                        ui.add_space(4.0);
+                        for (idx, t) in local_hits.iter().take(4).enumerate() {
+                            self.render_track_row(ui, ctx, t, &local_hits, idx, true);
+                            ui.add_space(3.0);
+                        }
+                    }
+                }
+
                 if !has_results && !self.search_loading {
                     // Búsquedas recientes visual strip + history rows (matching YT Music)
                     let mut recent_thumbs: Vec<(String, Option<String>)> = self
@@ -4015,12 +4044,47 @@ impl YrApp {
                         .map(|d| d.track.clone())
                         .collect();
                     if !completed.is_empty() {
-                        ui.label(
-                            RichText::new(format!("Descargas offline ({})", completed.len()))
-                                .size(16.0)
-                                .strong()
-                                .color(GREEN_OK),
-                        );
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new(format!("Descargas offline ({})", completed.len()))
+                                    .size(16.0)
+                                    .strong()
+                                    .color(GREEN_OK),
+                            );
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                if icons::icon_pill_button(
+                                    ui,
+                                    icons::Icon::Shuffle,
+                                    "Aleatorio",
+                                    BG_ELEVATED,
+                                    TEXT_PRIMARY,
+                                )
+                                .clicked()
+                                {
+                                    self.play_track_in_list(completed.clone(), 0, ctx);
+                                    let next_after_shuffle = {
+                                        let mut q = self.queue.lock().unwrap();
+                                        q.toggle_shuffle();
+                                        completed.len() > 1 && q.next_track(true).is_some()
+                                    };
+                                    if next_after_shuffle {
+                                        self.play_current_queue_track(ctx);
+                                    }
+                                }
+                                ui.add_space(6.0);
+                                if icons::icon_pill_button(
+                                    ui,
+                                    icons::Icon::Play,
+                                    "Todo",
+                                    BG_ELEVATED,
+                                    TEXT_PRIMARY,
+                                )
+                                .clicked()
+                                {
+                                    self.play_track_in_list(completed.clone(), 0, ctx);
+                                }
+                            });
+                        });
                         for (idx, t) in completed.iter().enumerate() {
                             self.render_track_row(ui, ctx, t, &completed, idx, true);
                         }

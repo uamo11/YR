@@ -417,6 +417,42 @@ impl LibraryStore {
             );
         }
     }
+
+    /// Searches liked tracks, playlists, and recent history offline with zero latency.
+    pub fn search_local(&self, query: &str) -> Vec<Track> {
+        let q = normalize_key(query);
+        if q.len() < 2 {
+            return Vec::new();
+        }
+        let mut seen = HashSet::new();
+        let mut out = Vec::new();
+        let candidates = self
+            .data
+            .liked_tracks
+            .iter()
+            .chain(self.data.playlists.iter().flat_map(|p| p.tracks.iter()))
+            .chain(self.data.recent_tracks.iter());
+
+        for t in candidates {
+            if self.is_disliked(&t.id) || !seen.insert(t.id.clone()) {
+                continue;
+            }
+            let title_m = t.title.to_lowercase().contains(&q);
+            let artist_m = t.artist.to_lowercase().contains(&q);
+            let album_m = t
+                .album
+                .as_deref()
+                .map(|a| a.to_lowercase().contains(&q))
+                .unwrap_or(false);
+            if title_m || artist_m || album_m {
+                out.push(t.clone());
+                if out.len() >= 12 {
+                    break;
+                }
+            }
+        }
+        out
+    }
 }
 
 fn normalize_key(s: &str) -> String {
@@ -539,6 +575,21 @@ mod tests {
 
         assert!(feed.quick_picks.iter().all(|t| t.id != "hate1"));
         assert!(feed.shelves.iter().any(|s| s.title == "Basado en tus gustos"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn search_local_matches_liked_playlists_and_recent_offline() {
+        let dir = std::env::temp_dir().join(format!("yr_local_search_{}", Uuid::new_v4()));
+        let mut store = LibraryStore::load_or_default(&dir);
+        store.toggle_like(make_track("b1", "Believer", "Imagine Dragons"));
+        store.record_play(make_track("d1", "Demons", "Imagine Dragons"));
+        store.toggle_dislike("d1");
+
+        let hits = store.search_local("imagine");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id, "b1");
+        assert!(store.search_local("a").is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
