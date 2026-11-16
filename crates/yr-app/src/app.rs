@@ -5549,11 +5549,20 @@ impl YrApp {
                             ui.add_space(2.0);
                             ui.label(RichText::new(err).size(12.0).color(ACCENT_RED));
                         }
-                        _ if is_offline => {
-                            ui.add_space(2.0);
-                            ui.label(RichText::new("Offline").size(12.0).color(GREEN_OK));
+                        _ => {
+                            let badge = match (is_offline, snap.codec_label.as_deref()) {
+                                (true, Some(c)) => Some((format!("Offline • {c}"), GREEN_OK)),
+                                (true, None) => Some(("Offline".to_string(), GREEN_OK)),
+                                (false, Some(c)) => {
+                                    Some((c.to_string(), Color32::from_white_alpha(155)))
+                                }
+                                (false, None) => None,
+                            };
+                            if let Some((txt, col)) = badge {
+                                ui.add_space(2.0);
+                                ui.label(RichText::new(txt).size(11.5).color(col));
+                            }
                         }
-                        _ => {}
                     }
 
                     ui.add_space(12.0);
@@ -5713,6 +5722,40 @@ impl YrApp {
                                 .clicked()
                                 {
                                     self.start_radio(track.id.clone(), ctx);
+                                }
+
+                                ui.add_space(6.0);
+                                let spd = snap.speed;
+                                let spd_text = if (spd - spd.round()).abs() < 0.01 {
+                                    format!("{:.0}x", spd.round())
+                                } else if ((spd * 10.0) - (spd * 10.0).round()).abs() < 0.01 {
+                                    format!("{spd:.1}x")
+                                } else {
+                                    format!("{spd:.2}x")
+                                };
+                                let spd_active = (spd - 1.0).abs() > 0.02;
+                                let spd_btn = egui::Button::new(
+                                    RichText::new(spd_text)
+                                        .size(12.5)
+                                        .strong()
+                                        .color(if spd_active {
+                                            Color32::WHITE
+                                        } else {
+                                            Color32::from_white_alpha(230)
+                                        }),
+                                )
+                                .fill(if spd_active { ACCENT_RED } else { pill_bg })
+                                .corner_radius(CornerRadius::same(18))
+                                .min_size(Vec2::new(48.0, 32.0));
+                                if ui.add(spd_btn).clicked() {
+                                    let presets = [0.75_f32, 1.0, 1.25, 1.5, 2.0];
+                                    let cur_idx = presets
+                                        .iter()
+                                        .position(|&p| (p - spd).abs() < 0.05)
+                                        .unwrap_or(1);
+                                    let next = presets[(cur_idx + 1) % presets.len()];
+                                    self.audio.set_speed(next);
+                                    self.set_banner(format!("Velocidad: {next}x"));
                                 }
                             });
                         });

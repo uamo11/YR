@@ -33,6 +33,8 @@ pub struct AudioSnapshot {
     pub position_secs: f64,
     pub duration_secs: Option<f64>,
     pub volume: f32,
+    pub speed: f32,
+    pub codec_label: Option<String>,
     pub finished_counter: u64,
 }
 
@@ -43,6 +45,8 @@ impl Default for AudioSnapshot {
             position_secs: 0.0,
             duration_secs: None,
             volume: 0.85,
+            speed: 1.0,
+            codec_label: None,
             finished_counter: 0,
         }
     }
@@ -63,6 +67,7 @@ enum AudioCommand {
     Stop,
     Seek(Duration),
     SetVolume(f32),
+    SetSpeed(f32),
 }
 
 /// Pure-Rust audio playback engine running on a dedicated OS thread.
@@ -131,6 +136,44 @@ impl AudioEngine {
     pub fn set_volume(&self, volume: f32) {
         let _ = self.tx.send(AudioCommand::SetVolume(volume.clamp(0.0, 1.0)));
     }
+
+    pub fn set_speed(&self, speed: f32) {
+        let _ = self.tx.send(AudioCommand::SetSpeed(speed.clamp(0.5, 2.0)));
+    }
+}
+
+fn prune_stream_cache(cache_dir: &std::path::Path, max_bytes: u64, target_bytes: u64) {
+    let Ok(entries) = std::fs::read_dir(cache_dir) else {
+        return;
+    };
+    let mut files: Vec<(PathBuf, u64, std::time::SystemTime)> = Vec::new();
+    let mut total = 0_u64;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        if let Ok(meta) = entry.metadata() {
+            let len = meta.len();
+            let modified = meta
+                .modified()
+                .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+            total = total.saturating_add(len);
+            files.push((path, len, modified));
+        }
+    }
+    if total <= max_bytes {
+        return;
+    }
+    files.sort_by_key(|(_, _, m)| *m);
+    for (path, len, _) in files {
+        if total <= target_bytes {
+            break;
+        }
+        if std::fs::remove_file(&path).is_ok() {
+            total = total.saturating_sub(len);
+        }
+    }
 }
 
 fn audio_thread_main(
@@ -139,10 +182,12 @@ fn audio_thread_main(
     cache_dir: PathBuf,
     runtime: tokio::runtime::Handle,
 ) {
+    prune_stream_cache(&cache_dir, 128 * 1024 * 1024, 64 * 1024 * 1024);
     let mut output: Option<(OutputStream, OutputStreamHandle)> = None;
     let mut sink: Option<Sink> = None;
     let mut active_cancel: Option<Arc<AtomicBool>> = None;
     let mut volume: f32 = snapshot.lock().map(|s| s.volume).unwrap_or(0.85);
+    let mut speed: f32 = 1.0;
     let mut current_duration: Option<f64> = None;
     let mut active_playback = false;
     let mut base_pos_secs = 0.0_f64;
@@ -199,10 +244,14 @@ fn audio_thread_main(
                         .and_then(|f| Decoder::new(BufReader::new(f)).map_err(|e| e.to_string()))
                     {
                         Ok(decoder) => {
-                            let is_wav = path
+                            let ext = path
                                 .extension()
                                 .and_then(|e| e.to_str())
-                                .is_some_and(|e| e.eq_ignore_ascii_case("wav"));
+                                .unwrap_or("audio")
+                                .to_ascii_uppercase();
+                            let rate_khz = decoder.sample_rate() as f64 / 1000.0;
+                            let codec_badge = format!("{ext} • {rate_khz:.1} kHz");
+                            let is_wav = ext == "WAV";
                             let dur = if is_wav {
                                 duration_hint
                                     .filter(|&d| d > 0)
@@ -217,6 +266,7 @@ fn audio_thread_main(
                             match Sink::try_new(handle) {
                                 Ok(new_sink) => {
                                     new_sink.set_volume(volume);
+                                    new_sink.set_speed(speed);
                                     new_sink.append(decoder);
                                     sink = Some(new_sink);
                                     current_duration = dur;
@@ -227,6 +277,7 @@ fn audio_thread_main(
                                         g.status = PlaybackStatus::Playing;
                                         g.position_secs = 0.0;
                                         g.duration_secs = dur;
+                                        g.codec_label = Some(codec_badge);
                                     }
                                 }
                                 Err(e) => {
@@ -281,9 +332,11 @@ fn audio_thread_main(
                                     .total_duration()
                                     .map(|d| d.as_secs_f64())
                                     .or(duration_hint.map(|d| d as f64));
+                                let codec_badge = decoder.codec_label.clone();
                                 match Sink::try_new(handle) {
                                     Ok(new_sink) => {
                                         new_sink.set_volume(volume);
+                                        new_sink.set_speed(speed);
                                         new_sink.append(decoder);
                                         sink = Some(new_sink);
                                         current_duration = dur;
@@ -294,6 +347,7 @@ fn audio_thread_main(
                                             g.status = PlaybackStatus::Playing;
                                             g.position_secs = 0.0;
                                             g.duration_secs = dur;
+                                            g.codec_label = Some(codec_badge);
                                         }
                                     }
                                     Err(e) => {
@@ -315,7 +369,7 @@ fn audio_thread_main(
                     if let Some(s) = &sink {
                         s.pause();
                         if let Some(started) = play_started_at.take() {
-                            base_pos_secs += started.elapsed().as_secs_f64();
+                            base_pos_secs += started.elapsed().as_secs_f64() * speed as f64;
                         }
                         set_status(&snapshot, PlaybackStatus::Paused);
                     }
@@ -342,6 +396,7 @@ fn audio_thread_main(
                         g.status = PlaybackStatus::Idle;
                         g.position_secs = 0.0;
                         g.duration_secs = None;
+                        g.codec_label = None;
                     }
                 }
                 AudioCommand::Seek(pos) => {
@@ -374,6 +429,22 @@ fn audio_thread_main(
                         g.volume = volume;
                     }
                 }
+                AudioCommand::SetSpeed(new_speed) => {
+                    let clamped = new_speed.clamp(0.5, 2.0);
+                    if let Some(s) = &sink {
+                        if !s.is_paused() {
+                            if let Some(started) = play_started_at.take() {
+                                base_pos_secs += started.elapsed().as_secs_f64() * speed as f64;
+                            }
+                            play_started_at = Some(Instant::now());
+                        }
+                        s.set_speed(clamped);
+                    }
+                    speed = clamped;
+                    if let Ok(mut g) = snapshot.lock() {
+                        g.speed = speed;
+                    }
+                }
             },
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -393,7 +464,7 @@ fn audio_thread_main(
                 } else if !s.is_paused() {
                     let pos = base_pos_secs
                         + play_started_at
-                            .map(|t| t.elapsed().as_secs_f64())
+                            .map(|t| t.elapsed().as_secs_f64() * speed as f64)
                             .unwrap_or(0.0);
                     if let Ok(mut g) = snapshot.lock() {
                         g.position_secs = pos;
@@ -524,6 +595,7 @@ struct SymphoniaStreamDecoder {
     decoder: Box<dyn symphonia::core::codecs::Decoder>,
     track_id: u32,
     spec: SignalSpec,
+    codec_label: String,
     samples: Vec<i16>,
     sample_idx: usize,
     total_duration: Option<Duration>,
@@ -576,12 +648,23 @@ impl SymphoniaStreamDecoder {
                 .channels
                 .unwrap_or_else(|| symphonia::core::audio::Channels::FRONT_LEFT | symphonia::core::audio::Channels::FRONT_RIGHT),
         );
+        let codec_name = match codec_params.codec {
+            symphonia::core::codecs::CODEC_TYPE_AAC => "AAC",
+            symphonia::core::codecs::CODEC_TYPE_OPUS => "OPUS",
+            symphonia::core::codecs::CODEC_TYPE_VORBIS => "VORBIS",
+            symphonia::core::codecs::CODEC_TYPE_MP3 => "MP3",
+            symphonia::core::codecs::CODEC_TYPE_FLAC => "FLAC",
+            _ => "AUDIO",
+        };
+        let khz = spec.rate as f64 / 1000.0;
+        let codec_label = format!("{codec_name} • {khz:.1} kHz");
 
         let mut out = Self {
             format: probed.format,
             decoder,
             track_id,
             spec,
+            codec_label,
             samples: Vec::new(),
             sample_idx: 0,
             total_duration,

@@ -37,5 +37,6 @@ egui_extras = { version = "0.31", features = ["image", "http"] }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 
 [patch.crates-io]
+eframe = { path = "vendor/eframe" }
 egui_glow = { path = "vendor/egui_glow" }
 winit = { path = "vendor/winit" }
