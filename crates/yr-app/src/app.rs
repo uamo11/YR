@@ -277,6 +277,21 @@ async fn play_track_bg(
     ctx.request_repaint();
 }
 
+async fn prefetch_next_track_audio(
+    dl: &DownloadManager,
+    provider: &Arc<dyn MusicProvider>,
+    audio: &AudioEngine,
+    next_id: &str,
+    quality: AudioQuality,
+) {
+    tokio::time::sleep(Duration::from_millis(650)).await;
+    if dl.find_local_path(next_id).await.is_none() {
+        if let Ok(stream) = provider.resolve_audio_stream(next_id, quality).await {
+            audio.prefetch_url(stream.url, next_id.to_string());
+        }
+    }
+}
+
 impl YrApp {
     pub fn new(cc: &CreationContext<'_>, data_dir: PathBuf) -> Self {
         egui_extras::install_image_loaders(&cc.egui_ctx);
@@ -997,14 +1012,6 @@ impl YrApp {
             });
         }
 
-        if let Some(local) = &track.local_path {
-            let p = PathBuf::from(local);
-            if p.exists() {
-                self.audio.play_file(p, track.duration_secs);
-                return;
-            }
-        }
-
         let dl = Arc::clone(&self.downloader);
         let provider = Arc::clone(&self.provider);
         let quality = self.store.data.config.stream_quality;
@@ -1012,32 +1019,43 @@ impl YrApp {
         let ctx_bg = ctx.clone();
         let audio = self.audio.clone();
 
+        if let Some(local) = &track.local_path {
+            let p = PathBuf::from(local);
+            if p.exists() {
+                self.audio.play_file(p, track.duration_secs);
+                if let Some(nid) = next_track_id {
+                    self.runtime.spawn(async move {
+                        prefetch_next_track_audio(&dl, &provider, &audio, &nid, quality).await;
+                    });
+                }
+                return;
+            }
+        }
+
         self.runtime.spawn(async move {
             if let Some(local_path) = dl.find_local_path(&track.id).await {
                 audio.play_file(local_path, track.duration_secs);
                 ctx_bg.request_repaint();
-                return;
+            } else {
+                let res = match provider.resolve_audio_stream(&track.id, quality).await {
+                    Ok(s) => Ok(s.url),
+                    Err(rust_err) => {
+                        let vid = track.id.clone();
+                        let wv = tokio::task::spawn_blocking(move || {
+                            crate::android_media::resolve_audio_url(&vid)
+                        })
+                        .await
+                        .ok()
+                        .flatten();
+                        wv.ok_or_else(|| rust_err.to_string())
+                    }
+                };
+                let _ = tx.send(AppEvent::StreamResolved { track, result: res });
+                ctx_bg.request_repaint();
             }
-            let res = match provider.resolve_audio_stream(&track.id, quality).await {
-                Ok(s) => Ok(s.url),
-                Err(rust_err) => {
-                    let vid = track.id.clone();
-                    let wv = tokio::task::spawn_blocking(move || {
-                        crate::android_media::resolve_audio_url(&vid)
-                    })
-                    .await
-                    .ok()
-                    .flatten();
-                    wv.ok_or_else(|| rust_err.to_string())
-                }
-            };
-            let _ = tx.send(AppEvent::StreamResolved { track, result: res });
-            ctx_bg.request_repaint();
 
-            // Pre-resolve next queued track's URL in background so Next starts instantly.
             if let Some(nid) = next_track_id {
-                tokio::time::sleep(Duration::from_millis(600)).await;
-                let _ = provider.resolve_audio_stream(&nid, quality).await;
+                prefetch_next_track_audio(&dl, &provider, &audio, &nid, quality).await;
             }
         });
     }

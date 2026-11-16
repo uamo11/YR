@@ -68,6 +68,10 @@ enum AudioCommand {
     Seek(Duration),
     SetVolume(f32),
     SetSpeed(f32),
+    PrefetchUrl {
+        url: String,
+        track_id: String,
+    },
 }
 
 /// Pure-Rust audio playback engine running on a dedicated OS thread.
@@ -140,6 +144,10 @@ impl AudioEngine {
     pub fn set_speed(&self, speed: f32) {
         let _ = self.tx.send(AudioCommand::SetSpeed(speed.clamp(0.5, 2.0)));
     }
+
+    pub fn prefetch_url(&self, url: String, track_id: String) {
+        let _ = self.tx.send(AudioCommand::PrefetchUrl { url, track_id });
+    }
 }
 
 fn prune_stream_cache(cache_dir: &std::path::Path, max_bytes: u64, target_bytes: u64) {
@@ -186,6 +194,7 @@ fn audio_thread_main(
     let mut output: Option<(OutputStream, OutputStreamHandle)> = None;
     let mut sink: Option<Sink> = None;
     let mut active_cancel: Option<Arc<AtomicBool>> = None;
+    let mut active_prefetch: Option<(String, Arc<AtomicBool>)> = None;
     let mut volume: f32 = snapshot.lock().map(|s| s.volume).unwrap_or(0.85);
     let mut speed: f32 = 1.0;
     let mut current_duration: Option<f64> = None;
@@ -240,14 +249,14 @@ fn audio_thread_main(
                     };
 
                     let ext_str = path.extension().and_then(|e| e.to_str()).map(str::to_owned);
+                    let is_wav = ext_str
+                        .as_deref()
+                        .is_some_and(|e| e.eq_ignore_ascii_case("wav"));
                     match File::open(&path).map_err(|e| e.to_string()).and_then(|f| {
                         SymphoniaStreamDecoder::new(Box::new(f), ext_str.as_deref(), None)
                     }) {
                         Ok(decoder) => {
                             let codec_badge = decoder.codec_label.clone();
-                            let is_wav = ext_str
-                                .as_deref()
-                                .is_some_and(|e| e.eq_ignore_ascii_case("wav"));
                             let dur = if is_wav {
                                 duration_hint
                                     .filter(|&d| d > 0)
@@ -294,6 +303,13 @@ fn audio_thread_main(
                     if let Some(c) = active_cancel.take() {
                         c.store(true, Ordering::Relaxed);
                     }
+                    if let Some((pid, pc)) = active_prefetch.take() {
+                        if pid == track_id {
+                            pc.store(true, Ordering::Relaxed);
+                        } else {
+                            active_prefetch = Some((pid, pc));
+                        }
+                    }
                     if let Some(s) = sink.take() {
                         s.stop();
                     }
@@ -315,55 +331,89 @@ fn audio_thread_main(
                         continue;
                     };
 
-                    let cancel = Arc::new(AtomicBool::new(false));
-                    active_cancel = Some(Arc::clone(&cancel));
-                    let cache_file = cache_dir.join(format!("stream_{track_id}.tmp"));
-
-                    match open_progressive_stream(&runtime, &url, cache_file, cancel) {
-                        Ok(reader) => {
+                    let final_cache = cache_dir.join(format!("stream_{track_id}.audio"));
+                    let cached_ready = std::fs::metadata(&final_cache)
+                        .map(|m| m.len() > 4096)
+                        .unwrap_or(false);
+                    let decoder_res = if cached_ready {
+                        File::open(&final_cache)
+                            .map_err(|e| e.to_string())
+                            .and_then(|f| SymphoniaStreamDecoder::new(Box::new(f), Some("m4a"), None))
+                    } else {
+                        let cancel = Arc::new(AtomicBool::new(false));
+                        active_cancel = Some(Arc::clone(&cancel));
+                        let tmp_file = cache_dir.join(format!("stream_{track_id}.tmp"));
+                        open_progressive_stream(
+                            &runtime,
+                            &url,
+                            tmp_file,
+                            Some(final_cache),
+                            cancel,
+                        )
+                        .and_then(|reader| {
                             let probed_flag = Arc::clone(&reader.probed);
-                            match SymphoniaStreamDecoder::new(
+                            SymphoniaStreamDecoder::new(
                                 Box::new(reader),
                                 Some("m4a"),
                                 Some(probed_flag),
-                            ) {
-                            Ok(decoder) => {
-                                let dur = decoder
-                                    .total_duration()
-                                    .map(|d| d.as_secs_f64())
-                                    .or(duration_hint.map(|d| d as f64));
-                                let codec_badge = decoder.codec_label.clone();
-                                match Sink::try_new(handle) {
-                                    Ok(new_sink) => {
-                                        new_sink.set_volume(volume);
-                                        new_sink.set_speed(speed);
-                                        new_sink.append(decoder);
-                                        sink = Some(new_sink);
-                                        current_duration = dur;
-                                        base_pos_secs = 0.0;
-                                        play_started_at = Some(Instant::now());
-                                        active_playback = true;
-                                        if let Ok(mut g) = snapshot.lock() {
-                                            g.status = PlaybackStatus::Playing;
-                                            g.position_secs = 0.0;
-                                            g.duration_secs = dur;
-                                            g.codec_label = Some(codec_badge);
-                                        }
-                                    }
-                                    Err(e) => {
-                                        set_status(&snapshot, PlaybackStatus::Error(e.to_string()));
+                            )
+                        })
+                    };
+
+                    match decoder_res {
+                        Ok(decoder) => {
+                            let dur = decoder
+                                .total_duration()
+                                .map(|d| d.as_secs_f64())
+                                .or(duration_hint.map(|d| d as f64));
+                            let codec_badge = decoder.codec_label.clone();
+                            match Sink::try_new(handle) {
+                                Ok(new_sink) => {
+                                    new_sink.set_volume(volume);
+                                    new_sink.set_speed(speed);
+                                    new_sink.append(decoder);
+                                    sink = Some(new_sink);
+                                    current_duration = dur;
+                                    base_pos_secs = 0.0;
+                                    play_started_at = Some(Instant::now());
+                                    active_playback = true;
+                                    if let Ok(mut g) = snapshot.lock() {
+                                        g.status = PlaybackStatus::Playing;
+                                        g.position_secs = 0.0;
+                                        g.duration_secs = dur;
+                                        g.codec_label = Some(codec_badge);
                                     }
                                 }
-                            }
-                            Err(e) => {
-                                set_status(&snapshot, PlaybackStatus::Error(e));
-                            }
+                                Err(e) => {
+                                    set_status(&snapshot, PlaybackStatus::Error(e.to_string()));
+                                }
                             }
                         }
                         Err(e) => {
                             set_status(&snapshot, PlaybackStatus::Error(e));
                         }
                     }
+                }
+                AudioCommand::PrefetchUrl { url, track_id } => {
+                    let final_cache = cache_dir.join(format!("stream_{track_id}.audio"));
+                    if std::fs::metadata(&final_cache)
+                        .map(|m| m.len() > 4096)
+                        .unwrap_or(false)
+                    {
+                        continue;
+                    }
+                    if let Some((pid, pc)) = active_prefetch.take() {
+                        if pid == track_id {
+                            active_prefetch = Some((pid, pc));
+                            continue;
+                        }
+                        pc.store(true, Ordering::Relaxed);
+                    }
+                    prune_stream_cache(&cache_dir, 128 * 1024 * 1024, 64 * 1024 * 1024);
+                    let cancel = Arc::new(AtomicBool::new(false));
+                    active_prefetch = Some((track_id.clone(), Arc::clone(&cancel)));
+                    let part_path = cache_dir.join(format!("stream_{track_id}.pre.part"));
+                    prefetch_stream_to_cache(&runtime, url, part_path, final_cache, cancel);
                 }
                 AudioCommand::Pause => {
                     if let Some(s) = &sink {
@@ -776,10 +826,43 @@ impl Source for SymphoniaStreamDecoder {
     }
 }
 
+fn stream_client_ua(url: &str) -> Option<&'static str> {
+    if url.contains("c=MWEB") || url.contains("c=WEB") {
+        Some("Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36")
+    } else if url.contains("c=VISIONOS") {
+        Some("Mozilla/5.0 (Macintosh; Intel Mac OS X 14_6) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15")
+    } else if url.contains("c=IOS") {
+        Some("com.google.ios.youtube/19.29.1 (iPhone16,2; U; CPU iOS 17_5_1 like Mac OS X;)")
+    } else {
+        None
+    }
+}
+
+fn stream_request_builder(
+    client: &reqwest::Client,
+    url: &str,
+    range_val: Option<String>,
+) -> reqwest::RequestBuilder {
+    let mut r = client.get(url);
+    if let Some(ua) = stream_client_ua(url) {
+        r = r.header(reqwest::header::USER_AGENT, ua);
+    }
+    if url.contains("c=MWEB") || url.contains("c=WEB") {
+        r = r
+            .header(reqwest::header::ORIGIN, "https://m.youtube.com")
+            .header(reqwest::header::REFERER, "https://m.youtube.com/");
+    }
+    if let Some(rv) = range_val {
+        r = r.header(reqwest::header::RANGE, rv);
+    }
+    r
+}
+
 fn open_progressive_stream(
     runtime: &tokio::runtime::Handle,
     url: &str,
     path: PathBuf,
+    final_cache: Option<PathBuf>,
     cancel: Arc<AtomicBool>,
 ) -> Result<ProgressiveFileReader, String> {
     let mut writer = OpenOptions::new()
@@ -803,36 +886,12 @@ fn open_progressive_stream(
     let state_bg = Arc::clone(&state);
     let url_owned = url.to_string();
     let cancel_bg = Arc::clone(&cancel);
+    let path_bg = path.clone();
 
     runtime.spawn(async move {
         const CHUNK_SIZE: u64 = 524_288;
         let client = shared_http_client();
-        let ua: Option<&'static str> = if url_owned.contains("c=MWEB") || url_owned.contains("c=WEB") {
-            Some("Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36")
-        } else if url_owned.contains("c=VISIONOS") {
-            Some("Mozilla/5.0 (Macintosh; Intel Mac OS X 14_6) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15")
-        } else if url_owned.contains("c=IOS") {
-            Some("com.google.ios.youtube/19.29.1 (iPhone16,2; U; CPU iOS 17_5_1 like Mac OS X;)")
-        } else {
-            None
-        };
-        let is_web_client = url_owned.contains("c=MWEB") || url_owned.contains("c=WEB");
-
-        let build_req = |range_val: Option<String>| {
-            let mut r = client.get(&url_owned);
-            if let Some(u) = ua {
-                r = r.header(reqwest::header::USER_AGENT, u);
-            }
-            if is_web_client {
-                r = r
-                    .header(reqwest::header::ORIGIN, "https://m.youtube.com")
-                    .header(reqwest::header::REFERER, "https://m.youtube.com/");
-            }
-            if let Some(rv) = range_val {
-                r = r.header(reqwest::header::RANGE, rv);
-            }
-            r
-        };
+        let build_req = |range_val: Option<String>| stream_request_builder(client, &url_owned, range_val);
 
         let set_err = |msg: String| {
             tracing::warn!("progressive stream error: {msg}");
@@ -959,6 +1018,14 @@ fn open_progressive_stream(
         }
 
         let _ = writer.flush();
+        if !cancel_bg.load(Ordering::Relaxed)
+            && written_total > 4096
+            && total.is_none_or(|t| written_total >= t)
+        {
+            if let Some(dest) = final_cache {
+                let _ = std::fs::rename(&path_bg, dest);
+            }
+        }
         let (lock, cvar) = &*state_bg;
         if let Ok(mut g) = lock.lock() {
             g.finished = true;
@@ -1001,4 +1068,104 @@ fn open_progressive_stream(
         cancel,
         probed,
     })
+}
+
+fn prefetch_stream_to_cache(
+    runtime: &tokio::runtime::Handle,
+    url: String,
+    part_path: PathBuf,
+    final_path: PathBuf,
+    cancel: Arc<AtomicBool>,
+) {
+    runtime.spawn(async move {
+        let Ok(mut writer) = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&part_path)
+        else {
+            return;
+        };
+        let client = shared_http_client();
+        let Ok(resp) = stream_request_builder(client, &url, None).send().await else {
+            let _ = std::fs::remove_file(&part_path);
+            return;
+        };
+        if !resp.status().is_success() {
+            let _ = std::fs::remove_file(&part_path);
+            return;
+        }
+        let expected_len = resp.content_length();
+        let mut written = 0_u64;
+        let mut stream = resp.bytes_stream();
+        while let Some(item) = stream.next().await {
+            if cancel.load(Ordering::Relaxed) {
+                let _ = std::fs::remove_file(&part_path);
+                return;
+            }
+            match item {
+                Ok(bytes) => {
+                    if writer.write_all(&bytes).is_err() {
+                        let _ = std::fs::remove_file(&part_path);
+                        return;
+                    }
+                    written += bytes.len() as u64;
+                    // Guard against caching unusually huge multi-hour mixes in RAM/tmp cache.
+                    if written > 24 * 1024 * 1024 {
+                        let _ = std::fs::remove_file(&part_path);
+                        return;
+                    }
+                }
+                Err(_) => {
+                    let _ = std::fs::remove_file(&part_path);
+                    return;
+                }
+            }
+        }
+        let _ = writer.flush();
+        if !cancel.load(Ordering::Relaxed)
+            && written > 4096
+            && expected_len.is_none_or(|t| written >= t)
+        {
+            let _ = std::fs::rename(&part_path, &final_path);
+        } else {
+            let _ = std::fs::remove_file(&part_path);
+        }
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stream_client_ua_detects_mweb_ios_visionos() {
+        assert!(stream_client_ua("https://rr1.googlevideo.com/videoplayback?c=MWEB")
+            .unwrap_or("")
+            .contains("Android"));
+        assert!(stream_client_ua("https://rr1.googlevideo.com/videoplayback?c=IOS")
+            .unwrap_or("")
+            .contains("iPhone"));
+        assert!(stream_client_ua("https://rr1.googlevideo.com/videoplayback?c=VISIONOS")
+            .unwrap_or("")
+            .contains("Macintosh"));
+        assert!(stream_client_ua("https://rr1.googlevideo.com/videoplayback?c=ANDROID").is_none());
+    }
+
+    #[test]
+    fn prune_stream_cache_evicts_oldest_when_over_limit() {
+        let dir = std::env::temp_dir().join(format!("yr_audio_prune_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.audio"), vec![0u8; 60]).unwrap();
+        std::thread::sleep(Duration::from_millis(15));
+        std::fs::write(dir.join("b.audio"), vec![0u8; 60]).unwrap();
+        prune_stream_cache(&dir, 80, 60);
+        let remaining: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok().map(|x| x.file_name().to_string_lossy().into_owned()))
+            .collect();
+        assert_eq!(remaining, vec!["b.audio".to_string()]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

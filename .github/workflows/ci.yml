@@ -57,14 +57,21 @@ jobs:
         with:
           tool: cargo-ndk
 
-      - name: Generate CI signing keystore
+      - name: Prepare CI signing keystore
+        env:
+          YR_KEYSTORE_BASE64: ${{ secrets.YR_KEYSTORE_BASE64 }}
         run: |
-          keytool -genkeypair -v \
-            -keystore yr-release.keystore \
-            -alias yr \
-            -keyalg RSA -keysize 2048 -validity 10000 \
-            -storepass yr_ci_password -keypass yr_ci_password \
-            -dname "CN=YR Music, O=YR, C=US"
+          if [ -n "$YR_KEYSTORE_BASE64" ]; then
+            echo "$YR_KEYSTORE_BASE64" | base64 -d > yr-release.keystore
+            echo "Decoded persistent signing keystore from secret."
+          else
+            keytool -genkeypair -v \
+              -keystore yr-release.keystore \
+              -alias yr \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -storepass yr_ci_password -keypass yr_ci_password \
+              -dname "CN=YR Music, O=YR, C=US"
+          fi
 
       - name: Build native libs & package signed Android APK with ForegroundService
         run: |
