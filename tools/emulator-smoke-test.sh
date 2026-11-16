@@ -23,7 +23,7 @@ adb install -r -d -t "$APK_FILE"
 mkdir -p screenshots
 
 adb logcat -c
-START_RES=$(adb shell am start -W -S -n com.yr.music/android.app.NativeActivity)
+START_RES=$(adb shell am start -W -S -n com.yr.music/com.yr.music.YrMainActivity)
 echo "$START_RES"
 # Allow home feed & album thumbnails to load over network
 sleep 9

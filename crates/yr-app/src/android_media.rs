@@ -16,7 +16,7 @@ mod imp {
     use jni::sys::{jint, jlong};
     use jni::{JNIEnv, JavaVM};
     use std::ffi::c_void;
-    use std::sync::OnceLock;
+    use std::sync::{Arc, Mutex};
     use tokio::sync::mpsc;
 
     struct AndroidBridge {
@@ -25,16 +25,24 @@ mod imp {
         service_class: GlobalRef,
     }
 
-    static BRIDGE: OnceLock<AndroidBridge> = OnceLock::new();
-    static ACTION_TX: OnceLock<mpsc::UnboundedSender<MediaAction>> = OnceLock::new();
-    static COOKIE_TX: OnceLock<mpsc::UnboundedSender<String>> = OnceLock::new();
+    static BRIDGE: Mutex<Option<Arc<AndroidBridge>>> = Mutex::new(None);
+    static ACTION_TX: Mutex<Option<mpsc::UnboundedSender<MediaAction>>> = Mutex::new(None);
+    static COOKIE_TX: Mutex<Option<mpsc::UnboundedSender<String>>> = Mutex::new(None);
+
+    fn bridge() -> Option<Arc<AndroidBridge>> {
+        BRIDGE.lock().ok().and_then(|g| g.clone())
+    }
 
     pub fn set_action_sender(tx: mpsc::UnboundedSender<MediaAction>) {
-        let _ = ACTION_TX.set(tx);
+        if let Ok(mut g) = ACTION_TX.lock() {
+            *g = Some(tx);
+        }
     }
 
     pub fn set_cookie_sender(tx: mpsc::UnboundedSender<String>) {
-        let _ = COOKIE_TX.set(tx);
+        if let Ok(mut g) = COOKIE_TX.lock() {
+            *g = Some(tx);
+        }
     }
 
     pub unsafe fn init(vm_ptr: *mut c_void, activity_ptr: *mut c_void) {
@@ -74,17 +82,19 @@ mod imp {
             return;
         };
 
-        let _ = BRIDGE.set(AndroidBridge {
-            vm,
-            app_ctx,
-            service_class,
-        });
+        if let Ok(mut g) = BRIDGE.lock() {
+            *g = Some(Arc::new(AndroidBridge {
+                vm,
+                app_ctx,
+                service_class,
+            }));
+        }
         // Prevent dropping `activity` local ref as owned if borrowed from NativeActivity:
         std::mem::forget(activity);
     }
 
     pub fn update_playback(title: &str, artist: &str, playing: bool, pos_ms: u64, dur_ms: u64) {
-        let Some(bridge) = BRIDGE.get() else {
+        let Some(bridge) = bridge() else {
             return;
         };
         let Ok(mut env) = bridge.vm.attach_current_thread() else {
@@ -117,7 +127,7 @@ mod imp {
     }
 
     pub fn set_artwork_url(url: &str) {
-        let Some(bridge) = BRIDGE.get() else {
+        let Some(bridge) = bridge() else {
             return;
         };
         let Ok(mut env) = bridge.vm.attach_current_thread() else {
@@ -143,7 +153,7 @@ mod imp {
     }
 
     pub fn stop_service() {
-        let Some(bridge) = BRIDGE.get() else {
+        let Some(bridge) = bridge() else {
             return;
         };
         let Ok(mut env) = bridge.vm.attach_current_thread() else {
@@ -159,7 +169,7 @@ mod imp {
     }
 
     pub fn resolve_audio_url(video_id: &str) -> Option<String> {
-        let Some(bridge) = BRIDGE.get() else {
+        let Some(bridge) = bridge() else {
             log::warn!("android_media: resolve_audio_url BRIDGE not initialized");
             return None;
         };
@@ -216,13 +226,13 @@ mod imp {
             6 => MediaAction::Stop,
             _ => return,
         };
-        if let Some(tx) = ACTION_TX.get() {
+        if let Some(tx) = ACTION_TX.lock().ok().and_then(|g| g.clone()) {
             let _ = tx.send(mapped);
         }
     }
 
     pub fn open_google_login() {
-        let Some(bridge) = BRIDGE.get() else {
+        let Some(bridge) = bridge() else {
             return;
         };
         let Ok(mut env) = bridge.vm.attach_current_thread() else {
@@ -241,7 +251,7 @@ mod imp {
     }
 
     pub fn share_text(title: &str, text: &str) {
-        let Some(bridge) = BRIDGE.get() else {
+        let Some(bridge) = bridge() else {
             return;
         };
         let Ok(mut env) = bridge.vm.attach_current_thread() else {
@@ -277,7 +287,7 @@ mod imp {
     ) {
         if let Ok(s) = env.get_string(&cookie) {
             let val: String = s.into();
-            if let Some(tx) = COOKIE_TX.get() {
+            if let Some(tx) = COOKIE_TX.lock().ok().and_then(|g| g.clone()) {
                 let _ = tx.send(val);
             }
         }

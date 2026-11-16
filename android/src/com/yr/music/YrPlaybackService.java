@@ -653,7 +653,7 @@ public class YrPlaybackService extends Service {
             piFlags |= PendingIntent.FLAG_IMMUTABLE;
         }
 
-        Intent openIntent = new Intent(this, android.app.NativeActivity.class);
+        Intent openIntent = new Intent(this, YrMainActivity.class);
         openIntent.setFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP | Intent.FLAG_ACTIVITY_CLEAR_TOP);
         PendingIntent contentPi = PendingIntent.getActivity(this, 0, openIntent, piFlags);
 

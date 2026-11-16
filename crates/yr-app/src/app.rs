@@ -1620,6 +1620,10 @@ impl eframe::App for YrApp {
         self.render_playlist_picker_modal(ctx);
         self.render_google_login_modal(ctx);
     }
+
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        let _ = self.store.save();
+    }
 }
 
 impl YrApp {

@@ -16,13 +16,14 @@
     <application
         android:label="YR Music"
         android:usesCleartextTraffic="true"
+        android:enableOnBackInvokedCallback="false"
         android:hasCode="true">
 
         <activity
-            android:name="android.app.NativeActivity"
+            android:name="com.yr.music.YrMainActivity"
             android:label="YR Music"
             android:launchMode="singleTask"
-            android:configChanges="orientation|keyboardHidden|screenSize"
+            android:configChanges="orientation|keyboardHidden|keyboard|navigation|screenSize|screenLayout|smallestScreenSize|uiMode|density|locale|layoutDirection|fontScale"
             android:exported="true">
             <meta-data android:name="android.app.lib_name" android:value="yr_app" />
             <intent-filter>

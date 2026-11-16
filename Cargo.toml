@@ -38,3 +38,4 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png",
 
 [patch.crates-io]
 egui_glow = { path = "vendor/egui_glow" }
+winit = { path = "vendor/winit" }
