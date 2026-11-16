@@ -1868,6 +1868,75 @@ impl YrApp {
         }
     }
 
+    fn play_tracks_shuffled(&mut self, tracks: Vec<Track>, ctx: &egui::Context) {
+        if tracks.is_empty() {
+            return;
+        }
+        let len = tracks.len();
+        {
+            let mut q = self.queue.lock().unwrap();
+            q.set_queue(tracks, 0);
+            if !q.shuffle {
+                q.toggle_shuffle();
+            }
+            if len > 1 {
+                q.next_track(true);
+            }
+        }
+        self.now_playing_open = true;
+        self.show_settings = false;
+        self.play_current_queue_track(ctx);
+    }
+
+    fn render_collection_actions(
+        &mut self,
+        ui: &mut egui::Ui,
+        ctx: &egui::Context,
+        tracks: &[Track],
+        show_download: bool,
+    ) {
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = Vec2::new(6.0, 6.0);
+            if icons::icon_pill_button(
+                ui,
+                icons::Icon::Play,
+                "Reproducir",
+                ACCENT_RED,
+                Color32::WHITE,
+            )
+            .clicked()
+                && !tracks.is_empty()
+            {
+                self.play_track_in_list(tracks.to_vec(), 0, ctx);
+            }
+            if icons::icon_pill_button(
+                ui,
+                icons::Icon::Shuffle,
+                "Aleatorio",
+                BG_ELEVATED,
+                TEXT_PRIMARY,
+            )
+            .clicked()
+                && !tracks.is_empty()
+            {
+                self.play_tracks_shuffled(tracks.to_vec(), ctx);
+            }
+            if show_download
+                && icons::icon_pill_button(
+                    ui,
+                    icons::Icon::Download,
+                    "Descargar todo",
+                    BG_ELEVATED,
+                    TEXT_PRIMARY,
+                )
+                .clicked()
+                && !tracks.is_empty()
+            {
+                self.enqueue_download_all(tracks.to_vec(), ctx);
+            }
+        });
+    }
+
     fn render_detail_if_active(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) -> bool {
         if self.detail_loading {
             ui.horizontal(|ui| {
@@ -1909,32 +1978,7 @@ impl YrApp {
                     render_thumb(ui, album.summary.thumbnail_url.as_deref(), 64.0);
                     ui.vertical(|ui| {
                         ui.label(RichText::new(&album.summary.artist).color(TEXT_SECONDARY));
-                        ui.horizontal(|ui| {
-                            if icons::icon_pill_button(
-                                ui,
-                                icons::Icon::Play,
-                                "Reproducir",
-                                ACCENT_RED,
-                                Color32::WHITE,
-                            )
-                            .clicked()
-                                && !album.tracks.is_empty()
-                            {
-                                self.play_track_in_list(album.tracks.clone(), 0, ctx);
-                            }
-                            if icons::icon_pill_button(
-                                ui,
-                                icons::Icon::Download,
-                                "Descargar todo",
-                                BG_ELEVATED,
-                                TEXT_PRIMARY,
-                            )
-                            .clicked()
-                                && !album.tracks.is_empty()
-                            {
-                                self.enqueue_download_all(album.tracks.clone(), ctx);
-                            }
-                        });
+                        self.render_collection_actions(ui, ctx, &album.tracks, true);
                     });
                 });
                 ui.add_space(6.0);
@@ -1959,32 +2003,7 @@ impl YrApp {
                     }
                     ui.heading(&pl.summary.title);
                 });
-                ui.horizontal(|ui| {
-                    if icons::icon_pill_button(
-                        ui,
-                        icons::Icon::Play,
-                        "Reproducir",
-                        ACCENT_RED,
-                        Color32::WHITE,
-                    )
-                    .clicked()
-                        && !pl.tracks.is_empty()
-                    {
-                        self.play_track_in_list(pl.tracks.clone(), 0, ctx);
-                    }
-                    if icons::icon_pill_button(
-                        ui,
-                        icons::Icon::Download,
-                        "Descargar todo",
-                        BG_ELEVATED,
-                        TEXT_PRIMARY,
-                    )
-                    .clicked()
-                        && !pl.tracks.is_empty()
-                    {
-                        self.enqueue_download_all(pl.tracks.clone(), ctx);
-                    }
-                });
+                self.render_collection_actions(ui, ctx, &pl.tracks, true);
                 ui.add_space(6.0);
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     for (idx, track) in pl.tracks.iter().enumerate() {
@@ -2009,6 +2028,10 @@ impl YrApp {
                 });
                 if let Some(subs) = &artist.summary.subscribers {
                     ui.label(RichText::new(subs).small().color(TEXT_SECONDARY));
+                }
+                if !artist.top_tracks.is_empty() {
+                    ui.add_space(4.0);
+                    self.render_collection_actions(ui, ctx, &artist.top_tracks, false);
                 }
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     if !artist.top_tracks.is_empty() {
@@ -4123,7 +4146,8 @@ impl YrApp {
                                     Color32::WHITE,
                                 );
                                 ui.add_space(8.0);
-                                let text_w = (ui.available_width() - 12.0).max(120.0);
+                                let btns_w = if liked_count > 0 { 82.0 } else { 0.0 };
+                                let text_w = (ui.available_width() - 12.0 - btns_w).max(110.0);
                                 ui.allocate_ui(Vec2::new(text_w, 54.0), |ui| {
                                     ui.vertical(|ui| {
                                         ui.label(
@@ -4142,6 +4166,37 @@ impl YrApp {
                                         );
                                     });
                                 });
+                                if liked_count > 0 {
+                                    let liked_all = self.store.data.liked_tracks.clone();
+                                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                        if icons::icon_button(
+                                            ui,
+                                            icons::Icon::Shuffle,
+                                            34.0,
+                                            17.0,
+                                            BG_ELEVATED,
+                                            TEXT_PRIMARY,
+                                            16.0,
+                                        )
+                                        .clicked()
+                                        {
+                                            self.play_tracks_shuffled(liked_all.clone(), ctx);
+                                        }
+                                        if icons::icon_button(
+                                            ui,
+                                            icons::Icon::Play,
+                                            34.0,
+                                            17.0,
+                                            ACCENT_RED,
+                                            Color32::WHITE,
+                                            16.0,
+                                        )
+                                        .clicked()
+                                        {
+                                            self.play_track_in_list(liked_all, 0, ctx);
+                                        }
+                                    });
+                                }
                             });
                         });
 
@@ -4355,15 +4410,7 @@ impl YrApp {
                                 )
                                 .clicked()
                                 {
-                                    self.play_track_in_list(completed.clone(), 0, ctx);
-                                    let next_after_shuffle = {
-                                        let mut q = self.queue.lock().unwrap();
-                                        q.toggle_shuffle();
-                                        completed.len() > 1 && q.next_track(true).is_some()
-                                    };
-                                    if next_after_shuffle {
-                                        self.play_current_queue_track(ctx);
-                                    }
+                                    self.play_tracks_shuffled(completed.clone(), ctx);
                                 }
                                 ui.add_space(6.0);
                                 if icons::icon_pill_button(
@@ -5084,13 +5131,13 @@ impl YrApp {
                             (q.len(), ordered, q.current_index())
                         };
                         ui.horizontal(|ui| {
-                            let hdr_w = (ui.available_width() - 196.0).max(110.0);
+                            let hdr_w = (ui.available_width() - 168.0).max(120.0);
                             ui.allocate_ui(Vec2::new(hdr_w, 30.0), |ui| {
                                 ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
                                     ui.add(
                                         egui::Label::new(
                                             RichText::new(format!("A continuación ({queue_len})"))
-                                                .size(16.0)
+                                                .size(15.0)
                                                 .strong()
                                                 .color(Color32::WHITE),
                                         )
