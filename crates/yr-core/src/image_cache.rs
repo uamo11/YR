@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-pub const MAX_CACHED_IMAGES: usize = 36;
-pub const IDLE_SOFT_LIMIT: usize = 16;
+pub const MAX_CACHED_IMAGES: usize = 48;
+pub const IDLE_SOFT_LIMIT: usize = 20;
 pub const IDLE_FORGET_AFTER: Duration = Duration::from_secs(4);
 pub const MIN_ACTIVE_AGE: Duration = Duration::from_secs(2);
 
@@ -134,9 +134,44 @@ pub fn optimize_thumb_url(url: &str, max_px: u32) -> String {
     trimmed.to_string()
 }
 
+/// Resolves a track thumbnail URL, normalizing scheme-relative URLs and falling
+/// back to YouTube's static cover endpoint when metadata omits a thumbnail.
+pub fn track_thumb_url(thumb: Option<&str>, track_id: &str) -> Option<String> {
+    if let Some(raw) = thumb.map(str::trim).filter(|s| !s.is_empty()) {
+        if raw.starts_with("//") {
+            return Some(format!("https:{raw}"));
+        }
+        return Some(raw.to_string());
+    }
+    let id = track_id.trim();
+    if id.len() == 11
+        && !id.starts_with("local_")
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        Some(format!("https://i.ytimg.com/vi/{id}/hqdefault.jpg"))
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn track_thumb_url_falls_back_to_ytimg_when_missing() {
+        assert_eq!(
+            track_thumb_url(None, "dQw4w9WgXcQ"),
+            Some("https://i.ytimg.com/vi/dQw4w9WgXcQ/hqdefault.jpg".to_string())
+        );
+        assert_eq!(
+            track_thumb_url(Some("//lh3.googleusercontent.com/abc"), "dQw4w9WgXcQ"),
+            Some("https://lh3.googleusercontent.com/abc".to_string())
+        );
+        assert_eq!(track_thumb_url(None, "local_demo_1"), None);
+    }
 
     #[test]
     fn optimize_thumb_url_downscales_googleusercontent_and_ytimg() {

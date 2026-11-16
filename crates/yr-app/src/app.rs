@@ -13,10 +13,10 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use yr_audio::{AudioEngine, AudioSnapshot};
 use yr_core::{
-    format_seconds, optimize_thumb_url, AlbumDetail, ArtistDetail, AudioQuality, ExploreFeed,
-    GoogleDeviceAuth, HomeFeed, HomeShelf, HomeShelfCard, HomeShelfLayout, ImageLru, LibraryStore,
-    LyricsData, PlaybackQueue, PlaybackStatus, PlaylistDetail, PlaylistSummary, SearchResults,
-    ShelfCardKind, SponsorSegment, Track,
+    format_seconds, image_cache::track_thumb_url, optimize_thumb_url, AlbumDetail, ArtistDetail,
+    AudioQuality, ExploreFeed, GoogleDeviceAuth, HomeFeed, HomeShelf, HomeShelfCard,
+    HomeShelfLayout, ImageLru, LibraryStore, LyricsData, PlaybackQueue, PlaybackStatus,
+    PlaylistDetail, PlaylistSummary, SearchResults, ShelfCardKind, SponsorSegment, Track,
 };
 use yr_download::{DownloadManager, DownloadStatus, DownloadTask};
 use yr_provider::{MusicProvider, YtMusicProvider};
@@ -208,7 +208,8 @@ async fn play_track_bg(
         0,
         track.duration_secs.unwrap_or(0) * 1000,
     );
-    crate::android_media::set_artwork_url(track.thumbnail_url.as_deref().unwrap_or(""));
+    let art_bg = track_thumb_url(track.thumbnail_url.as_deref(), &track.id);
+    crate::android_media::set_artwork_url(art_bg.as_deref().unwrap_or(""));
 
     if let Some(local) = &track.local_path {
         let p = PathBuf::from(local);
@@ -957,7 +958,8 @@ impl YrApp {
         self.sponsor_track_id = Some(track.id.clone());
         self.sponsor_segments.clear();
         self.sponsor_skipped_idx = None;
-        self.ensure_cover_color(track.thumbnail_url.as_deref(), ctx);
+        let art_cover = track_thumb_url(track.thumbnail_url.as_deref(), &track.id);
+        self.ensure_cover_color(art_cover.as_deref(), ctx);
 
         // Preload synced lyrics and related recommendations when the player is visible.
         self.load_lyrics(track.clone(), ctx);
@@ -972,7 +974,8 @@ impl YrApp {
             0,
             track.duration_secs.unwrap_or(0) * 1000,
         );
-        crate::android_media::set_artwork_url(track.thumbnail_url.as_deref().unwrap_or(""));
+        let art_bg = track_thumb_url(track.thumbnail_url.as_deref(), &track.id);
+    crate::android_media::set_artwork_url(art_bg.as_deref().unwrap_or(""));
 
         if self.store.data.config.sponsorblock_enabled {
             let prov_sb = Arc::clone(&self.provider);
@@ -1274,7 +1277,8 @@ impl YrApp {
                             self.sponsor_track_id = Some(track.id.clone());
                             self.sponsor_segments.clear();
                             self.sponsor_skipped_idx = None;
-                            self.ensure_cover_color(track.thumbnail_url.as_deref(), ctx);
+                            let art_cover = track_thumb_url(track.thumbnail_url.as_deref(), &track.id);
+        self.ensure_cover_color(art_cover.as_deref(), ctx);
                             crate::android_media::set_artwork_url(
                                 track.thumbnail_url.as_deref().unwrap_or(""),
                             );
@@ -2131,7 +2135,7 @@ impl YrApp {
                     let row_start = ui.cursor().min;
                     let thumb_sz = 48.0;
                     let row_h = 54.0;
-                    render_thumb(ui, track.thumbnail_url.as_deref(), thumb_sz);
+                    render_track_thumb(ui, track, thumb_sz);
                     let text_w = (col_width - (thumb_sz + 48.0)).max(115.0);
                     let title_color = if is_current { ACCENT_RED } else { TEXT_PRIMARY };
                     ui.allocate_ui(Vec2::new(text_w, row_h), |ui| {
@@ -4626,7 +4630,7 @@ impl YrApp {
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     let row_start = ui.cursor().min;
-                    render_thumb(ui, track.thumbnail_url.as_deref(), 48.0);
+                    render_track_thumb(ui, track, 48.0);
 
                     let text_width = (ui.available_width() - 42.0).max(120.0);
                     let is_downloaded = self.downloads.iter().any(|d| {
@@ -4734,7 +4738,7 @@ impl YrApp {
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     let row_start = ui.next_widget_position();
-                    render_thumb(ui, track.thumbnail_url.as_deref(), 42.0);
+                    render_track_thumb(ui, track, 42.0);
                     ui.add_space(6.0);
 
                     let text_width = (ui.available_width() - 122.0).max(80.0);
@@ -4874,15 +4878,15 @@ impl YrApp {
             return;
         };
 
-        if let Some(url) = track.thumbnail_url.as_deref() {
+        let resolved_cover = track_thumb_url(track.thumbnail_url.as_deref(), &track.id);
+        if let Some(url) = resolved_cover.as_deref() {
             self.ensure_cover_color(Some(url), ctx);
         }
         if self.related_track_id.as_deref() != Some(&track.id) && !self.related_loading {
             self.load_related(track.id.clone(), ctx);
         }
 
-        let ambient = track
-            .thumbnail_url
+        let ambient = resolved_cover
             .as_deref()
             .and_then(|u| self.cover_colors.get(u).copied())
             .unwrap_or(Color32::from_rgb(56, 40, 26));
@@ -4992,7 +4996,7 @@ impl YrApp {
                 if self.show_queue || self.show_lyrics || self.show_related {
                     // Compact header row in drawers so current track stays visible + controllable.
                     ui.horizontal(|ui| {
-                        render_thumb(ui, track.thumbnail_url.as_deref(), 42.0);
+                        render_track_thumb(ui, &track, 42.0);
                         let tw = (ui.available_width() - 96.0).max(80.0);
                         ui.allocate_ui(Vec2::new(tw, 42.0), |ui| {
                             ui.vertical(|ui| {
@@ -5072,6 +5076,31 @@ impl YrApp {
                                 {
                                     self.start_radio(track.id.clone(), ctx);
                                 }
+                                ui.add_space(6.0);
+                                if icons::icon_pill_button(
+                                    ui,
+                                    icons::Icon::PlaylistAdd,
+                                    "Guardar",
+                                    Color32::from_white_alpha(24),
+                                    Color32::WHITE,
+                                )
+                                .clicked()
+                                {
+                                    let q_tracks: Vec<Track> = ordered
+                                        .iter()
+                                        .map(|(_, qt)| qt.clone())
+                                        .collect();
+                                    let pl = self
+                                        .store
+                                        .create_playlist(format!("Mix • {}", track.title));
+                                    let count = q_tracks.len();
+                                    for qt in q_tracks {
+                                        self.store.add_to_playlist(&pl.id, qt);
+                                    }
+                                    self.set_banner(format!(
+                                        "Playlist guardada ({count} canciones)"
+                                    ));
+                                }
                             });
                         });
                         ui.add_space(6.0);
@@ -5129,7 +5158,7 @@ impl YrApp {
                                                 }
 
                                                 let row_start = ui.next_widget_position();
-                                                render_thumb(ui, t.thumbnail_url.as_deref(), 44.0);
+                                                render_track_thumb(ui, &t, 44.0);
                                                 ui.add_space(6.0);
                                                 let right_reserve = if is_curr { 66.0 } else { 98.0 };
                                                 let tw = (ui.available_width() - right_reserve - 6.0).max(70.0);
@@ -5269,6 +5298,38 @@ impl YrApp {
                                 .clicked()
                                 {
                                     self.load_lyrics(track.clone(), ctx);
+                                }
+                                if let Some(d) = &self.lyrics_data {
+                                    let has_lyrics = !d.synced.is_empty()
+                                        || (!d.plain.is_empty() && !d.plain.starts_with("No se pudo"));
+                                    if has_lyrics {
+                                        ui.add_space(6.0);
+                                        if icons::icon_pill_button(
+                                            ui,
+                                            icons::Icon::Share,
+                                            "Copiar",
+                                            Color32::from_white_alpha(24),
+                                            Color32::WHITE,
+                                        )
+                                        .clicked()
+                                        {
+                                            let body = if !d.synced.is_empty() {
+                                                d.synced
+                                                    .iter()
+                                                    .map(|l| l.text.as_str())
+                                                    .filter(|s| !s.is_empty())
+                                                    .collect::<Vec<_>>()
+                                                    .join("\n")
+                                            } else {
+                                                d.plain.clone()
+                                            };
+                                            ctx.copy_text(format!(
+                                                "{} — {}\n\n{}",
+                                                track.title, track.artist, body
+                                            ));
+                                            self.set_banner("Letra copiada al portapapeles");
+                                        }
+                                    }
                                 }
                             });
                         });
@@ -5528,7 +5589,7 @@ impl YrApp {
                             icons::Icon::MusicNote,
                             Color32::from_white_alpha(110),
                         );
-                        if let Some(u) = track.thumbnail_url.as_deref() {
+                        if let Some(u) = resolved_cover.as_deref() {
                             let art_uri = tracked_thumb_uri(u, 544);
                             paint_ready_image(
                                 ui,
@@ -6371,7 +6432,7 @@ impl YrApp {
                         ui.set_width((screen.width() - 28.0).max(180.0));
                         // Header: Thumb | Title + Artist • Duration | ThumbUp | Close
                 ui.horizontal(|ui| {
-                    render_thumb(ui, track.thumbnail_url.as_deref(), 46.0);
+                    render_track_thumb(ui, &track, 46.0);
                     let tw = (ui.available_width() - 90.0).max(120.0);
                     let dur_secs = track.duration_secs.or_else(|| {
                         let cur = self
@@ -7330,6 +7391,11 @@ fn paint_ready_image(
         }
         Err(_) => {}
     }
+}
+
+fn render_track_thumb(ui: &mut egui::Ui, track: &Track, size: f32) {
+    let url = track_thumb_url(track.thumbnail_url.as_deref(), &track.id);
+    render_thumb(ui, url.as_deref(), size);
 }
 
 fn render_thumb(ui: &mut egui::Ui, url: Option<&str>, size: f32) {
