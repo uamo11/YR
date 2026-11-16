@@ -1984,11 +1984,25 @@ impl YrApp {
                     });
                 });
                 ui.add_space(6.0);
-                egui::ScrollArea::vertical().show(ui, |ui| {
+                let detail_viewport = ui.available_rect_before_wrap();
+                let pull_px = self.pull_refresh_px;
+                let detail_scroll = egui::ScrollArea::vertical().show(ui, |ui| {
+                    if pull_px > 10.0 {
+                        self.render_pull_refresh_indicator(ui, false);
+                    }
                     for (idx, track) in album.tracks.iter().enumerate() {
                         self.render_track_row(ui, ctx, track, &album.tracks, idx, false);
                     }
                 });
+                if self.handle_pull_to_refresh(
+                    ui,
+                    detail_scroll.state.offset.y,
+                    detail_viewport,
+                    self.detail_loading,
+                ) {
+                    self.open_album(album.summary.id.clone(), ctx);
+                    self.set_banner("Actualizando álbum...");
+                }
                 true
             }
             DetailView::Playlist(pl) => {
@@ -2007,11 +2021,25 @@ impl YrApp {
                 });
                 self.render_collection_actions(ui, ctx, &pl.tracks, true);
                 ui.add_space(6.0);
-                egui::ScrollArea::vertical().show(ui, |ui| {
+                let detail_viewport = ui.available_rect_before_wrap();
+                let pull_px = self.pull_refresh_px;
+                let detail_scroll = egui::ScrollArea::vertical().show(ui, |ui| {
+                    if pull_px > 10.0 {
+                        self.render_pull_refresh_indicator(ui, false);
+                    }
                     for (idx, track) in pl.tracks.iter().enumerate() {
                         self.render_track_row(ui, ctx, track, &pl.tracks, idx, false);
                     }
                 });
+                if self.handle_pull_to_refresh(
+                    ui,
+                    detail_scroll.state.offset.y,
+                    detail_viewport,
+                    self.detail_loading,
+                ) {
+                    self.open_playlist(pl.summary.id.clone(), ctx);
+                    self.set_banner("Actualizando playlist...");
+                }
                 true
             }
             DetailView::Artist(artist) => {
@@ -2035,7 +2063,12 @@ impl YrApp {
                     ui.add_space(4.0);
                     self.render_collection_actions(ui, ctx, &artist.top_tracks, false);
                 }
-                egui::ScrollArea::vertical().show(ui, |ui| {
+                let detail_viewport = ui.available_rect_before_wrap();
+                let pull_px = self.pull_refresh_px;
+                let detail_scroll = egui::ScrollArea::vertical().show(ui, |ui| {
+                    if pull_px > 10.0 {
+                        self.render_pull_refresh_indicator(ui, false);
+                    }
                     if !artist.top_tracks.is_empty() {
                         ui.add_space(6.0);
                         ui.label(RichText::new("Canciones populares").size(16.0).strong());
@@ -2051,6 +2084,15 @@ impl YrApp {
                         }
                     }
                 });
+                if self.handle_pull_to_refresh(
+                    ui,
+                    detail_scroll.state.offset.y,
+                    detail_viewport,
+                    self.detail_loading,
+                ) {
+                    self.open_artist(artist.summary.id.clone(), ctx);
+                    self.set_banner("Actualizando artista...");
+                }
                 true
             }
             DetailView::Mood { title, playlists } => {
@@ -2742,6 +2784,7 @@ impl YrApp {
         let expected_v_drag = self.home_v_drag_id;
         let is_loading = self.home_loading;
         let pull_px = self.pull_refresh_px;
+        let home_viewport = ui.available_rect_before_wrap();
         let scroll_out = egui::ScrollArea::vertical()
             .id_salt("home_vertical_scroll")
             .show(ui, |ui| {
@@ -3031,7 +3074,7 @@ impl YrApp {
         if self.handle_pull_to_refresh(
             ui,
             scroll_out.state.offset.y,
-            scroll_out.inner_rect,
+            home_viewport,
             self.home_loading,
         ) {
             self.refresh_home(ctx);
@@ -3607,9 +3650,15 @@ impl YrApp {
             });
         }
 
-        egui::ScrollArea::vertical()
+        let search_viewport = ui.available_rect_before_wrap();
+        let search_loading = self.search_loading || self.explore_loading;
+        let pull_px = self.pull_refresh_px;
+        let search_scroll = egui::ScrollArea::vertical()
             .id_salt("search_scroll")
             .show(ui, |ui| {
+                if pull_px > 10.0 || self.explore_loading {
+                    self.render_pull_refresh_indicator(ui, search_loading);
+                }
                 let mut shown_local_ids: HashSet<String> = HashSet::new();
                 let q_trimmed = self.search_query.trim().to_string();
                 if q_trimmed.len() >= 2 {
@@ -4044,6 +4093,21 @@ impl YrApp {
                     }
                 }
             });
+        if self.handle_pull_to_refresh(
+            ui,
+            search_scroll.state.offset.y,
+            search_viewport,
+            search_loading,
+        ) {
+            if self.search_query.trim().is_empty() {
+                self.load_explore(ctx);
+                self.refresh_home(ctx);
+                self.set_banner("Actualizando tendencias y categorías...");
+            } else {
+                self.trigger_search(ctx);
+                self.set_banner("Actualizando resultados...");
+            }
+        }
     }
 
     fn render_album_row(
@@ -4198,10 +4262,12 @@ impl YrApp {
         }
 
         let lib_loading = self.home_loading;
+        let pull_px = self.pull_refresh_px;
+        let lib_viewport = ui.available_rect_before_wrap();
         let lib_scroll = egui::ScrollArea::vertical()
             .id_salt("lib_scroll")
             .show(ui, |ui| {
-                if self.pull_refresh_px > 10.0 {
+                if pull_px > 10.0 || lib_loading {
                     self.render_pull_refresh_indicator(ui, lib_loading);
                 }
                 // Pinned "Música que te gustó" gradient card
@@ -4519,7 +4585,7 @@ impl YrApp {
         if self.handle_pull_to_refresh(
             ui,
             lib_scroll.state.offset.y,
-            lib_scroll.inner_rect,
+            lib_viewport,
             self.home_loading,
         ) {
             self.refresh_downloads(ctx);
@@ -4563,20 +4629,39 @@ impl YrApp {
             .map(|d| d.track.clone())
             .collect();
 
-        if !completed.is_empty()
-            && icons::icon_pill_button(
-                ui,
-                icons::Icon::Play,
-                "Reproducir todo offline",
-                BG_ELEVATED,
-                TEXT_PRIMARY,
-            )
-            .clicked()
-        {
-            self.play_track_in_list(completed.clone(), 0, ctx);
+        if !completed.is_empty() {
+            ui.horizontal(|ui| {
+                if icons::icon_pill_button(
+                    ui,
+                    icons::Icon::Play,
+                    "Reproducir todo offline",
+                    BG_ELEVATED,
+                    TEXT_PRIMARY,
+                )
+                .clicked()
+                {
+                    self.play_track_in_list(completed.clone(), 0, ctx);
+                }
+                if icons::icon_pill_button(
+                    ui,
+                    icons::Icon::Shuffle,
+                    "Aleatorio",
+                    BG_ELEVATED,
+                    TEXT_PRIMARY,
+                )
+                .clicked()
+                {
+                    self.play_tracks_shuffled(completed.clone(), ctx);
+                }
+            });
         }
 
-        egui::ScrollArea::vertical().show(ui, |ui| {
+        let dl_viewport = ui.available_rect_before_wrap();
+        let pull_px = self.pull_refresh_px;
+        let dl_scroll = egui::ScrollArea::vertical().show(ui, |ui| {
+            if pull_px > 10.0 {
+                self.render_pull_refresh_indicator(ui, false);
+            }
             if self.downloads.is_empty() {
                 ui.add_space(16.0);
                 ui.label(
@@ -4765,6 +4850,10 @@ impl YrApp {
                     });
             }
         });
+        if self.handle_pull_to_refresh(ui, dl_scroll.state.offset.y, dl_viewport, false) {
+            self.refresh_downloads(ctx);
+            self.set_banner("Actualizando descargas...");
+        }
     }
 
     fn render_track_row(
@@ -6493,6 +6582,21 @@ impl YrApp {
                 {
                     let _ = self.store.save();
                 }
+            }
+        });
+
+        ui.add_space(10.0);
+        ui.label("Volumen interno de reproducción:");
+        let mut vol_pct = (self.store.data.config.volume.clamp(0.0, 1.0) * 100.0).round() as u32;
+        ui.horizontal(|ui| {
+            let slider_resp = ui.add(egui::Slider::new(&mut vol_pct, 0..=100).suffix("%"));
+            if slider_resp.changed() {
+                let v = (vol_pct as f32 / 100.0).clamp(0.0, 1.0);
+                self.store.data.config.volume = v;
+                self.audio.set_volume(v);
+            }
+            if slider_resp.drag_stopped() || slider_resp.lost_focus() {
+                let _ = self.store.save();
             }
         });
 

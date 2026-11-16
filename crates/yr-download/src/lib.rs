@@ -14,7 +14,7 @@ use yr_core::{AudioQuality, Track};
 use yr_provider::MusicProvider;
 
 const PROBE_CHUNK_BYTES: u64 = 256 * 1024;
-const PARALLEL_CHUNK_BYTES: u64 = 512 * 1024;
+const PARALLEL_CHUNK_BYTES: u64 = 1024 * 1024;
 const PARALLEL_CONNECTIONS: usize = 4;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -603,6 +603,7 @@ impl DownloadManager {
                                 let mut buf = Vec::with_capacity((end - start + 1) as usize);
                                 let mut stream = resp.bytes_stream();
                                 let mut stream_ok = true;
+                                let mut attempt_bytes: u64 = 0;
                                 while let Some(piece) = stream.next().await {
                                     if *cancel_rx.borrow() {
                                         return Err(DownloadInternalError::Cancelled);
@@ -612,7 +613,9 @@ impl DownloadManager {
                                     }
                                     match piece {
                                         Ok(b) => {
-                                            bytes_counter.fetch_add(b.len() as u64, Ordering::Relaxed);
+                                            let n = b.len() as u64;
+                                            attempt_bytes += n;
+                                            bytes_counter.fetch_add(n, Ordering::Relaxed);
                                             buf.extend_from_slice(&b);
                                         }
                                         Err(e) => {
@@ -625,6 +628,8 @@ impl DownloadManager {
                                 if stream_ok {
                                     body_opt = Some(buf);
                                     break;
+                                } else if attempt_bytes > 0 {
+                                    bytes_counter.fetch_sub(attempt_bytes, Ordering::Relaxed);
                                 }
                             }
                             Ok(resp) => last_chunk_err = format!("HTTP {}", resp.status()),
