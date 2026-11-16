@@ -492,36 +492,58 @@ impl MusicProvider for YtMusicProvider {
 
     async fn get_explore_feed(&self) -> Result<ExploreFeed, ProviderError> {
         let session = self.google_session.lock().await.clone();
-        if let Ok(feed) = innertube::fetch_explore_feed(&self.http, session.as_ref()).await {
-            if !feed.new_albums.is_empty() || !feed.trending_tracks.is_empty() || !feed.moods.is_empty() {
-                return Ok(feed);
-            }
+        let mut feed = innertube::fetch_explore_feed(&self.http, session.as_ref())
+            .await
+            .unwrap_or_default();
+        if !feed.new_albums.is_empty()
+            && !feed.trending_tracks.is_empty()
+            && !feed.moods.is_empty()
+        {
+            return Ok(feed);
         }
+
         let q = self.client.query();
         let (charts_res, albums_res, genres_res) = tokio::join!(
-            q.music_charts(Some(Country::Us)),
-            q.music_new_albums(),
-            q.music_genres()
+            async {
+                if feed.trending_tracks.is_empty() {
+                    Some(q.music_charts(Some(Country::Us)).await)
+                } else {
+                    None
+                }
+            },
+            async {
+                if feed.new_albums.is_empty() {
+                    Some(q.music_new_albums().await)
+                } else {
+                    None
+                }
+            },
+            async {
+                if feed.moods.is_empty() {
+                    Some(q.music_genres().await)
+                } else {
+                    None
+                }
+            }
         );
-        Ok(ExploreFeed {
-            new_albums: albums_res
-                .map(|a| a.into_iter().map(Self::map_album).collect())
-                .unwrap_or_default(),
-            trending_tracks: charts_res
-                .map(|c| c.top_tracks.into_iter().map(Self::map_track).collect())
-                .unwrap_or_default(),
-            moods: genres_res
-                .map(|gs| {
-                    gs.into_iter()
-                        .map(|g| MoodGenre {
-                            id: g.id,
-                            title: g.name,
-                            params: None,
-                        })
-                        .collect()
+
+        if let Some(Ok(charts)) = charts_res {
+            feed.trending_tracks = charts.top_tracks.into_iter().map(Self::map_track).collect();
+        }
+        if let Some(Ok(albums)) = albums_res {
+            feed.new_albums = albums.into_iter().map(Self::map_album).collect();
+        }
+        if let Some(Ok(genres)) = genres_res {
+            feed.moods = genres
+                .into_iter()
+                .map(|g| MoodGenre {
+                    id: g.id,
+                    title: g.name,
+                    params: None,
                 })
-                .unwrap_or_default(),
-        })
+                .collect();
+        }
+        Ok(feed)
     }
 
     async fn get_radio(&self, track_id: &str) -> Result<Vec<Track>, ProviderError> {

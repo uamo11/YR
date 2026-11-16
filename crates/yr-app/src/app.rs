@@ -3521,8 +3521,12 @@ impl YrApp {
 
                     let trending = if !self.explore_feed.trending_tracks.is_empty() {
                         self.explore_feed.trending_tracks.clone()
-                    } else {
+                    } else if !self.home_feed.trending_tracks.is_empty() {
                         self.home_feed.trending_tracks.clone()
+                    } else if !self.home_feed.recommended_tracks.is_empty() {
+                        self.home_feed.recommended_tracks.clone()
+                    } else {
+                        self.home_feed.quick_picks.clone()
                     };
                     if !trending.is_empty() {
                         let ranked = self.store.rank_recommendations(trending);

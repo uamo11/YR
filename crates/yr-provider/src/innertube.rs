@@ -1057,6 +1057,14 @@ pub async fn fetch_explore_feed(
     if trending.is_empty() {
         trending = tmp_feed.quick_picks;
     }
+    if trending.is_empty() {
+        trending = tmp_feed.recommended_tracks;
+    }
+    if trending.is_empty() {
+        for shelf in &tmp_feed.shelves {
+            trending.extend(shelf.tracks.iter().cloned());
+        }
+    }
     Ok(ExploreFeed {
         new_albums: tmp_feed.new_albums,
         trending_tracks: trending,
