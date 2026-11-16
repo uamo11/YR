@@ -1565,12 +1565,6 @@ impl eframe::App for YrApp {
                             }
                         });
                     });
-
-                    if let Some((msg, at)) = &self.status_banner {
-                        if at.elapsed() < Duration::from_secs(4) {
-                            ui.label(RichText::new(msg).small().color(ACCENT_RED));
-                        }
-                    }
                 });
 
             // Bottom Navigation + Mini-Player
@@ -1659,6 +1653,7 @@ impl eframe::App for YrApp {
         self.render_sleep_timer_modal(ctx);
         self.render_playlist_picker_modal(ctx);
         self.render_google_login_modal(ctx);
+        self.render_status_toast(ctx);
         crate::android_media::set_ui_at_root(self.is_at_root());
     }
 
@@ -1669,6 +1664,37 @@ impl eframe::App for YrApp {
 }
 
 impl YrApp {
+    fn render_status_toast(&self, ctx: &egui::Context) {
+        let Some((msg, at)) = &self.status_banner else {
+            return;
+        };
+        if at.elapsed() >= Duration::from_secs(3) {
+            return;
+        }
+        let max_w = (ctx.screen_rect().width() - 48.0).clamp(180.0, 420.0);
+        egui::Area::new(egui::Id::new("yr_status_toast"))
+            .anchor(egui::Align2::CENTER_BOTTOM, Vec2::new(0.0, -140.0))
+            .order(egui::Order::Foreground)
+            .interactable(false)
+            .show(ctx, |ui| {
+                egui::Frame::new()
+                    .fill(Color32::from_rgba_unmultiplied(30, 30, 36, 240))
+                    .stroke(Stroke::new(0.8_f32, Color32::from_white_alpha(38)))
+                    .corner_radius(CornerRadius::same(18))
+                    .inner_margin(egui::Margin::symmetric(14, 8))
+                    .show(ui, |ui| {
+                        ui.set_max_width(max_w);
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(msg).size(13.0).color(Color32::WHITE),
+                            )
+                            .truncate()
+                            .selectable(false),
+                        );
+                    });
+            });
+    }
+
     fn sync_last_queue_snapshot(&mut self) {
         let (tracks, idx) = {
             let q = self.queue.lock().unwrap();
@@ -4135,86 +4161,7 @@ impl YrApp {
                     }
                 }
 
-                if matches!(self.library_filter, LibraryFilter::All | LibraryFilter::Albums) && !self.home_feed.new_albums.is_empty() {
-                    let albums: Vec<_> = self
-                        .home_feed
-                        .new_albums
-                        .iter()
-                        .filter(|a| lib_matches(&a.title) || lib_matches(&a.artist))
-                        .cloned()
-                        .collect();
-                    if !albums.is_empty() {
-                        ui.add_space(10.0);
-                        ui.label(RichText::new("Álbumes").size(16.0).strong());
-                        for a in &albums {
-                            self.render_album_row(ui, ctx, a);
-                        }
-                    }
-                }
-
-                if self.library_filter == LibraryFilter::Artists {
-                    ui.add_space(10.0);
-                    ui.label(RichText::new("Artistas").size(16.0).strong());
-                    let mut seen_artists = std::collections::HashSet::new();
-                    let mut artists = Vec::new();
-                    for t in self
-                        .store
-                        .data
-                        .liked_tracks
-                        .iter()
-                        .chain(self.store.data.recent_tracks.iter())
-                        .chain(self.home_feed.quick_picks.iter())
-                    {
-                        if let Some(aid) = t.artist_id.as_ref() {
-                            if seen_artists.insert(aid.clone()) {
-                                artists.push((
-                                    aid.clone(),
-                                    t.artist.clone(),
-                                    t.thumbnail_url.clone(),
-                                ));
-                            }
-                        }
-                    }
-                    if artists.is_empty() {
-                        ui.label(
-                            RichText::new("Escucha canciones para ver tus artistas aquí.")
-                                .small()
-                                .color(TEXT_SECONDARY),
-                        );
-                    }
-                    for (aid, name, thumb) in artists {
-                        ui.horizontal(|ui| {
-                            render_thumb(ui, thumb.as_deref(), 44.0);
-                            ui.add_space(8.0);
-                            if ui
-                                .add(
-                                    egui::Label::new(
-                                        RichText::new(&name)
-                                            .size(15.0)
-                                            .strong()
-                                            .color(TEXT_PRIMARY),
-                                    )
-                                    .sense(Sense::click()),
-                                )
-                                .clicked()
-                            {
-                                self.open_artist(aid, ctx);
-                            }
-                        });
-                        ui.add_space(4.0);
-                    }
-                }
-
                 if matches!(self.library_filter, LibraryFilter::All | LibraryFilter::Playlists) {
-                    if !self.home_feed.user_playlists.is_empty() {
-                        ui.add_space(10.0);
-                        ui.label(RichText::new("Playlists de YouTube Music").size(16.0).strong());
-                        let ypls = self.home_feed.user_playlists.clone();
-                        for pl in &ypls {
-                            self.render_playlist_row(ui, ctx, pl);
-                        }
-                    }
-
                     if !self.store.data.playlists.is_empty() {
                         ui.add_space(10.0);
                         ui.label(RichText::new("Tus playlists").size(16.0).strong());
@@ -4300,6 +4247,85 @@ impl YrApp {
                                 });
                             });
                         }
+                    }
+
+                    if !self.home_feed.user_playlists.is_empty() {
+                        ui.add_space(10.0);
+                        ui.label(RichText::new("Playlists de YouTube Music").size(16.0).strong());
+                        let ypls = self.home_feed.user_playlists.clone();
+                        for pl in &ypls {
+                            self.render_playlist_row(ui, ctx, pl);
+                        }
+                    }
+                }
+
+                if matches!(self.library_filter, LibraryFilter::All | LibraryFilter::Albums) && !self.home_feed.new_albums.is_empty() {
+                    let albums: Vec<_> = self
+                        .home_feed
+                        .new_albums
+                        .iter()
+                        .filter(|a| lib_matches(&a.title) || lib_matches(&a.artist))
+                        .cloned()
+                        .collect();
+                    if !albums.is_empty() {
+                        ui.add_space(10.0);
+                        ui.label(RichText::new("Álbumes").size(16.0).strong());
+                        for a in &albums {
+                            self.render_album_row(ui, ctx, a);
+                        }
+                    }
+                }
+
+                if self.library_filter == LibraryFilter::Artists {
+                    ui.add_space(10.0);
+                    ui.label(RichText::new("Artistas").size(16.0).strong());
+                    let mut seen_artists = std::collections::HashSet::new();
+                    let mut artists = Vec::new();
+                    for t in self
+                        .store
+                        .data
+                        .liked_tracks
+                        .iter()
+                        .chain(self.store.data.recent_tracks.iter())
+                        .chain(self.home_feed.quick_picks.iter())
+                    {
+                        if let Some(aid) = t.artist_id.as_ref() {
+                            if lib_matches(&t.artist) && seen_artists.insert(aid.clone()) {
+                                artists.push((
+                                    aid.clone(),
+                                    t.artist.clone(),
+                                    t.thumbnail_url.clone(),
+                                ));
+                            }
+                        }
+                    }
+                    if artists.is_empty() {
+                        ui.label(
+                            RichText::new("Escucha canciones para ver tus artistas aquí.")
+                                .small()
+                                .color(TEXT_SECONDARY),
+                        );
+                    }
+                    for (aid, name, thumb) in artists {
+                        ui.horizontal(|ui| {
+                            render_thumb(ui, thumb.as_deref(), 44.0);
+                            ui.add_space(8.0);
+                            if ui
+                                .add(
+                                    egui::Label::new(
+                                        RichText::new(&name)
+                                            .size(15.0)
+                                            .strong()
+                                            .color(TEXT_PRIMARY),
+                                    )
+                                    .sense(Sense::click()),
+                                )
+                                .clicked()
+                            {
+                                self.open_artist(aid, ctx);
+                            }
+                        });
+                        ui.add_space(4.0);
                     }
                 }
 
@@ -5058,12 +5084,21 @@ impl YrApp {
                             (q.len(), ordered, q.current_index())
                         };
                         ui.horizontal(|ui| {
-                            ui.label(
-                                RichText::new(format!("A continuación ({queue_len})"))
-                                    .size(16.0)
-                                    .strong()
-                                    .color(Color32::WHITE),
-                            );
+                            let hdr_w = (ui.available_width() - 196.0).max(110.0);
+                            ui.allocate_ui(Vec2::new(hdr_w, 30.0), |ui| {
+                                ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                                    ui.add(
+                                        egui::Label::new(
+                                            RichText::new(format!("A continuación ({queue_len})"))
+                                                .size(16.0)
+                                                .strong()
+                                                .color(Color32::WHITE),
+                                        )
+                                        .truncate()
+                                        .selectable(false),
+                                    );
+                                });
+                            });
                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                                 if icons::icon_pill_button(
                                     ui,
@@ -5274,17 +5309,24 @@ impl YrApp {
                     } else if self.show_lyrics {
                         ui.horizontal(|ui| {
                             let badge = match &self.lyrics_data {
-                                Some(d) if !d.synced.is_empty() => {
-                                    "Letra sincronizada • Toca para saltar"
-                                }
+                                Some(d) if !d.synced.is_empty() => "Letra sincronizada",
                                 _ => "Letra",
                             };
-                            ui.label(
-                                RichText::new(badge)
-                                    .size(15.0)
-                                    .strong()
-                                    .color(Color32::WHITE),
-                            );
+                            let hdr_w = (ui.available_width() - 134.0).max(110.0);
+                            ui.allocate_ui(Vec2::new(hdr_w, 30.0), |ui| {
+                                ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                                    ui.add(
+                                        egui::Label::new(
+                                            RichText::new(badge)
+                                                .size(15.5)
+                                                .strong()
+                                                .color(Color32::WHITE),
+                                        )
+                                        .truncate()
+                                        .selectable(false),
+                                    );
+                                });
+                            });
                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                                 if icons::icon_button(
                                     ui,
