@@ -591,9 +591,52 @@ impl YrApp {
             }
         });
 
+        app.hydrate_cached_feeds();
         app.refresh_home(&cc.egui_ctx);
         app.refresh_downloads(&cc.egui_ctx);
         app
+    }
+
+    /// Populates Home and Explore feeds from disk cache on cold start for instant offline-ready UI.
+    fn hydrate_cached_feeds(&mut self) {
+        if let Some(mut cached_home) =
+            yr_core::models::load_json_cache::<HomeFeed>(&self.data_dir.join("home_cache.json"))
+        {
+            self.store.personalize_home_feed(&mut cached_home);
+            self.home_feed = cached_home;
+        }
+        if let Some(cached_explore) = yr_core::models::load_json_cache::<ExploreFeed>(
+            &self.data_dir.join("explore_cache.json"),
+        ) {
+            self.explore_feed = cached_explore;
+        }
+        if !self.home_feed.shelves.is_empty()
+            || !self.home_feed.listen_again.is_empty()
+            || !self.explore_feed.trending_tracks.is_empty()
+        {
+            self.rebuild_samples_deck();
+        }
+    }
+
+    fn handle_sample_vertical_drag(
+        &mut self,
+        resp: &egui::Response,
+        idx: usize,
+        total_samples: usize,
+        ctx: &egui::Context,
+    ) {
+        if resp.dragged() {
+            self.sample_drag_y += resp.drag_delta().y;
+            ctx.request_repaint();
+        }
+        if resp.drag_stopped() {
+            if self.sample_drag_y < -44.0 && idx + 1 < total_samples {
+                self.activate_sample_at(idx + 1, ctx);
+            } else if self.sample_drag_y > 44.0 && idx > 0 {
+                self.activate_sample_at(idx - 1, ctx);
+            }
+            self.sample_drag_y = 0.0;
+        }
     }
 
     fn set_banner(&mut self, msg: impl Into<String>) {
@@ -1009,16 +1052,38 @@ impl YrApp {
                     self.home_loading = false;
                     match res {
                         Ok(mut feed) => {
+                            if self.active_mood_title.is_none()
+                                && (!feed.shelves.is_empty() || !feed.listen_again.is_empty())
+                            {
+                                yr_core::models::save_json_cache(
+                                    &self.data_dir.join("home_cache.json"),
+                                    &feed,
+                                );
+                            }
                             self.store.personalize_home_feed(&mut feed);
                             self.home_feed = feed;
                             self.rebuild_samples_deck();
                         }
-                        Err(e) => self.set_banner(format!("Sin conexión: {e}")),
+                        Err(e) => {
+                            if self.home_feed.shelves.is_empty()
+                                && self.home_feed.listen_again.is_empty()
+                            {
+                                self.set_banner(format!("Sin conexión: {e}"));
+                            } else {
+                                self.set_banner("Sin conexión: mostrando inicio guardado");
+                            }
+                        }
                     }
                 }
                 AppEvent::ExploreLoaded(res) => {
                     self.explore_loading = false;
                     if let Ok(feed) = res {
+                        if !feed.trending_tracks.is_empty() || !feed.new_albums.is_empty() {
+                            yr_core::models::save_json_cache(
+                                &self.data_dir.join("explore_cache.json"),
+                                &feed,
+                            );
+                        }
                         self.explore_feed = feed;
                         self.rebuild_samples_deck();
                     }
@@ -2544,7 +2609,9 @@ impl YrApp {
                     });
             }
 
-            if self.home_loading {
+            let home_empty =
+                self.home_feed.shelves.is_empty() && self.home_feed.listen_again.is_empty();
+            if self.home_loading && home_empty {
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
                     ui.spinner();
@@ -2804,6 +2871,7 @@ impl YrApp {
             .unwrap_or(Color32::from_rgb(76, 36, 44));
         let card_rect = ui.available_rect_before_wrap();
         paint_ambient_gradient(ui.painter(), card_rect, ambient);
+        let bg_swipe_resp = ui.interact(card_rect, ui.id().with("samples_bg_swipe"), Sense::drag());
 
         let current_playing_id = self
             .queue
@@ -2870,13 +2938,15 @@ impl YrApp {
                             ui.add_space(y_off);
                             let (art_rect, art_resp) =
                                 ui.allocate_exact_size(Vec2::splat(art_size), Sense::click_and_drag());
+                            let drag_y = (self.sample_drag_y * 0.3).clamp(-32.0, 32.0);
+                            let visual_art_rect = art_rect.translate(Vec2::new(0.0, drag_y));
                             ui.painter().rect_filled(
-                                art_rect,
+                                visual_art_rect,
                                 CornerRadius::same(16),
                                 Color32::from_rgb(28, 28, 32),
                             );
                             let note_r = egui::Rect::from_center_size(
-                                art_rect.center(),
+                                visual_art_rect.center(),
                                 Vec2::splat((art_size * 0.28).clamp(32.0, 68.0)),
                             );
                             icons::draw_icon(
@@ -2889,7 +2959,7 @@ impl YrApp {
                                 let hi_res = tracked_thumb_uri(url, 720);
                                 paint_ready_image(
                                     ui,
-                                    art_rect,
+                                    visual_art_rect,
                                     hi_res,
                                     Vec2::splat(art_size),
                                     CornerRadius::same(16),
@@ -2902,23 +2972,23 @@ impl YrApp {
                                 )
                             {
                                 ui.painter().circle_filled(
-                                    art_rect.center(),
+                                    visual_art_rect.center(),
                                     26.0,
                                     Color32::from_black_alpha(165),
                                 );
                                 let spin_r = egui::Rect::from_center_size(
-                                    art_rect.center(),
+                                    visual_art_rect.center(),
                                     Vec2::splat(26.0),
                                 );
                                 ui.put(spin_r, egui::Spinner::new().size(22.0));
                             } else if !is_playing {
                                 ui.painter().circle_filled(
-                                    art_rect.center(),
+                                    visual_art_rect.center(),
                                     26.0,
                                     Color32::from_black_alpha(145),
                                 );
                                 let play_r = egui::Rect::from_center_size(
-                                    art_rect.center() + Vec2::new(2.0, 0.0),
+                                    visual_art_rect.center() + Vec2::new(2.0, 0.0),
                                     Vec2::splat(22.0),
                                 );
                                 icons::draw_icon(
@@ -2928,17 +2998,8 @@ impl YrApp {
                                     Color32::WHITE,
                                 );
                             }
-                            if art_resp.dragged() {
-                                self.sample_drag_y += art_resp.drag_delta().y;
-                            }
-                            if art_resp.drag_stopped() {
-                                if self.sample_drag_y < -48.0 && idx + 1 < total_samples {
-                                    self.activate_sample_at(idx + 1, ctx);
-                                } else if self.sample_drag_y > 48.0 && idx > 0 {
-                                    self.activate_sample_at(idx - 1, ctx);
-                                }
-                                self.sample_drag_y = 0.0;
-                            } else if art_resp.clicked() {
+                            self.handle_sample_vertical_drag(&art_resp, idx, total_samples, ctx);
+                            if art_resp.clicked() {
                                 if is_current
                                     && !matches!(
                                         snap.status,
@@ -3056,7 +3117,9 @@ impl YrApp {
                         }
                     });
                 });
-                if info_resp.response.interact(Sense::click()).clicked() {
+                let info_hit = info_resp.response.interact(Sense::click_and_drag());
+                self.handle_sample_vertical_drag(&info_hit, idx, total_samples, ctx);
+                if info_hit.clicked() {
                     if !is_current {
                         self.activate_sample_at(idx, ctx);
                     }
@@ -3126,6 +3189,7 @@ impl YrApp {
                 }
             }
         });
+        self.handle_sample_vertical_drag(&bg_swipe_resp, idx, total_samples, ctx);
     }
 
     fn render_search(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
@@ -4685,12 +4749,14 @@ impl YrApp {
                     } else if self.show_lyrics {
                         ui.horizontal(|ui| {
                             let badge = match &self.lyrics_data {
-                                Some(d) if !d.synced.is_empty() => "Letra sincronizada",
+                                Some(d) if !d.synced.is_empty() => {
+                                    "Letra sincronizada • Toca para saltar"
+                                }
                                 _ => "Letra",
                             };
                             ui.label(
                                 RichText::new(badge)
-                                    .size(16.0)
+                                    .size(15.0)
                                     .strong()
                                     .color(Color32::WHITE),
                             );
@@ -4726,7 +4792,7 @@ impl YrApp {
                                 egui::ScrollArea::vertical()
                                     .id_salt("synced_lyrics_scroll")
                                     .show(ui, |ui| {
-                                        ui.add_space(8.0);
+                                        ui.add_space(6.0);
                                         for (i, line) in data.synced.iter().enumerate() {
                                             let is_active = active_idx == Some(i);
                                             let text = if line.text.is_empty() {
@@ -4734,32 +4800,72 @@ impl YrApp {
                                             } else {
                                                 line.text.as_str()
                                             };
-                                            let resp = ui.add(
-                                                egui::Label::new(
-                                                    RichText::new(text)
-                                                        .size(if is_active { 19.5 } else { 16.5 })
-                                                        .strong()
-                                                        .color(if is_active {
-                                                            Color32::WHITE
-                                                        } else {
-                                                            Color32::from_white_alpha(125)
-                                                        }),
-                                                )
-                                                .wrap()
-                                                .sense(Sense::click()),
+                                            let ts_str = format_seconds(
+                                                line.time_secs.max(0.0).round() as u64,
+                                            );
+                                            let row_bg = if is_active {
+                                                Color32::from_white_alpha(30)
+                                            } else {
+                                                Color32::from_white_alpha(8)
+                                            };
+                                            let frame_resp = egui::Frame::new()
+                                                .fill(row_bg)
+                                                .corner_radius(CornerRadius::same(10))
+                                                .inner_margin(egui::Margin::symmetric(10, 7))
+                                                .show(ui, |ui| {
+                                                    ui.set_min_width(ui.available_width());
+                                                    ui.horizontal(|ui| {
+                                                        ui.spacing_mut().item_spacing.x = 8.0;
+                                                        ui.label(
+                                                            RichText::new(ts_str)
+                                                                .size(11.5)
+                                                                .monospace()
+                                                                .color(if is_active {
+                                                                    ACCENT_RED
+                                                                } else {
+                                                                    Color32::from_white_alpha(110)
+                                                                }),
+                                                        );
+                                                        ui.add(
+                                                            egui::Label::new(
+                                                                RichText::new(text)
+                                                                    .size(if is_active {
+                                                                        18.5
+                                                                    } else {
+                                                                        15.5
+                                                                    })
+                                                                    .strong()
+                                                                    .color(if is_active {
+                                                                        Color32::WHITE
+                                                                    } else {
+                                                                        Color32::from_white_alpha(
+                                                                            140,
+                                                                        )
+                                                                    }),
+                                                            )
+                                                            .wrap()
+                                                            .selectable(false),
+                                                        );
+                                                    });
+                                                });
+                                            let row_click = ui.interact(
+                                                frame_resp.response.rect,
+                                                ui.id().with(("synced_lyric_row", i)),
+                                                Sense::click(),
                                             );
                                             if is_active
                                                 && self.lyrics_last_scrolled_idx != active_idx
                                             {
                                                 self.lyrics_last_scrolled_idx = active_idx;
-                                                resp.scroll_to_me(Some(Align::Center));
+                                                frame_resp.response.scroll_to_me(Some(Align::Center));
                                             }
-                                            if resp.clicked() {
+                                            if row_click.clicked() {
+                                                self.lyrics_last_scrolled_idx = Some(i);
                                                 self.audio.seek(Duration::from_secs_f64(
                                                     line.time_secs,
                                                 ));
                                             }
-                                            ui.add_space(10.0);
+                                            ui.add_space(6.0);
                                         }
                                         if !data.source.is_empty() {
                                             ui.add_space(12.0);

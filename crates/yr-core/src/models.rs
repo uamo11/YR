@@ -262,3 +262,79 @@ pub struct ExploreFeed {
     pub trending_tracks: Vec<Track>,
     pub moods: Vec<MoodGenre>,
 }
+
+/// Loads a JSON-serialized feed or snapshot from disk, returning `None` on missing or corrupt data.
+pub fn load_json_cache<T: serde::de::DeserializeOwned>(path: &std::path::Path) -> Option<T> {
+    let raw = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str(&raw).ok()
+}
+
+/// Persists a feed snapshot atomically via a temporary sibling file so crashes never truncate cache.
+pub fn save_json_cache<T: serde::Serialize>(path: &std::path::Path, value: &T) {
+    let Ok(json) = serde_json::to_string(value) else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let tmp = path.with_extension("json.tmp");
+    if std::fs::write(&tmp, json).is_ok() {
+        let _ = std::fs::rename(&tmp, path);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn json_cache_roundtrip_home_and_explore_feeds() {
+        let dir = std::env::temp_dir().join(format!("yr_cache_test_{}", uuid::Uuid::new_v4()));
+        let home_path = dir.join("home_cache.json");
+        let explore_path = dir.join("explore_cache.json");
+
+        let sample_track = |id: &str, title: &str| Track {
+            id: id.to_string(),
+            title: title.to_string(),
+            artist: "Imagine Dragons".to_string(),
+            artist_id: None,
+            album: None,
+            album_id: None,
+            duration_secs: Some(204),
+            thumbnail_url: None,
+            local_path: None,
+        };
+
+        let home = HomeFeed {
+            shelves: vec![HomeShelf {
+                title: "Selección rápida".to_string(),
+                eyebrow: Some("PARA TI".to_string()),
+                layout: HomeShelfLayout::QuickPicks4Row,
+                tracks: vec![sample_track("7wtfhZwyrcc", "Believer")],
+                cards: vec![HomeShelfCard {
+                    title: "Believer".to_string(),
+                    subtitle: "Imagine Dragons".to_string(),
+                    thumbnail_url: None,
+                    kind: ShelfCardKind::Track(sample_track("7wtfhZwyrcc", "Believer")),
+                }],
+            }],
+            ..Default::default()
+        };
+        save_json_cache(&home_path, &home);
+        let loaded_home: HomeFeed = load_json_cache(&home_path).expect("cached home feed");
+        assert_eq!(loaded_home.shelves.len(), 1);
+        assert_eq!(loaded_home.shelves[0].cards[0].title, "Believer");
+
+        let explore = ExploreFeed {
+            trending_tracks: vec![sample_track("t1", "Natural")],
+            ..Default::default()
+        };
+        save_json_cache(&explore_path, &explore);
+        let loaded_explore: ExploreFeed =
+            load_json_cache(&explore_path).expect("cached explore feed");
+        assert_eq!(loaded_explore.trending_tracks.len(), 1);
+        assert_eq!(loaded_explore.trending_tracks[0].title, "Natural");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

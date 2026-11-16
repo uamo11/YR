@@ -67,8 +67,8 @@ sleep 1
 adb shell input tap 882 1660
 sleep 1
 
-# 2. Search tab (second column at bottom nav)
-adb shell input tap 405 2160
+# 2. Search tab (third column at 4-tab bottom nav)
+adb shell input tap 675 2160
 sleep 2
 # Tap search box, type query, tap Buscar button
 adb shell input tap 350 245
