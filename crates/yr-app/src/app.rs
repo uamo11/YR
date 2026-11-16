@@ -376,6 +376,7 @@ impl YrApp {
 
         let (media_tx, mut media_rx) = mpsc::unbounded_channel();
         crate::android_media::set_action_sender(media_tx);
+        crate::android_media::set_egui_ctx(cc.egui_ctx.clone());
         let (cookie_tx, mut cookie_rx) = mpsc::unbounded_channel();
         crate::android_media::set_cookie_sender(cookie_tx);
         let ev_tx_cookie = app.event_tx.clone();
@@ -1422,6 +1423,9 @@ impl YrApp {
 
 impl eframe::App for YrApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if crate::android_media::take_back_pressed() {
+            self.pop_back_navigation();
+        }
         self.process_events(ctx);
         let snap = self.audio.snapshot();
         let fullscreen_player = self.now_playing_open && !self.show_settings;
@@ -1624,6 +1628,7 @@ impl eframe::App for YrApp {
         self.render_action_sheet_modal(ctx);
         self.render_playlist_picker_modal(ctx);
         self.render_google_login_modal(ctx);
+        crate::android_media::set_ui_at_root(self.is_at_root());
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
@@ -1632,6 +1637,41 @@ impl eframe::App for YrApp {
 }
 
 impl YrApp {
+    fn is_at_root(&self) -> bool {
+        !self.show_settings
+            && !self.now_playing_open
+            && matches!(self.detail_view, DetailView::None)
+            && self.active_tab == NavTab::Home
+            && self.action_sheet_track.is_none()
+            && self.playlist_picker_track.is_none()
+            && !self.show_google_login
+            && !self.show_new_playlist_dialog
+    }
+
+    fn pop_back_navigation(&mut self) {
+        if self.action_sheet_track.take().is_some() {
+            self.action_sheet_context = None;
+        } else if self.playlist_picker_track.take().is_some() {
+        } else if self.show_google_login {
+            self.show_google_login = false;
+        } else if self.show_new_playlist_dialog {
+            self.show_new_playlist_dialog = false;
+        } else if self.show_settings {
+            self.show_settings = false;
+        } else if self.now_playing_open {
+            if self.show_queue || self.show_lyrics || self.show_related {
+                self.show_queue = false;
+                self.show_lyrics = false;
+                self.show_related = false;
+            } else {
+                self.now_playing_open = false;
+            }
+        } else if !matches!(self.detail_view, DetailView::None) {
+            self.detail_view = DetailView::None;
+        } else if self.active_tab != NavTab::Home {
+            self.active_tab = NavTab::Home;
+        }
+    }
     fn start_google_device_auth(&mut self, ctx: &egui::Context) {
         self.google_login_loading = true;
         self.google_auth_error = None;

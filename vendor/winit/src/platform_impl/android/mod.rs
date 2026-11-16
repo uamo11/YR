@@ -438,6 +438,9 @@ impl<T: 'static> EventLoop<T> {
                     {
                         input_status = InputStatus::Unhandled
                     },
+                    Keycode::Back => {
+                        input_status = InputStatus::Unhandled
+                    },
                     keycode => {
                         let state = match key.action() {
                             KeyAction::Down => event::ElementState::Pressed,

@@ -13,9 +13,10 @@ pub enum MediaAction {
 mod imp {
     use super::MediaAction;
     use jni::objects::{GlobalRef, JClass, JObject, JString, JValue};
-    use jni::sys::{jint, jlong};
+    use jni::sys::{jboolean, jint, jlong, JNI_FALSE, JNI_TRUE};
     use jni::{JNIEnv, JavaVM};
     use std::ffi::c_void;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
     use tokio::sync::mpsc;
 
@@ -28,6 +29,23 @@ mod imp {
     static BRIDGE: Mutex<Option<Arc<AndroidBridge>>> = Mutex::new(None);
     static ACTION_TX: Mutex<Option<mpsc::UnboundedSender<MediaAction>>> = Mutex::new(None);
     static COOKIE_TX: Mutex<Option<mpsc::UnboundedSender<String>>> = Mutex::new(None);
+    static EGUI_CTX: Mutex<Option<egui::Context>> = Mutex::new(None);
+    static UI_AT_ROOT: AtomicBool = AtomicBool::new(true);
+    static BACK_PRESSED_PENDING: AtomicBool = AtomicBool::new(false);
+
+    pub fn set_egui_ctx(ctx: egui::Context) {
+        if let Ok(mut g) = EGUI_CTX.lock() {
+            *g = Some(ctx);
+        }
+    }
+
+    pub fn set_ui_at_root(at_root: bool) {
+        UI_AT_ROOT.store(at_root, Ordering::Release);
+    }
+
+    pub fn take_back_pressed() -> bool {
+        BACK_PRESSED_PENDING.swap(false, Ordering::AcqRel)
+    }
 
     fn bridge() -> Option<Arc<AndroidBridge>> {
         BRIDGE.lock().ok().and_then(|g| g.clone())
@@ -292,6 +310,21 @@ mod imp {
             }
         }
     }
+
+    #[no_mangle]
+    pub extern "system" fn Java_com_yr_music_YrMainActivity_nativeOnBackPressed(
+        _env: JNIEnv,
+        _class: JClass,
+    ) -> jboolean {
+        if UI_AT_ROOT.load(Ordering::Acquire) {
+            return JNI_FALSE;
+        }
+        BACK_PRESSED_PENDING.store(true, Ordering::Release);
+        if let Some(ctx) = EGUI_CTX.lock().ok().and_then(|g| g.clone()) {
+            ctx.request_repaint();
+        }
+        JNI_TRUE
+    }
 }
 
 #[cfg(not(target_os = "android"))]
@@ -301,6 +334,11 @@ mod imp {
 
     pub fn set_action_sender(_tx: mpsc::UnboundedSender<MediaAction>) {}
     pub fn set_cookie_sender(_tx: mpsc::UnboundedSender<String>) {}
+    pub fn set_egui_ctx(_ctx: egui::Context) {}
+    pub fn set_ui_at_root(_at_root: bool) {}
+    pub fn take_back_pressed() -> bool {
+        false
+    }
     pub fn open_google_login() {}
     pub fn share_text(_title: &str, _text: &str) {}
     pub fn update_playback(_title: &str, _artist: &str, _playing: bool, _pos_ms: u64, _dur_ms: u64) {
@@ -316,5 +354,5 @@ mod imp {
 pub use imp::init;
 pub use imp::{
     open_google_login, resolve_audio_url, set_action_sender, set_artwork_url, set_cookie_sender,
-    share_text, stop_service, update_playback,
+    set_egui_ctx, set_ui_at_root, share_text, stop_service, take_back_pressed, update_playback,
 };
