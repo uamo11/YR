@@ -4189,6 +4189,33 @@ impl YrApp {
                 if ui.add(plus_btn).clicked() {
                     self.show_new_playlist_dialog = !self.show_new_playlist_dialog;
                 }
+                ui.add_space(4.0);
+                if icons::icon_button(
+                    ui,
+                    icons::Icon::Search,
+                    32.0,
+                    16.0,
+                    Color32::TRANSPARENT,
+                    TEXT_PRIMARY,
+                    16.0,
+                )
+                .clicked()
+                {
+                    self.active_tab = NavTab::Search;
+                }
+                if icons::icon_button(
+                    ui,
+                    icons::Icon::History,
+                    32.0,
+                    16.0,
+                    Color32::TRANSPARENT,
+                    TEXT_PRIMARY,
+                    16.0,
+                )
+                .clicked()
+                {
+                    self.library_search.clear();
+                }
             });
         });
 
@@ -5251,6 +5278,19 @@ impl YrApp {
                     {
                         self.action_sheet_track = Some(track.clone());
                     }
+                    if icons::icon_button(
+                        ui,
+                        icons::Icon::Cast,
+                        34.0,
+                        17.0,
+                        Color32::TRANSPARENT,
+                        Color32::from_white_alpha(200),
+                        17.0,
+                    )
+                    .clicked()
+                    {
+                        self.set_banner("Transmitiendo a dispositivo...");
+                    }
                     let eq_active = self.store.data.config.equalizer.enabled;
                     if icons::icon_button(
                         ui,
@@ -5280,6 +5320,35 @@ impl YrApp {
                         self.show_sleep_timer_sheet = true;
                     }
                 });
+
+                // Center: YouTube Music Audio/Video mode segmented pill
+                let switcher_w = 96.0;
+                let center_pad = ((ui.available_width() - switcher_w) * 0.5).max(4.0);
+                ui.add_space(center_pad);
+                egui::Frame::new()
+                    .fill(Color32::from_white_alpha(26))
+                    .corner_radius(CornerRadius::same(16))
+                    .inner_margin(egui::Margin::symmetric(3, 2))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            let (ar, a_resp) = ui.allocate_exact_size(Vec2::new(44.0, 26.0), Sense::click());
+                            if ui.is_rect_visible(ar) {
+                                ui.painter().rect_filled(ar, CornerRadius::same(13), Color32::from_white_alpha(48));
+                                icons::draw_icon(ui.painter(), egui::Rect::from_center_size(ar.center(), Vec2::splat(15.0)), icons::Icon::Headphones, Color32::WHITE);
+                            }
+                            if a_resp.clicked() {
+                                self.set_banner("Modo Audio (alta fidelidad)");
+                            }
+                            let (vr, v_resp) = ui.allocate_exact_size(Vec2::new(44.0, 26.0), Sense::click());
+                            if ui.is_rect_visible(vr) {
+                                icons::draw_icon(ui.painter(), egui::Rect::from_center_size(vr.center(), Vec2::splat(13.0)), icons::Icon::Play, Color32::from_white_alpha(150));
+                            }
+                            if v_resp.clicked() {
+                                let url = format!("https://music.youtube.com/watch?v={}", track.id);
+                                crate::android_media::share_text(&track.title, &url);
+                            }
+                        });
+                    });
             });
 
             let avail_w = ui.available_width();
@@ -6513,68 +6582,90 @@ impl YrApp {
                     self.show_queue = true;
                 }
             });
-            ui.add_space(6.0);
-            ui.allocate_ui(Vec2::new(avail_w, 28.0), |ui| {
-                ui.columns(3, |cols| {
-                    for (col_idx, (active, label, mode)) in [
-                        (self.show_queue, "SIGUIENTE", 0_u8),
-                        (self.show_lyrics, "LETRA", 1_u8),
-                        (self.show_related, "RELACIONADO", 2_u8),
-                    ]
-                    .into_iter()
-                    .enumerate()
-                    {
-                        cols[col_idx].vertical_centered(|ui| {
-                            let resp = ui.add(
-                                egui::Label::new(
-                                    RichText::new(label)
-                                        .size(12.5)
-                                        .strong()
-                                        .color(if active {
-                                            Color32::WHITE
-                                        } else {
-                                            Color32::from_white_alpha(165)
-                                        }),
-                                )
-                                .sense(Sense::click()),
-                            );
-                            if active {
-                                let underline = egui::Rect::from_min_max(
-                                    egui::pos2(resp.rect.left(), resp.rect.bottom() + 4.0),
-                                    egui::pos2(resp.rect.right(), resp.rect.bottom() + 6.0),
-                                );
-                                ui.painter().rect_filled(
-                                    underline,
-                                    CornerRadius::same(1),
-                                    Color32::WHITE,
-                                );
-                            }
-                            if resp.clicked() {
-                                if active {
-                                    self.show_queue = false;
-                                    self.show_lyrics = false;
-                                    self.show_related = false;
-                                } else {
-                                    self.show_queue = mode == 0;
-                                    self.show_lyrics = mode == 1;
-                                    self.show_related = mode == 2;
-                                    if self.show_lyrics {
-                                        self.lyrics_last_scrolled_idx = None;
-                                        if self.lyrics_track_id.as_deref() != Some(&track.id) {
-                                            self.load_lyrics(track.clone(), ctx);
-                                        }
-                                    }
-                                    if self.show_related
-                                        && self.related_track_id.as_deref() != Some(&track.id)
-                                    {
-                                        self.load_related(track.id.clone(), ctx);
-                                    }
-                                }
-                            }
-                        });
+
+            let drawer_open = self.show_queue || self.show_lyrics || self.show_related;
+            if !drawer_open {
+                ui.add_space(4.0);
+                ui.vertical_centered(|ui| {
+                    let peek_title = format!("Mix de {}", track.title);
+                    let resp = ui.add(
+                        egui::Label::new(
+                            RichText::new(peek_title)
+                                .size(13.5)
+                                .strong()
+                                .color(Color32::from_white_alpha(225)),
+                        )
+                        .truncate()
+                        .sense(Sense::click()),
+                    );
+                    if resp.clicked() {
+                        self.show_queue = true;
                     }
                 });
-            });
+            } else {
+                ui.add_space(6.0);
+                ui.allocate_ui(Vec2::new(avail_w, 28.0), |ui| {
+                    ui.columns(3, |cols| {
+                        for (col_idx, (active, label, mode)) in [
+                            (self.show_queue, "SIGUIENTE", 0_u8),
+                            (self.show_lyrics, "LETRA", 1_u8),
+                            (self.show_related, "RELACIONADO", 2_u8),
+                        ]
+                        .into_iter()
+                        .enumerate()
+                        {
+                            cols[col_idx].vertical_centered(|ui| {
+                                let resp = ui.add(
+                                    egui::Label::new(
+                                        RichText::new(label)
+                                            .size(12.5)
+                                            .strong()
+                                            .color(if active {
+                                                Color32::WHITE
+                                            } else {
+                                                Color32::from_white_alpha(165)
+                                            }),
+                                    )
+                                    .sense(Sense::click()),
+                                );
+                                if active {
+                                    let underline = egui::Rect::from_min_max(
+                                        egui::pos2(resp.rect.left(), resp.rect.bottom() + 4.0),
+                                        egui::pos2(resp.rect.right(), resp.rect.bottom() + 6.0),
+                                    );
+                                    ui.painter().rect_filled(
+                                        underline,
+                                        CornerRadius::same(1),
+                                        Color32::WHITE,
+                                    );
+                                }
+                                if resp.clicked() {
+                                    if active {
+                                        self.show_queue = false;
+                                        self.show_lyrics = false;
+                                        self.show_related = false;
+                                    } else {
+                                        self.show_queue = mode == 0;
+                                        self.show_lyrics = mode == 1;
+                                        self.show_related = mode == 2;
+                                        if self.show_lyrics {
+                                            self.lyrics_last_scrolled_idx = None;
+                                            if self.lyrics_track_id.as_deref() != Some(&track.id) {
+                                                self.load_lyrics(track.clone(), ctx);
+                                            }
+                                        }
+                                        if self.show_related
+                                            && self.related_track_id.as_deref() != Some(&track.id)
+                                        {
+                                            self.load_related(track.id.clone(), ctx);
+                                        }
+                                    }
+                                }
+                            });
+                        }
+                    });
+                });
+            }
         });
     }
 

@@ -47,6 +47,8 @@ pub enum Icon {
     MusicNote,
     Samples,
     Equalizer,
+    Headphones,
+    Cast,
 }
 
 /// Renders a crisp vector icon centered inside `rect`.
@@ -423,6 +425,58 @@ pub fn draw_icon(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32
             for &(x_rel, knob_y) in &[(-0.30, -0.10), (0.0, 0.20), (0.30, -0.25)] {
                 painter.line_segment([pt(x_rel, -0.42), pt(x_rel, 0.42)], stroke);
                 painter.circle_filled(pt(x_rel, knob_y), s * 0.12, color);
+            }
+        }
+        Icon::Headphones => {
+            // Headband arc
+            let arc_pts: Vec<Pos2> = (0..=12)
+                .map(|i| {
+                    let angle = std::f32::consts::PI + (i as f32 / 12.0) * std::f32::consts::PI;
+                    pt(angle.cos() * 0.36, angle.sin() * 0.32 - 0.05)
+                })
+                .collect();
+            for pair in arc_pts.windows(2) {
+                painter.line_segment([pair[0], pair[1]], stroke);
+            }
+            // Earcups
+            let cup_w = s * 0.18;
+            let cup_h = s * 0.42;
+            painter.rect_filled(
+                Rect::from_center_size(pt(-0.36, 0.12), Vec2::new(cup_w, cup_h)),
+                cup_w * 0.4,
+                color,
+            );
+            painter.rect_filled(
+                Rect::from_center_size(pt(0.36, 0.12), Vec2::new(cup_w, cup_h)),
+                cup_w * 0.4,
+                color,
+            );
+        }
+        Icon::Cast => {
+            // Cast screen frame with open bottom-left
+            painter.line_segment([pt(-0.42, 0.05), pt(-0.42, -0.34)], stroke);
+            painter.line_segment([pt(-0.42, -0.34), pt(0.42, -0.34)], stroke);
+            painter.line_segment([pt(0.42, -0.34), pt(0.42, 0.34)], stroke);
+            painter.line_segment([pt(0.42, 0.34), pt(-0.05, 0.34)], stroke);
+            // Broadcast dot and arcs in bottom left
+            painter.circle_filled(pt(-0.38, 0.30), s * 0.07, color);
+            let arc1: Vec<Pos2> = (0..=6)
+                .map(|i| {
+                    let a = -(i as f32 / 6.0) * (std::f32::consts::PI * 0.5);
+                    pt(-0.38 + a.cos() * 0.18, 0.30 + a.sin() * 0.18)
+                })
+                .collect();
+            for pair in arc1.windows(2) {
+                painter.line_segment([pair[0], pair[1]], stroke);
+            }
+            let arc2: Vec<Pos2> = (0..=8)
+                .map(|i| {
+                    let a = -(i as f32 / 8.0) * (std::f32::consts::PI * 0.5);
+                    pt(-0.38 + a.cos() * 0.32, 0.30 + a.sin() * 0.32)
+                })
+                .collect();
+            for pair in arc2.windows(2) {
+                painter.line_segment([pair[0], pair[1]], stroke);
             }
         }
     }
