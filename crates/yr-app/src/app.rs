@@ -879,6 +879,7 @@ impl YrApp {
         };
         self.store.record_play(track.clone());
         self.seeking_secs = None;
+        self.audio.stop();
         self.lyrics_data = None;
         self.lyrics_track_id = None;
         self.lyrics_last_scrolled_idx = None;
@@ -2142,12 +2143,12 @@ impl YrApp {
                                 );
                                 if let Some(url) = &card.thumbnail_url {
                                     let thumb_uri = tracked_thumb_uri(url, 224);
-                                    ui.put(
+                                    paint_ready_image(
+                                        ui,
                                         rect,
-                                        Image::new(thumb_uri)
-                                            .fit_to_exact_size(Vec2::splat(tile_size))
-                                            .corner_radius(CornerRadius::same(8))
-                                            .sense(Sense::hover()),
+                                        thumb_uri,
+                                        Vec2::splat(tile_size),
+                                        CornerRadius::same(8),
                                     );
                                 }
                                 let title_job = clamped_layout_job(
@@ -2843,12 +2844,12 @@ impl YrApp {
                             );
                             if let Some(url) = &track.thumbnail_url {
                                 let hi_res = tracked_thumb_uri(url, 720);
-                                ui.put(
+                                paint_ready_image(
+                                    ui,
                                     art_rect,
-                                    Image::new(hi_res)
-                                        .fit_to_exact_size(Vec2::splat(art_size))
-                                        .corner_radius(CornerRadius::same(16))
-                                        .sense(Sense::hover()),
+                                    hi_res,
+                                    Vec2::splat(art_size),
+                                    CornerRadius::same(16),
                                 );
                             }
                             if is_current
@@ -2913,10 +2914,10 @@ impl YrApp {
                         });
                     });
 
-                    // Right-hand vertical action rail (Like, Save, Radio, Player, More)
+                    // Right-hand vertical action rail (Like, Save, Radio, More)
                     ui.allocate_ui(Vec2::new(rail_w, body_h), |ui| {
                         ui.vertical_centered(|ui| {
-                            ui.add_space((body_h - 260.0).max(0.0) * 0.5);
+                            ui.add_space((body_h - 206.0).max(0.0) * 0.5);
                             let liked = self.store.is_liked(&track.id);
                             let rail_bg = Color32::from_black_alpha(120);
                             if icons::icon_button(
@@ -2932,7 +2933,7 @@ impl YrApp {
                             {
                                 self.store.toggle_like(track.clone());
                             }
-                            ui.add_space(10.0);
+                            ui.add_space(12.0);
                             if icons::icon_button(
                                 ui,
                                 icons::Icon::PlaylistAdd,
@@ -2946,7 +2947,7 @@ impl YrApp {
                             {
                                 self.playlist_picker_track = Some(track.clone());
                             }
-                            ui.add_space(10.0);
+                            ui.add_space(12.0);
                             if icons::icon_button(
                                 ui,
                                 icons::Icon::Radio,
@@ -2960,24 +2961,7 @@ impl YrApp {
                             {
                                 self.start_radio(track.id.clone(), ctx);
                             }
-                            ui.add_space(10.0);
-                            if icons::icon_button(
-                                ui,
-                                icons::Icon::ChevronUp,
-                                42.0,
-                                20.0,
-                                rail_bg,
-                                Color32::WHITE,
-                                21.0,
-                            )
-                            .clicked()
-                            {
-                                if !is_current {
-                                    self.activate_sample_at(idx, ctx);
-                                }
-                                self.now_playing_open = true;
-                            }
-                            ui.add_space(10.0);
+                            ui.add_space(12.0);
                             if icons::icon_button(
                                 ui,
                                 icons::Icon::MoreVert,
@@ -3001,7 +2985,7 @@ impl YrApp {
             // Bottom title, artist, step buttons & progress strip
             ui.horizontal(|ui| {
                 let info_w = (inner_rect.width() - 96.0).max(120.0);
-                ui.allocate_ui(Vec2::new(info_w, 66.0), |ui| {
+                let info_resp = ui.allocate_ui(Vec2::new(info_w, 66.0), |ui| {
                     ui.vertical(|ui| {
                         ui.spacing_mut().item_spacing.y = 2.0;
                         render_clamped_label(ui, &track.title, 17.0, Color32::WHITE, info_w, 2);
@@ -3029,6 +3013,12 @@ impl YrApp {
                         }
                     });
                 });
+                if info_resp.response.interact(Sense::click()).clicked() {
+                    if !is_current {
+                        self.activate_sample_at(idx, ctx);
+                    }
+                    self.now_playing_open = true;
+                }
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     let btn_bg = Color32::from_black_alpha(130);
                     let next_fg = if idx + 1 < total_samples {
@@ -4872,12 +4862,12 @@ impl YrApp {
                         );
                         if let Some(u) = track.thumbnail_url.as_deref() {
                             let art_uri = tracked_thumb_uri(u, 544);
-                            ui.put(
+                            paint_ready_image(
+                                ui,
                                 art_rect,
-                                Image::new(art_uri)
-                                    .fit_to_exact_size(Vec2::splat(art_size))
-                                    .corner_radius(CornerRadius::same(14))
-                                    .sense(Sense::hover()),
+                                art_uri,
+                                Vec2::splat(art_size),
+                                CornerRadius::same(14),
                             );
                         }
                         if art_resp.drag_started() {
@@ -5389,64 +5379,66 @@ impl YrApp {
                 }
             });
             ui.add_space(6.0);
-            ui.columns(3, |cols| {
-                for (col_idx, (active, label, mode)) in [
-                    (self.show_queue, "SIGUIENTE", 0_u8),
-                    (self.show_lyrics, "LETRA", 1_u8),
-                    (self.show_related, "RELACIONADO", 2_u8),
-                ]
-                .into_iter()
-                .enumerate()
-                {
-                    cols[col_idx].vertical_centered(|ui| {
-                        let resp = ui.add(
-                            egui::Label::new(
-                                RichText::new(label)
-                                    .size(12.5)
-                                    .strong()
-                                    .color(if active {
-                                        Color32::WHITE
-                                    } else {
-                                        Color32::from_white_alpha(165)
-                                    }),
-                            )
-                            .sense(Sense::click()),
-                        );
-                        if active {
-                            let underline = egui::Rect::from_min_max(
-                                egui::pos2(resp.rect.left(), resp.rect.bottom() + 4.0),
-                                egui::pos2(resp.rect.right(), resp.rect.bottom() + 6.0),
+            ui.allocate_ui(Vec2::new(avail_w, 28.0), |ui| {
+                ui.columns(3, |cols| {
+                    for (col_idx, (active, label, mode)) in [
+                        (self.show_queue, "SIGUIENTE", 0_u8),
+                        (self.show_lyrics, "LETRA", 1_u8),
+                        (self.show_related, "RELACIONADO", 2_u8),
+                    ]
+                    .into_iter()
+                    .enumerate()
+                    {
+                        cols[col_idx].vertical_centered(|ui| {
+                            let resp = ui.add(
+                                egui::Label::new(
+                                    RichText::new(label)
+                                        .size(12.5)
+                                        .strong()
+                                        .color(if active {
+                                            Color32::WHITE
+                                        } else {
+                                            Color32::from_white_alpha(165)
+                                        }),
+                                )
+                                .sense(Sense::click()),
                             );
-                            ui.painter().rect_filled(
-                                underline,
-                                CornerRadius::same(1),
-                                Color32::WHITE,
-                            );
-                        }
-                        if resp.clicked() {
                             if active {
-                                self.show_queue = false;
-                                self.show_lyrics = false;
-                                self.show_related = false;
-                            } else {
-                                self.show_queue = mode == 0;
-                                self.show_lyrics = mode == 1;
-                                self.show_related = mode == 2;
-                                if self.show_lyrics {
-                                    self.lyrics_last_scrolled_idx = None;
-                                    if self.lyrics_track_id.as_deref() != Some(&track.id) {
-                                        self.load_lyrics(track.clone(), ctx);
+                                let underline = egui::Rect::from_min_max(
+                                    egui::pos2(resp.rect.left(), resp.rect.bottom() + 4.0),
+                                    egui::pos2(resp.rect.right(), resp.rect.bottom() + 6.0),
+                                );
+                                ui.painter().rect_filled(
+                                    underline,
+                                    CornerRadius::same(1),
+                                    Color32::WHITE,
+                                );
+                            }
+                            if resp.clicked() {
+                                if active {
+                                    self.show_queue = false;
+                                    self.show_lyrics = false;
+                                    self.show_related = false;
+                                } else {
+                                    self.show_queue = mode == 0;
+                                    self.show_lyrics = mode == 1;
+                                    self.show_related = mode == 2;
+                                    if self.show_lyrics {
+                                        self.lyrics_last_scrolled_idx = None;
+                                        if self.lyrics_track_id.as_deref() != Some(&track.id) {
+                                            self.load_lyrics(track.clone(), ctx);
+                                        }
+                                    }
+                                    if self.show_related
+                                        && self.related_track_id.as_deref() != Some(&track.id)
+                                    {
+                                        self.load_related(track.id.clone(), ctx);
                                     }
                                 }
-                                if self.show_related
-                                    && self.related_track_id.as_deref() != Some(&track.id)
-                                {
-                                    self.load_related(track.id.clone(), ctx);
-                                }
                             }
-                        }
-                    });
-                }
+                        });
+                    }
+                });
             });
         });
     }
@@ -6381,6 +6373,28 @@ fn render_collection_row(
     clicked
 }
 
+/// Paints a remote image only once ready so failed loads preserve the clean vector placeholder.
+fn paint_ready_image(
+    ui: &mut egui::Ui,
+    rect: egui::Rect,
+    uri: String,
+    size: Vec2,
+    corner_radius: CornerRadius,
+) {
+    let img = Image::new(uri)
+        .fit_to_exact_size(size)
+        .corner_radius(corner_radius);
+    match img.load_for_size(ui.ctx(), size) {
+        Ok(egui::load::TexturePoll::Ready { .. }) => {
+            img.paint_at(ui, rect);
+        }
+        Ok(egui::load::TexturePoll::Pending { .. }) => {
+            ui.ctx().request_repaint();
+        }
+        Err(_) => {}
+    }
+}
+
 fn render_thumb(ui: &mut egui::Ui, url: Option<&str>, size: f32) {
     let (rect, _) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
     ui.painter()
@@ -6407,11 +6421,12 @@ fn render_thumb(ui: &mut egui::Ui, url: Option<&str>, size: f32) {
             320
         };
         let thumb_uri = tracked_thumb_uri(u, max_px);
-        ui.put(
+        paint_ready_image(
+            ui,
             rect,
-            Image::new(thumb_uri)
-                .fit_to_exact_size(Vec2::splat(size))
-                .corner_radius(CornerRadius::same(8)),
+            thumb_uri,
+            Vec2::splat(size),
+            CornerRadius::same(8),
         );
     }
 }

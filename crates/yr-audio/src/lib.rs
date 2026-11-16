@@ -176,7 +176,15 @@ fn audio_thread_main(
                     if let Some(s) = sink.take() {
                         s.stop();
                     }
-                    set_status(&snapshot, PlaybackStatus::Loading);
+                    active_playback = false;
+                    play_started_at = None;
+                    base_pos_secs = 0.0;
+                    current_duration = duration_hint.filter(|&d| d > 0).map(|d| d as f64);
+                    if let Ok(mut g) = snapshot.lock() {
+                        g.status = PlaybackStatus::Loading;
+                        g.position_secs = 0.0;
+                        g.duration_secs = current_duration;
+                    }
 
                     let Some(handle) = ensure_output(&mut output) else {
                         set_status(
@@ -242,7 +250,15 @@ fn audio_thread_main(
                     if let Some(s) = sink.take() {
                         s.stop();
                     }
-                    set_status(&snapshot, PlaybackStatus::Buffering);
+                    active_playback = false;
+                    play_started_at = None;
+                    base_pos_secs = 0.0;
+                    current_duration = duration_hint.filter(|&d| d > 0).map(|d| d as f64);
+                    if let Ok(mut g) = snapshot.lock() {
+                        g.status = PlaybackStatus::Buffering;
+                        g.position_secs = 0.0;
+                        g.duration_secs = current_duration;
+                    }
 
                     let Some(handle) = ensure_output(&mut output) else {
                         set_status(
@@ -321,9 +337,11 @@ fn audio_thread_main(
                     active_playback = false;
                     play_started_at = None;
                     base_pos_secs = 0.0;
+                    current_duration = None;
                     if let Ok(mut g) = snapshot.lock() {
                         g.status = PlaybackStatus::Idle;
                         g.position_secs = 0.0;
+                        g.duration_secs = None;
                     }
                 }
                 AudioCommand::Seek(pos) => {
