@@ -170,6 +170,8 @@ pub struct YrApp {
 
     sleep_timer_until: Arc<std::sync::Mutex<Option<Instant>>>,
     sleep_after_track: Arc<std::sync::atomic::AtomicBool>,
+    show_sleep_timer_sheet: bool,
+    stream_cache_bytes: u64,
     playlist_picker_track: Option<Track>,
     action_sheet_track: Option<Track>,
     action_sheet_context: Option<(Vec<Track>, usize)>,
@@ -299,6 +301,7 @@ impl YrApp {
             store.data.config.volume,
         );
 
+        let stream_cache_bytes = dir_size_bytes(&data_dir.join("stream_cache"));
         let (event_tx, event_rx) = mpsc::unbounded_channel();
 
         let mut app = Self {
@@ -358,6 +361,8 @@ impl YrApp {
             new_playlist_name: String::new(),
             sleep_timer_until: Arc::new(std::sync::Mutex::new(None)),
             sleep_after_track: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            show_sleep_timer_sheet: false,
+            stream_cache_bytes,
             playlist_picker_track: None,
             action_sheet_track: None,
             action_sheet_context: None,
@@ -1478,6 +1483,9 @@ impl eframe::App for YrApp {
                             .clicked()
                             {
                                 self.show_settings = !self.show_settings;
+                                if self.show_settings {
+                                    self.refresh_cache_stats();
+                                }
                             }
                             if self.home_feed.is_logged_in {
                                 let avatar_url = self
@@ -1626,6 +1634,7 @@ impl eframe::App for YrApp {
             });
 
         self.render_action_sheet_modal(ctx);
+        self.render_sleep_timer_modal(ctx);
         self.render_playlist_picker_modal(ctx);
         self.render_google_login_modal(ctx);
         crate::android_media::set_ui_at_root(self.is_at_root());
@@ -1637,6 +1646,10 @@ impl eframe::App for YrApp {
 }
 
 impl YrApp {
+    fn refresh_cache_stats(&mut self) {
+        self.stream_cache_bytes = dir_size_bytes(&self.data_dir.join("stream_cache"));
+    }
+
     fn is_at_root(&self) -> bool {
         !self.show_settings
             && !self.now_playing_open
@@ -1644,12 +1657,20 @@ impl YrApp {
             && self.active_tab == NavTab::Home
             && self.action_sheet_track.is_none()
             && self.playlist_picker_track.is_none()
+            && !self.show_sleep_timer_sheet
             && !self.show_google_login
             && !self.show_new_playlist_dialog
     }
 
     fn pop_back_navigation(&mut self) {
-        if self.action_sheet_track.take().is_some() {
+        let has_search_results = !self.search_results.songs.is_empty()
+            || !self.search_results.albums.is_empty()
+            || !self.search_results.artists.is_empty()
+            || !self.search_results.playlists.is_empty();
+
+        if self.show_sleep_timer_sheet {
+            self.show_sleep_timer_sheet = false;
+        } else if self.action_sheet_track.take().is_some() {
             self.action_sheet_context = None;
         } else if self.playlist_picker_track.take().is_some() {
         } else if self.show_google_login {
@@ -1668,6 +1689,12 @@ impl YrApp {
             }
         } else if !matches!(self.detail_view, DetailView::None) {
             self.detail_view = DetailView::None;
+        } else if self.active_tab == NavTab::Search
+            && (!self.search_query.trim().is_empty() || has_search_results)
+        {
+            self.search_query.clear();
+            self.search_results = SearchResults::default();
+            self.search_suggestions.clear();
         } else if self.active_tab != NavTab::Home {
             self.active_tab = NavTab::Home;
         }
@@ -3421,6 +3448,7 @@ impl YrApp {
         egui::ScrollArea::vertical()
             .id_salt("search_scroll")
             .show(ui, |ui| {
+                let mut shown_local_ids: HashSet<String> = HashSet::new();
                 let q_trimmed = self.search_query.trim().to_string();
                 if q_trimmed.len() >= 2 {
                     let mut local_hits = self.store.search_local(&q_trimmed);
@@ -3444,6 +3472,7 @@ impl YrApp {
                         );
                         ui.add_space(4.0);
                         for (idx, t) in local_hits.iter().take(4).enumerate() {
+                            shown_local_ids.insert(t.id.clone());
                             self.render_track_row(ui, ctx, t, &local_hits, idx, true);
                             ui.add_space(3.0);
                         }
@@ -3790,7 +3819,22 @@ impl YrApp {
 
                 match self.search_filter {
                     SearchFilter::Songs => {
-                        let songs = self.search_results.songs.clone();
+                        let songs: Vec<Track> = self
+                            .search_results
+                            .songs
+                            .iter()
+                            .filter(|t| !shown_local_ids.contains(&t.id))
+                            .cloned()
+                            .collect();
+                        if !shown_local_ids.is_empty() && !songs.is_empty() {
+                            ui.add_space(6.0);
+                            ui.label(
+                                RichText::new("En YouTube Music")
+                                    .size(13.0)
+                                    .color(TEXT_SECONDARY),
+                            );
+                            ui.add_space(4.0);
+                        }
                         for (idx, track) in songs.iter().enumerate() {
                             self.render_track_row(ui, ctx, track, &songs, idx, false);
                         }
@@ -4768,20 +4812,26 @@ impl YrApp {
                     None
                 };
 
+                let has_timer = timer_text.is_some();
                 if let Some(txt) = timer_text {
                     ui.add_space(6.0);
-                    egui::Frame::new()
-                        .fill(Color32::from_white_alpha(24))
+                    let timer_resp = egui::Frame::new()
+                        .fill(Color32::from_white_alpha(28))
                         .corner_radius(CornerRadius::same(14))
                         .inner_margin(egui::Margin::symmetric(10, 4))
                         .show(ui, |ui| {
                             ui.horizontal(|ui| {
                                 let (r, _) =
                                     ui.allocate_exact_size(Vec2::splat(13.0), Sense::hover());
-                                icons::draw_icon(ui.painter(), r, icons::Icon::Moon, Color32::WHITE);
+                                icons::draw_icon(ui.painter(), r, icons::Icon::Moon, ACCENT_RED);
                                 ui.label(RichText::new(txt).size(12.0).color(Color32::WHITE));
                             });
-                        });
+                        })
+                        .response
+                        .interact(Sense::click());
+                    if timer_resp.clicked() {
+                        self.show_sleep_timer_sheet = true;
+                    }
                 }
 
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -4797,6 +4847,20 @@ impl YrApp {
                     .clicked()
                     {
                         self.action_sheet_track = Some(track.clone());
+                    }
+                    if !has_timer
+                        && icons::icon_button(
+                            ui,
+                            icons::Icon::Moon,
+                            34.0,
+                            17.0,
+                            Color32::TRANSPARENT,
+                            Color32::from_white_alpha(180),
+                            17.0,
+                        )
+                        .clicked()
+                    {
+                        self.show_sleep_timer_sheet = true;
                     }
                 });
             });
@@ -6047,16 +6111,25 @@ impl YrApp {
 
         ui.add_space(12.0);
         let mb = self.total_downloaded_bytes as f64 / (1024.0 * 1024.0);
+        let cache_mb = self.stream_cache_bytes as f64 / (1024.0 * 1024.0);
         ui.label(
             RichText::new(format!("Almacenamiento offline: {mb:.1} MB"))
                 .color(TEXT_SECONDARY),
         );
+        ui.label(
+            RichText::new(format!("Caché de streaming: {cache_mb:.1} MB"))
+                .color(TEXT_SECONDARY),
+        );
         ui.add_space(6.0);
-        if ui.button("Limpiar caché de streaming").clicked() {
+        if ui.button("Limpiar caché de streaming y portadas").clicked() {
             let cache_dir = self.data_dir.join("stream_cache");
             let _ = std::fs::remove_dir_all(&cache_dir);
             let _ = std::fs::create_dir_all(&cache_dir);
-            self.set_banner("Caché de streaming eliminada");
+            let _ = std::fs::remove_file(self.data_dir.join("home_cache.json"));
+            let _ = std::fs::remove_file(self.data_dir.join("explore_cache.json"));
+            self.stream_cache_bytes = 0;
+            ctx.forget_all_images();
+            self.set_banner("Caché y portadas liberadas");
         }
 
         ui.add_space(10.0);
@@ -6362,12 +6435,177 @@ impl YrApp {
                     });
                     self.action_sheet_track = None;
                 }
-                if sheet_row(ui, icons::Icon::Moon, "Temporizador de apagado (30 min)") {
-                    *self.sleep_timer_until.lock().unwrap() =
-                        Some(Instant::now() + Duration::from_secs(30 * 60));
-                    self.set_banner("Temporizador activado: 30 min");
+                let timer_active = self.sleep_timer_until.lock().unwrap().is_some()
+                    || self
+                        .sleep_after_track
+                        .load(std::sync::atomic::Ordering::SeqCst);
+                let timer_label = if timer_active {
+                    "Temporizador de apagado (activo)"
+                } else {
+                    "Temporizador de apagado"
+                };
+                if sheet_row(ui, icons::Icon::Moon, timer_label) {
+                    self.show_sleep_timer_sheet = true;
                     self.action_sheet_track = None;
                 }
+
+                        #[cfg(target_os = "android")]
+                        ui.add_space(46.0);
+                    });
+            });
+    }
+
+    fn render_sleep_timer_modal(&mut self, ctx: &egui::Context) {
+        if !self.show_sleep_timer_sheet {
+            return;
+        }
+        let screen = ctx.screen_rect();
+        if render_modal_scrim(ctx, "yr_sleep_timer_scrim") {
+            self.show_sleep_timer_sheet = false;
+        }
+
+        let active_until = *self.sleep_timer_until.lock().unwrap();
+        let after_track = self
+            .sleep_after_track
+            .load(std::sync::atomic::Ordering::SeqCst);
+
+        egui::Area::new(egui::Id::new("yr_sleep_timer_panel"))
+            .anchor(egui::Align2::CENTER_BOTTOM, Vec2::ZERO)
+            .order(egui::Order::Foreground)
+            .interactable(true)
+            .show(ctx, |ui| {
+                ui.set_width(screen.width());
+                egui::Frame::new()
+                    .fill(Color32::from_rgb(24, 24, 28))
+                    .stroke(Stroke::new(0.8_f32, Color32::from_rgb(48, 48, 54)))
+                    .corner_radius(CornerRadius {
+                        nw: 18,
+                        ne: 18,
+                        sw: 0,
+                        se: 0,
+                    })
+                    .inner_margin(egui::Margin::symmetric(16, 14))
+                    .show(ui, |ui| {
+                        ui.set_width((screen.width() - 32.0).max(180.0));
+                        ui.horizontal(|ui| {
+                            let (mr, _) =
+                                ui.allocate_exact_size(Vec2::splat(20.0), Sense::hover());
+                            icons::draw_icon(ui.painter(), mr, icons::Icon::Moon, ACCENT_RED);
+                            ui.label(
+                                RichText::new("Temporizador de apagado")
+                                    .size(16.5)
+                                    .strong()
+                                    .color(Color32::WHITE),
+                            );
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                if icons::icon_button(
+                                    ui,
+                                    icons::Icon::Close,
+                                    32.0,
+                                    16.0,
+                                    Color32::TRANSPARENT,
+                                    Color32::WHITE,
+                                    16.0,
+                                )
+                                .clicked()
+                                {
+                                    self.show_sleep_timer_sheet = false;
+                                }
+                            });
+                        });
+
+                        if let Some(until) = active_until {
+                            let rem = until.saturating_duration_since(Instant::now()).as_secs();
+                            ui.add_space(4.0);
+                            ui.label(
+                                RichText::new(format!(
+                                    "Se pausará en {:02}:{:02}",
+                                    rem / 60,
+                                    rem % 60
+                                ))
+                                .size(13.0)
+                                .color(GREEN_OK),
+                            );
+                        } else if after_track {
+                            ui.add_space(4.0);
+                            ui.label(
+                                RichText::new("Se pausará al terminar esta canción")
+                                    .size(13.0)
+                                    .color(GREEN_OK),
+                            );
+                        }
+
+                        ui.add_space(10.0);
+                        let row_w = ui.available_width();
+                        let timer_row = |ui: &mut egui::Ui,
+                                         label: &str,
+                                         bg: Color32,
+                                         fg: Color32|
+                         -> bool {
+                            let (r, resp) =
+                                ui.allocate_exact_size(Vec2::new(row_w, 42.0), Sense::click());
+                            if ui.is_rect_visible(r) {
+                                ui.painter().rect_filled(r, CornerRadius::same(10), bg);
+                                ui.painter().text(
+                                    egui::pos2(r.left() + 14.0, r.center().y),
+                                    egui::Align2::LEFT_CENTER,
+                                    label,
+                                    egui::FontId::proportional(14.5),
+                                    fg,
+                                );
+                            }
+                            ui.add_space(6.0);
+                            resp.clicked()
+                        };
+
+                        let default_bg = Color32::from_white_alpha(12);
+                        for (mins, label) in [
+                            (15_u64, "15 minutos"),
+                            (30_u64, "30 minutos"),
+                            (45_u64, "45 minutos"),
+                            (60_u64, "60 minutos"),
+                        ] {
+                            if timer_row(ui, label, default_bg, Color32::WHITE) {
+                                *self.sleep_timer_until.lock().unwrap() =
+                                    Some(Instant::now() + Duration::from_secs(mins * 60));
+                                self.sleep_after_track
+                                    .store(false, std::sync::atomic::Ordering::SeqCst);
+                                self.set_banner(format!("Temporizador: {label}"));
+                                self.show_sleep_timer_sheet = false;
+                            }
+                        }
+
+                        if timer_row(
+                            ui,
+                            "Al terminar la canción actual",
+                            if after_track {
+                                Color32::from_white_alpha(28)
+                            } else {
+                                default_bg
+                            },
+                            Color32::WHITE,
+                        ) {
+                            *self.sleep_timer_until.lock().unwrap() = None;
+                            self.sleep_after_track
+                                .store(true, std::sync::atomic::Ordering::SeqCst);
+                            self.set_banner("Se pausará al terminar esta canción");
+                            self.show_sleep_timer_sheet = false;
+                        }
+
+                        if (active_until.is_some() || after_track)
+                            && timer_row(
+                                ui,
+                                "Apagar temporizador",
+                                Color32::from_rgb(56, 22, 26),
+                                ACCENT_RED,
+                            )
+                        {
+                            *self.sleep_timer_until.lock().unwrap() = None;
+                            self.sleep_after_track
+                                .store(false, std::sync::atomic::Ordering::SeqCst);
+                            self.set_banner("Temporizador cancelado");
+                            self.show_sleep_timer_sheet = false;
+                        }
 
                         #[cfg(target_os = "android")]
                         ui.add_space(46.0);
@@ -7032,6 +7270,24 @@ fn paint_ambient_gradient(painter: &egui::Painter, bg_rect: egui::Rect, ambient:
     mesh.add_triangle(2, 3, 4);
     mesh.add_triangle(3, 5, 4);
     painter.add(egui::Shape::mesh(mesh));
+}
+
+fn dir_size_bytes(path: &std::path::Path) -> u64 {
+    let Ok(entries) = std::fs::read_dir(path) else {
+        return 0;
+    };
+    let mut total = 0_u64;
+    for entry in entries.flatten() {
+        let p = entry.path();
+        if let Ok(meta) = entry.metadata() {
+            if meta.is_dir() {
+                total = total.saturating_add(dir_size_bytes(&p));
+            } else {
+                total = total.saturating_add(meta.len());
+            }
+        }
+    }
+    total
 }
 
 fn generate_test_wav(path: &std::path::Path, freq_hz: f32, duration_secs: u32) -> std::io::Result<()> {
