@@ -933,9 +933,9 @@ impl YrApp {
         self.sponsor_skipped_idx = None;
         self.ensure_cover_color(track.thumbnail_url.as_deref(), ctx);
 
-        // Preload synced lyrics immediately when a track starts so LETRA opens ready.
+        // Preload synced lyrics and related recommendations when the player is visible.
         self.load_lyrics(track.clone(), ctx);
-        if self.show_related {
+        if self.show_related || self.now_playing_open {
             self.load_related(track.id.clone(), ctx);
         }
 
@@ -1253,7 +1253,7 @@ impl YrApp {
                                 track.thumbnail_url.as_deref().unwrap_or(""),
                             );
                             self.load_lyrics(track.clone(), ctx);
-                            if self.show_related {
+                            if self.show_related || self.now_playing_open {
                                 self.load_related(track.id, ctx);
                             }
                         }
@@ -3530,7 +3530,7 @@ impl YrApp {
                     };
                     if !trending.is_empty() {
                         let ranked = self.store.rank_recommendations(trending);
-                        let top: Vec<Track> = ranked.into_iter().take(6).collect();
+                        let top: Vec<Track> = ranked.into_iter().take(4).collect();
                         self.render_shelf_header(
                             ui,
                             ctx,
@@ -3602,6 +3602,53 @@ impl YrApp {
                                                 .selectable(false),
                                             );
                                         });
+                                    }
+                                });
+                            });
+                    }
+
+                    let moods = if !self.explore_feed.moods.is_empty() {
+                        self.explore_feed.moods.clone()
+                    } else {
+                        self.home_feed.moods.clone()
+                    };
+                    if !moods.is_empty() {
+                        self.render_shelf_header(
+                            ui,
+                            ctx,
+                            "Estados de ánimo y géneros",
+                            None,
+                            false,
+                            None,
+                        );
+                        ui.add_space(6.0);
+                        egui::ScrollArea::horizontal()
+                            .id_salt("explore_moods_h")
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    ui.spacing_mut().item_spacing.x = 8.0;
+                                    for m in moods.iter().take(12) {
+                                        let btn = egui::Button::new(
+                                            RichText::new(&m.title).size(13.0).color(TEXT_PRIMARY),
+                                        )
+                                        .fill(BG_ELEVATED)
+                                        .corner_radius(CornerRadius::same(16));
+                                        if ui.add(btn).clicked() {
+                                            if m.params.is_some() {
+                                                self.active_tab = NavTab::Home;
+                                                self.active_mood_title = Some(m.title.clone());
+                                                self.refresh_home_with_params(
+                                                    m.params.clone(),
+                                                    ctx,
+                                                );
+                                            } else {
+                                                self.open_mood(
+                                                    m.id.clone(),
+                                                    m.title.clone(),
+                                                    ctx,
+                                                );
+                                            }
+                                        }
                                     }
                                 });
                             });
@@ -4501,6 +4548,9 @@ impl YrApp {
 
         if let Some(url) = track.thumbnail_url.as_deref() {
             self.ensure_cover_color(Some(url), ctx);
+        }
+        if self.related_track_id.as_deref() != Some(&track.id) && !self.related_loading {
+            self.load_related(track.id.clone(), ctx);
         }
 
         let ambient = track
@@ -5475,6 +5525,27 @@ impl YrApp {
                             egui::pos2(thumb_x, track_rect.bottom()),
                         );
                         painter.rect_filled(active_rect, 1.5, Color32::WHITE);
+                        if self.store.data.config.sponsorblock_enabled
+                            && self.sponsor_track_id.as_deref() == Some(&track.id)
+                            && total > 1.0
+                        {
+                            let sb_color = Color32::from_rgba_unmultiplied(255, 193, 7, 210);
+                            for seg in &self.sponsor_segments {
+                                let s_frac = (seg.start_secs / total).clamp(0.0, 1.0) as f32;
+                                let e_frac = (seg.end_secs / total).clamp(s_frac as f64, 1.0) as f32;
+                                let seg_rect = egui::Rect::from_min_max(
+                                    egui::pos2(
+                                        track_rect.left() + track_rect.width() * s_frac,
+                                        track_rect.top(),
+                                    ),
+                                    egui::pos2(
+                                        track_rect.left() + track_rect.width() * e_frac,
+                                        track_rect.bottom(),
+                                    ),
+                                );
+                                painter.rect_filled(seg_rect, 1.0, sb_color);
+                            }
+                        }
                         let radius = if bar_resp.dragged() { 8.5 } else { 6.0 };
                         painter.circle_filled(egui::pos2(thumb_x, cy), radius, Color32::WHITE);
                     }
