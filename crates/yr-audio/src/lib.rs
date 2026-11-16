@@ -346,13 +346,21 @@ fn audio_thread_main(
                 }
                 AudioCommand::Seek(pos) => {
                     if let Some(s) = &sink {
-                        if s.try_seek(pos).is_ok() {
-                            base_pos_secs = pos.as_secs_f64();
-                            if !s.is_paused() {
-                                play_started_at = Some(Instant::now());
+                        match s.try_seek(pos) {
+                            Ok(()) => {
+                                base_pos_secs = pos.as_secs_f64();
+                                if !s.is_paused() {
+                                    play_started_at = Some(Instant::now());
+                                }
+                                if let Ok(mut g) = snapshot.lock() {
+                                    g.position_secs = base_pos_secs;
+                                }
                             }
-                            if let Ok(mut g) = snapshot.lock() {
-                                g.position_secs = base_pos_secs;
+                            Err(e) => {
+                                eprintln!(
+                                    "[yr-audio] try_seek({:.2}s) failed: {e}",
+                                    pos.as_secs_f64()
+                                );
                             }
                         }
                     }
@@ -663,7 +671,7 @@ impl Source for SymphoniaStreamDecoder {
                 SeekMode::Coarse,
                 SeekTo::Time {
                     time: target,
-                    track_id: Some(self.track_id),
+                    track_id: None,
                 },
             )
             .map_err(|e| {

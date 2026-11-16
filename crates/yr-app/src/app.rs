@@ -4808,6 +4808,7 @@ impl YrApp {
                                             } else {
                                                 Color32::from_white_alpha(8)
                                             };
+                                            let mut row_clicked = false;
                                             let frame_resp = egui::Frame::new()
                                                 .fill(row_bg)
                                                 .corner_radius(CornerRadius::same(10))
@@ -4816,17 +4817,23 @@ impl YrApp {
                                                     ui.set_min_width(ui.available_width());
                                                     ui.horizontal(|ui| {
                                                         ui.spacing_mut().item_spacing.x = 8.0;
-                                                        ui.label(
-                                                            RichText::new(ts_str)
-                                                                .size(11.5)
-                                                                .monospace()
-                                                                .color(if is_active {
-                                                                    ACCENT_RED
-                                                                } else {
-                                                                    Color32::from_white_alpha(110)
-                                                                }),
+                                                        let ts_resp = ui.add(
+                                                            egui::Label::new(
+                                                                RichText::new(ts_str)
+                                                                    .size(11.5)
+                                                                    .monospace()
+                                                                    .color(if is_active {
+                                                                        ACCENT_RED
+                                                                    } else {
+                                                                        Color32::from_white_alpha(
+                                                                            110,
+                                                                        )
+                                                                    }),
+                                                            )
+                                                            .selectable(false)
+                                                            .sense(Sense::click()),
                                                         );
-                                                        ui.add(
+                                                        let text_resp = ui.add(
                                                             egui::Label::new(
                                                                 RichText::new(text)
                                                                     .size(if is_active {
@@ -4844,22 +4851,26 @@ impl YrApp {
                                                                     }),
                                                             )
                                                             .wrap()
-                                                            .selectable(false),
+                                                            .selectable(false)
+                                                            .sense(Sense::click()),
                                                         );
+                                                        if ts_resp.clicked() || text_resp.clicked()
+                                                        {
+                                                            row_clicked = true;
+                                                        }
                                                     });
                                                 });
-                                            let row_click = ui.interact(
-                                                frame_resp.response.rect,
-                                                ui.id().with(("synced_lyric_row", i)),
-                                                Sense::click(),
-                                            );
+                                            if frame_resp.response.interact(Sense::click()).clicked()
+                                            {
+                                                row_clicked = true;
+                                            }
                                             if is_active
                                                 && self.lyrics_last_scrolled_idx != active_idx
                                             {
                                                 self.lyrics_last_scrolled_idx = active_idx;
                                                 frame_resp.response.scroll_to_me(Some(Align::Center));
                                             }
-                                            if row_click.clicked() {
+                                            if row_clicked {
                                                 self.lyrics_last_scrolled_idx = Some(i);
                                                 self.audio.seek(Duration::from_secs_f64(
                                                     line.time_secs,
@@ -5148,7 +5159,7 @@ impl YrApp {
                                     .show(ui, |ui| {
                                         ui.horizontal(|ui| {
                                             ui.spacing_mut().item_spacing.x = 3.0;
-                                            if icons::icon_button(
+                                            let like_icon_resp = icons::icon_button(
                                                 ui,
                                                 icons::Icon::ThumbUp,
                                                 26.0,
@@ -5156,20 +5167,25 @@ impl YrApp {
                                                 Color32::TRANSPARENT,
                                                 if liked { ACCENT_RED } else { Color32::WHITE },
                                                 16.0,
-                                            )
-                                            .clicked()
+                                            );
+                                            let like_label_resp = ui.add(
+                                                egui::Label::new(
+                                                    RichText::new("Me gusta")
+                                                        .size(12.0)
+                                                        .color(if liked {
+                                                            ACCENT_RED
+                                                        } else {
+                                                            Color32::WHITE
+                                                        }),
+                                                )
+                                                .selectable(false)
+                                                .sense(Sense::click()),
+                                            );
+                                            if like_icon_resp.clicked()
+                                                || like_label_resp.clicked()
                                             {
                                                 self.store.toggle_like(track.clone());
                                             }
-                                            ui.label(
-                                                RichText::new("Me gusta")
-                                                    .size(12.0)
-                                                    .color(if liked {
-                                                        ACCENT_RED
-                                                    } else {
-                                                        Color32::WHITE
-                                                    }),
-                                            );
                                             ui.label(
                                                 RichText::new("|")
                                                     .size(12.5)
