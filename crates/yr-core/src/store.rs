@@ -21,6 +21,8 @@ pub struct AppConfig {
     pub download_quality: AudioQuality,
     pub max_concurrent_downloads: usize,
     pub volume: f32,
+    #[serde(default = "default_one")]
+    pub playback_speed: f32,
     #[serde(default = "default_true")]
     pub autoplay_radio: bool,
     #[serde(default = "default_true")]
@@ -31,6 +33,10 @@ fn default_true() -> bool {
     true
 }
 
+fn default_one() -> f32 {
+    1.0
+}
+
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
@@ -38,6 +44,7 @@ impl Default for AppConfig {
             download_quality: AudioQuality::High,
             max_concurrent_downloads: 3,
             volume: 0.85,
+            playback_speed: 1.0,
             autoplay_radio: true,
             sponsorblock_enabled: true,
         }
@@ -57,6 +64,10 @@ pub struct LibraryData {
     pub pinned_cards: Vec<HomeShelfCard>,
     #[serde(default)]
     pub disliked_ids: Vec<String>,
+    #[serde(default)]
+    pub last_queue: Vec<Track>,
+    #[serde(default)]
+    pub last_queue_index: Option<usize>,
     pub config: AppConfig,
 }
 
@@ -138,6 +149,25 @@ impl LibraryStore {
                 let _ = self.save();
             }
         }
+    }
+
+    pub fn remove_from_playlist(&mut self, playlist_id: &str, track_id: &str) {
+        if let Some(pl) = self.data.playlists.iter_mut().find(|p| p.id == playlist_id) {
+            let before = pl.tracks.len();
+            pl.tracks.retain(|t| t.id != track_id);
+            if pl.tracks.len() != before {
+                let _ = self.save();
+            }
+        }
+    }
+
+    pub fn set_last_queue(&mut self, tracks: Vec<Track>, index: Option<usize>) {
+        self.data.last_queue = tracks
+            .into_iter()
+            .filter(|t| !t.id.starts_with("local_demo_"))
+            .take(50)
+            .collect();
+        self.data.last_queue_index = index.filter(|&i| i < self.data.last_queue.len());
     }
 
     pub fn delete_playlist(&mut self, playlist_id: &str) {
@@ -590,6 +620,29 @@ mod tests {
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].id, "b1");
         assert!(store.search_local("a").is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn queue_speed_and_playlist_remove_persist() {
+        let dir = std::env::temp_dir().join(format!("yr_persist_q_{}", Uuid::new_v4()));
+        let mut store = LibraryStore::load_or_default(&dir);
+        let pl = store.create_playlist("Gym");
+        let t1 = make_track("t1", "Track One", "Artist 1");
+        let t2 = make_track("t2", "Track Two", "Artist 2");
+        store.add_to_playlist(&pl.id, t1.clone());
+        store.add_to_playlist(&pl.id, t2.clone());
+        store.remove_from_playlist(&pl.id, "t1");
+        store.data.config.playback_speed = 1.25;
+        store.set_last_queue(vec![t1, t2], Some(1));
+        store.save().unwrap();
+
+        let reloaded = LibraryStore::load_or_default(&dir);
+        assert_eq!(reloaded.data.playlists[0].tracks.len(), 1);
+        assert_eq!(reloaded.data.playlists[0].tracks[0].id, "t2");
+        assert!((reloaded.data.config.playback_speed - 1.25).abs() < 0.001);
+        assert_eq!(reloaded.data.last_queue.len(), 2);
+        assert_eq!(reloaded.data.last_queue_index, Some(1));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

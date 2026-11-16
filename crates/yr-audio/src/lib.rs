@@ -1,7 +1,7 @@
 use futures_util::StreamExt;
-use rodio::{Decoder, OutputStream, OutputStreamHandle, Sink, Source};
+use rodio::{OutputStream, OutputStreamHandle, Sink, Source};
 use std::fs::{File, OpenOptions};
-use std::io::{self, BufReader, Read, Seek, SeekFrom, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Condvar, Mutex, OnceLock};
@@ -239,19 +239,15 @@ fn audio_thread_main(
                         continue;
                     };
 
-                    match File::open(&path)
-                        .map_err(|e| e.to_string())
-                        .and_then(|f| Decoder::new(BufReader::new(f)).map_err(|e| e.to_string()))
-                    {
+                    let ext_str = path.extension().and_then(|e| e.to_str()).map(str::to_owned);
+                    match File::open(&path).map_err(|e| e.to_string()).and_then(|f| {
+                        SymphoniaStreamDecoder::new(Box::new(f), ext_str.as_deref(), None)
+                    }) {
                         Ok(decoder) => {
-                            let ext = path
-                                .extension()
-                                .and_then(|e| e.to_str())
-                                .unwrap_or("audio")
-                                .to_ascii_uppercase();
-                            let rate_khz = decoder.sample_rate() as f64 / 1000.0;
-                            let codec_badge = format!("{ext} • {rate_khz:.1} kHz");
-                            let is_wav = ext == "WAV";
+                            let codec_badge = decoder.codec_label.clone();
+                            let is_wav = ext_str
+                                .as_deref()
+                                .is_some_and(|e| e.eq_ignore_ascii_case("wav"));
                             let dur = if is_wav {
                                 duration_hint
                                     .filter(|&d| d > 0)
@@ -326,7 +322,11 @@ fn audio_thread_main(
                     match open_progressive_stream(&runtime, &url, cache_file, cancel) {
                         Ok(reader) => {
                             let probed_flag = Arc::clone(&reader.probed);
-                            match SymphoniaStreamDecoder::new(Box::new(reader), Some(probed_flag)) {
+                            match SymphoniaStreamDecoder::new(
+                                Box::new(reader),
+                                Some("m4a"),
+                                Some(probed_flag),
+                            ) {
                             Ok(decoder) => {
                                 let dur = decoder
                                     .total_duration()
@@ -603,10 +603,14 @@ struct SymphoniaStreamDecoder {
 }
 
 impl SymphoniaStreamDecoder {
-    fn new(source: Box<dyn MediaSource>, probed_flag: Option<Arc<AtomicBool>>) -> Result<Self, String> {
+    fn new(
+        source: Box<dyn MediaSource>,
+        ext_hint: Option<&str>,
+        probed_flag: Option<Arc<AtomicBool>>,
+    ) -> Result<Self, String> {
         let mss = MediaSourceStream::new(source, Default::default());
         let mut hint = Hint::new();
-        hint.with_extension("m4a");
+        hint.with_extension(ext_hint.unwrap_or("m4a"));
         let probed = symphonia::default::get_probe()
             .format(
                 &hint,
@@ -649,12 +653,15 @@ impl SymphoniaStreamDecoder {
                 .unwrap_or_else(|| symphonia::core::audio::Channels::FRONT_LEFT | symphonia::core::audio::Channels::FRONT_RIGHT),
         );
         let codec_name = match codec_params.codec {
-            symphonia::core::codecs::CODEC_TYPE_AAC => "AAC",
-            symphonia::core::codecs::CODEC_TYPE_OPUS => "OPUS",
-            symphonia::core::codecs::CODEC_TYPE_VORBIS => "VORBIS",
-            symphonia::core::codecs::CODEC_TYPE_MP3 => "MP3",
-            symphonia::core::codecs::CODEC_TYPE_FLAC => "FLAC",
-            _ => "AUDIO",
+            symphonia::core::codecs::CODEC_TYPE_AAC => "AAC".to_string(),
+            symphonia::core::codecs::CODEC_TYPE_OPUS => "OPUS".to_string(),
+            symphonia::core::codecs::CODEC_TYPE_VORBIS => "VORBIS".to_string(),
+            symphonia::core::codecs::CODEC_TYPE_MP3 => "MP3".to_string(),
+            symphonia::core::codecs::CODEC_TYPE_FLAC => "FLAC".to_string(),
+            _ => ext_hint
+                .filter(|s| !s.is_empty())
+                .unwrap_or("AUDIO")
+                .to_ascii_uppercase(),
         };
         let khz = spec.rate as f64 / 1000.0;
         let codec_label = format!("{codec_name} • {khz:.1} kHz");

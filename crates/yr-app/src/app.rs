@@ -120,6 +120,7 @@ pub struct YrApp {
 
     active_tab: NavTab,
     library_filter: LibraryFilter,
+    library_search: String,
     show_new_playlist_dialog: bool,
     search_query: String,
     search_filter: SearchFilter,
@@ -316,6 +317,7 @@ impl YrApp {
             event_rx,
             active_tab: NavTab::Home,
             library_filter: LibraryFilter::All,
+            library_search: String::new(),
             show_new_playlist_dialog: false,
             search_query: String::new(),
             search_filter: SearchFilter::Songs,
@@ -600,6 +602,21 @@ impl YrApp {
         });
 
         app.hydrate_cached_feeds();
+        if (app.store.data.config.playback_speed - 1.0).abs() > 0.02 {
+            app.audio.set_speed(app.store.data.config.playback_speed);
+        }
+        if !app.store.data.last_queue.is_empty() {
+            let idx = app
+                .store
+                .data
+                .last_queue_index
+                .unwrap_or(0)
+                .min(app.store.data.last_queue.len().saturating_sub(1));
+            app.queue
+                .lock()
+                .unwrap()
+                .set_queue(app.store.data.last_queue.clone(), idx);
+        }
         app.refresh_home(&cc.egui_ctx);
         app.refresh_downloads(&cc.egui_ctx);
         app
@@ -929,6 +946,7 @@ impl YrApp {
             return;
         };
         self.store.record_play(track.clone());
+        self.sync_last_queue_snapshot();
         self.seeking_secs = None;
         self.audio.stop();
         self.lyrics_data = None;
@@ -1641,11 +1659,22 @@ impl eframe::App for YrApp {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.sync_last_queue_snapshot();
         let _ = self.store.save();
     }
 }
 
 impl YrApp {
+    fn sync_last_queue_snapshot(&mut self) {
+        let (tracks, idx) = {
+            let q = self.queue.lock().unwrap();
+            (q.tracks().to_vec(), q.current_index())
+        };
+        if !tracks.is_empty() {
+            self.store.set_last_queue(tracks, idx);
+        }
+    }
+
     fn refresh_cache_stats(&mut self) {
         self.stream_cache_bytes = dir_size_bytes(&self.data_dir.join("stream_cache"));
     }
@@ -3995,6 +4024,40 @@ impl YrApp {
                 });
         }
 
+        ui.add_space(6.0);
+        egui::Frame::new()
+            .fill(BG_SURFACE)
+            .corner_radius(CornerRadius::same(18))
+            .inner_margin(egui::Margin::symmetric(12, 4))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    let input_w = (ui.available_width() - 36.0).max(120.0);
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.library_search)
+                            .hint_text("Filtrar tu biblioteca...")
+                            .frame(false)
+                            .desired_width(input_w),
+                    );
+                    if !self.library_search.is_empty()
+                        && icons::icon_button(
+                            ui,
+                            icons::Icon::Close,
+                            24.0,
+                            12.0,
+                            Color32::TRANSPARENT,
+                            TEXT_SECONDARY,
+                            12.0,
+                        )
+                        .clicked()
+                    {
+                        self.library_search.clear();
+                    }
+                });
+            });
+
+        let lib_q = self.library_search.trim().to_lowercase();
+        let lib_matches = |text: &str| lib_q.is_empty() || text.to_lowercase().contains(&lib_q);
+
         ui.add_space(8.0);
         if self.library_filter == LibraryFilter::Downloads {
             self.render_downloads(ui, ctx);
@@ -4052,7 +4115,14 @@ impl YrApp {
                             });
                         });
 
-                    let liked = self.store.data.liked_tracks.clone();
+                    let liked: Vec<Track> = self
+                        .store
+                        .data
+                        .liked_tracks
+                        .iter()
+                        .filter(|t| lib_matches(&t.title) || lib_matches(&t.artist))
+                        .cloned()
+                        .collect();
                     if !liked.is_empty() && matches!(self.library_filter, LibraryFilter::All | LibraryFilter::Songs) {
                         ui.add_space(6.0);
                         for (idx, track) in liked.iter().enumerate() {
@@ -4062,11 +4132,19 @@ impl YrApp {
                 }
 
                 if matches!(self.library_filter, LibraryFilter::All | LibraryFilter::Albums) && !self.home_feed.new_albums.is_empty() {
-                    ui.add_space(10.0);
-                    ui.label(RichText::new("Álbumes").size(16.0).strong());
-                    let albums = self.home_feed.new_albums.clone();
-                    for a in &albums {
-                        self.render_album_row(ui, ctx, a);
+                    let albums: Vec<_> = self
+                        .home_feed
+                        .new_albums
+                        .iter()
+                        .filter(|a| lib_matches(&a.title) || lib_matches(&a.artist))
+                        .cloned()
+                        .collect();
+                    if !albums.is_empty() {
+                        ui.add_space(10.0);
+                        ui.label(RichText::new("Álbumes").size(16.0).strong());
+                        for a in &albums {
+                            self.render_album_row(ui, ctx, a);
+                        }
                     }
                 }
 
@@ -4136,7 +4214,19 @@ impl YrApp {
                     if !self.store.data.playlists.is_empty() {
                         ui.add_space(10.0);
                         ui.label(RichText::new("Tus playlists").size(16.0).strong());
-                        let pls = self.store.data.playlists.clone();
+                        let pls: Vec<_> = self
+                            .store
+                            .data
+                            .playlists
+                            .iter()
+                            .filter(|p| {
+                                lib_matches(&p.name)
+                                    || p.tracks
+                                        .iter()
+                                        .any(|t| lib_matches(&t.title) || lib_matches(&t.artist))
+                            })
+                            .cloned()
+                            .collect();
                         for pl in pls {
                             ui.horizontal(|ui| {
                                 egui::CollapsingHeader::new(format!(
@@ -4147,14 +4237,42 @@ impl YrApp {
                                 .id_salt(&pl.id)
                                 .show(ui, |ui| {
                                     for (idx, track) in pl.tracks.iter().enumerate() {
-                                        self.render_track_row(
-                                            ui,
-                                            ctx,
-                                            track,
-                                            &pl.tracks,
-                                            idx,
-                                            false,
-                                        );
+                                        if !lib_matches(&pl.name)
+                                            && !lib_matches(&track.title)
+                                            && !lib_matches(&track.artist)
+                                        {
+                                            continue;
+                                        }
+                                        ui.horizontal(|ui| {
+                                            let row_w = (ui.available_width() - 32.0).max(160.0);
+                                            ui.allocate_ui(Vec2::new(row_w, 58.0), |ui| {
+                                                self.render_track_row(
+                                                    ui,
+                                                    ctx,
+                                                    track,
+                                                    &pl.tracks,
+                                                    idx,
+                                                    false,
+                                                );
+                                            });
+                                            if icons::icon_button(
+                                                ui,
+                                                icons::Icon::Close,
+                                                26.0,
+                                                12.0,
+                                                Color32::TRANSPARENT,
+                                                TEXT_SECONDARY,
+                                                12.0,
+                                            )
+                                            .clicked()
+                                            {
+                                                self.store.remove_from_playlist(&pl.id, &track.id);
+                                                self.set_banner(format!(
+                                                    "Quitada de {}",
+                                                    pl.name
+                                                ));
+                                            }
+                                        });
                                     }
                                 });
                                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -5755,6 +5873,8 @@ impl YrApp {
                                         .unwrap_or(1);
                                     let next = presets[(cur_idx + 1) % presets.len()];
                                     self.audio.set_speed(next);
+                                    self.store.data.config.playback_speed = next;
+                                    let _ = self.store.save();
                                     self.set_banner(format!("Velocidad: {next}x"));
                                 }
                             });
