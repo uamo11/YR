@@ -319,8 +319,11 @@ public class YrPlaybackService extends Service {
         cm.flush();
         String cMusic = cm.getCookie("https://music.youtube.com");
         String cMain = cm.getCookie("https://www.youtube.com");
+        String cYt = cm.getCookie("https://youtube.com");
+        String cAcc = cm.getCookie("https://accounts.google.com");
+        String cGoogle = cm.getCookie("https://google.com");
         java.util.LinkedHashMap<String, String> map = new java.util.LinkedHashMap<>();
-        for (String src : new String[]{cMain, cMusic}) {
+        for (String src : new String[]{cMain, cYt, cAcc, cGoogle, cMusic}) {
             if (src == null || src.isEmpty()) continue;
             for (String part : src.split(";")) {
                 int eq = part.indexOf('=');

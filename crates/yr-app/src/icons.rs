@@ -165,17 +165,22 @@ pub fn draw_icon(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32
             painter.line_segment([pt(-0.12, 0.34), pt(0.46, -0.30)], stroke);
         }
         Icon::Radio => {
-            painter.circle_filled(c, s * 0.16, color);
-            for r in [0.38_f32, 0.62_f32] {
-                let mut left_arc = Vec::new();
-                let mut right_arc = Vec::new();
-                for i in -3..=3 {
-                    let a = (i as f32) * 0.22;
-                    left_arc.push(pt(-r * a.cos(), r * a.sin()));
-                    right_arc.push(pt(r * a.cos(), r * a.sin()));
-                }
-                painter.add(egui::Shape::line(left_arc, stroke));
-                painter.add(egui::Shape::line(right_arc, stroke));
+            painter.circle_filled(c, s * 0.14, color);
+            for r in [0.32_f32, 0.54_f32] {
+                let arc_l: Vec<Pos2> = (-4..=4)
+                    .map(|i| {
+                        let a = std::f32::consts::PI + (i as f32 / 4.0) * 0.85;
+                        pt(a.cos() * r, a.sin() * r)
+                    })
+                    .collect();
+                painter.add(egui::Shape::line(arc_l, stroke));
+                let arc_r: Vec<Pos2> = (-4..=4)
+                    .map(|i| {
+                        let a = (i as f32 / 4.0) * 0.85;
+                        pt(a.cos() * r, a.sin() * r)
+                    })
+                    .collect();
+                painter.add(egui::Shape::line(arc_r, stroke));
             }
         }
         Icon::PlaylistAdd => {
@@ -244,11 +249,15 @@ pub fn draw_icon(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32
         }
         Icon::Moon => {
             let mut pts = Vec::new();
-            for i in 0..=10 {
-                let a = -0.9 + (i as f32) * 0.32;
-                pts.push(pt(-0.08 + a.cos() * 0.42, a.sin() * 0.42));
+            for i in 0..=16 {
+                let a = -1.8 + (i as f32 / 16.0) * 3.6;
+                pts.push(pt(0.08 + a.cos() * 0.42, a.sin() * 0.42));
             }
-            painter.add(egui::Shape::line(pts, stroke));
+            for i in (0..=16).rev() {
+                let a = -1.5 + (i as f32 / 16.0) * 3.0;
+                pts.push(pt(0.24 + a.cos() * 0.32, a.sin() * 0.34));
+            }
+            painter.add(egui::Shape::closed_line(pts, stroke));
         }
         Icon::Refresh => {
             let mut pts = Vec::new();
@@ -273,67 +282,74 @@ pub fn draw_icon(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32
             painter.circle_stroke(c, s * 0.15, stroke);
         }
         Icon::Artist => {
-            painter.circle_stroke(pt(-0.10, -0.18), s * 0.19, stroke);
-            painter.line_segment([pt(-0.40, 0.36), pt(-0.28, 0.12)], stroke);
-            painter.line_segment([pt(-0.28, 0.12), pt(0.08, 0.12)], stroke);
-            painter.line_segment([pt(0.08, 0.12), pt(0.18, 0.36)], stroke);
-            // small note on right
-            painter.line_segment([pt(0.32, -0.32), pt(0.32, 0.22)], stroke);
-            painter.line_segment([pt(0.32, -0.32), pt(0.50, -0.24)], stroke);
-            painter.circle_filled(pt(0.24, 0.24), s * 0.11, color);
+            painter.circle_stroke(pt(-0.12, -0.16), s * 0.20, stroke);
+            let shoulder: Vec<Pos2> = (-3..=3)
+                .map(|i| {
+                    let x = -0.12 + (i as f32) * 0.09;
+                    let y = 0.40 - (1.0 - ((x + 0.12) / 0.28).powi(2)).max(0.0).sqrt() * 0.18;
+                    pt(x, y)
+                })
+                .collect();
+            painter.add(egui::Shape::line(shoulder, stroke));
+            painter.circle_filled(pt(0.32, 0.26), s * 0.10, color);
+            painter.line_segment([pt(0.40, 0.26), pt(0.40, -0.12)], stroke);
+            painter.line_segment([pt(0.40, -0.12), pt(0.52, -0.04)], stroke);
         }
         Icon::Pin => {
-            painter.line_segment([pt(-0.22, -0.38), pt(0.36, -0.38)], stroke);
-            painter.line_segment([pt(-0.12, -0.38), pt(-0.18, -0.02)], stroke);
-            painter.line_segment([pt(0.26, -0.38), pt(0.20, -0.02)], stroke);
-            painter.line_segment([pt(-0.32, 0.02), pt(0.36, 0.02)], stroke);
-            painter.line_segment([pt(0.02, 0.02), pt(0.02, 0.48)], stroke);
+            let head = vec![pt(-0.26, -0.42), pt(0.26, -0.42)];
+            painter.line_segment([head[0], head[1]], stroke);
+            let body = vec![
+                pt(-0.16, -0.42),
+                pt(-0.22, -0.06),
+                pt(0.22, -0.06),
+                pt(0.16, -0.42),
+            ];
+            painter.add(egui::Shape::closed_line(body, stroke));
+            painter.line_segment([pt(-0.30, -0.06), pt(0.30, -0.06)], stroke);
+            painter.line_segment([pt(0.0, -0.06), pt(0.0, 0.44)], stroke);
         }
         Icon::ThumbUp => {
+            let cuff = Rect::from_min_max(pt(-0.46, -0.02), pt(-0.28, 0.44));
+            painter.rect_stroke(cuff, 1.0, stroke, egui::StrokeKind::Middle);
             let pts = vec![
-                pt(-0.20, 0.34),
-                pt(0.30, 0.34),
-                pt(0.44, -0.08),
-                pt(0.10, -0.08),
-                pt(0.16, -0.40),
-                pt(0.0, -0.44),
-                pt(-0.20, -0.06),
+                pt(-0.24, 0.42),
+                pt(0.26, 0.42),
+                pt(0.42, 0.08),
+                pt(0.38, -0.08),
+                pt(0.08, -0.08),
+                pt(0.14, -0.38),
+                pt(0.02, -0.44),
+                pt(-0.16, -0.16),
+                pt(-0.24, -0.02),
             ];
             painter.add(egui::Shape::closed_line(pts, stroke));
-            painter.rect_stroke(
-                Rect::from_min_max(pt(-0.44, -0.06), pt(-0.22, 0.34)),
-                1.0,
-                stroke,
-                egui::StrokeKind::Middle,
-            );
         }
         Icon::ThumbDown => {
+            let cuff = Rect::from_min_max(pt(-0.46, -0.44), pt(-0.28, 0.02));
+            painter.rect_stroke(cuff, 1.0, stroke, egui::StrokeKind::Middle);
             let pts = vec![
-                pt(-0.20, -0.34),
-                pt(0.30, -0.34),
-                pt(0.44, 0.08),
-                pt(0.10, 0.08),
-                pt(0.16, 0.40),
-                pt(0.0, 0.44),
-                pt(-0.20, 0.06),
+                pt(-0.24, -0.42),
+                pt(0.26, -0.42),
+                pt(0.42, -0.08),
+                pt(0.38, 0.08),
+                pt(0.08, 0.08),
+                pt(0.14, 0.38),
+                pt(0.02, 0.44),
+                pt(-0.16, 0.16),
+                pt(-0.24, 0.02),
             ];
             painter.add(egui::Shape::closed_line(pts, stroke));
-            painter.rect_stroke(
-                Rect::from_min_max(pt(-0.44, -0.34), pt(-0.22, 0.06)),
-                1.0,
-                stroke,
-                egui::StrokeKind::Middle,
-            );
         }
         Icon::Lyrics => {
             for dx in [-0.22_f32, 0.16_f32] {
-                painter.rect_stroke(
-                    Rect::from_center_size(pt(dx, -0.06), Vec2::splat(s * 0.24)),
-                    1.0,
-                    stroke,
-                    egui::StrokeKind::Middle,
-                );
-                painter.line_segment([pt(dx + 0.06, 0.08), pt(dx - 0.04, 0.30)], stroke);
+                let center_quote = pt(dx, -0.06);
+                painter.circle_filled(center_quote, s * 0.16, color);
+                let tail = vec![
+                    pt(dx - 0.10, -0.04),
+                    pt(dx - 0.14, 0.24),
+                    pt(dx - 0.02, 0.08),
+                ];
+                painter.add(egui::Shape::convex_polygon(tail, color, Stroke::NONE));
             }
         }
         Icon::QueueNext => {
@@ -421,10 +437,11 @@ pub fn draw_icon(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32
             painter.line_segment([back[1], back[2]], stroke);
         }
         Icon::Equalizer => {
-            // 3 vertical slider tracks with knobs (equalizer faders)
-            for &(x_rel, knob_y) in &[(-0.30, -0.10), (0.0, 0.20), (0.30, -0.25)] {
+            // 3 vertical slider tracks with rectangular fader knobs
+            for &(x_rel, knob_y) in &[(-0.32, -0.12), (0.0, 0.18), (0.32, -0.22)] {
                 painter.line_segment([pt(x_rel, -0.42), pt(x_rel, 0.42)], stroke);
-                painter.circle_filled(pt(x_rel, knob_y), s * 0.12, color);
+                let knob_rect = Rect::from_center_size(pt(x_rel, knob_y), Vec2::new(s * 0.32, s * 0.18));
+                painter.rect_filled(knob_rect, 2.0, color);
             }
         }
         Icon::Headphones => {

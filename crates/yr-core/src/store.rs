@@ -1,5 +1,5 @@
 use crate::models::{
-    AudioQuality, HomeFeed, HomeShelf, HomeShelfCard, HomeShelfLayout, LocalPlaylist,
+    AudioQuality, GoogleAccountInfo, HomeFeed, HomeShelf, HomeShelfCard, HomeShelfLayout, LocalPlaylist,
     ShelfCardKind, Track,
 };
 use chrono::Utc;
@@ -128,6 +128,10 @@ pub struct LibraryData {
     pub last_queue: Vec<Track>,
     #[serde(default)]
     pub last_queue_index: Option<usize>,
+    #[serde(default)]
+    pub google_cookie: Option<String>,
+    #[serde(default)]
+    pub google_account: Option<GoogleAccountInfo>,
     pub config: AppConfig,
 }
 
@@ -232,6 +236,18 @@ impl LibraryStore {
 
     pub fn delete_playlist(&mut self, playlist_id: &str) {
         self.data.playlists.retain(|p| p.id != playlist_id);
+        let _ = self.save();
+    }
+
+    pub fn set_google_session(&mut self, cookie: Option<String>, account: Option<GoogleAccountInfo>) {
+        self.data.google_cookie = cookie;
+        self.data.google_account = account;
+        let _ = self.save();
+    }
+
+    pub fn clear_google_session(&mut self) {
+        self.data.google_cookie = None;
+        self.data.google_account = None;
         let _ = self.save();
     }
 

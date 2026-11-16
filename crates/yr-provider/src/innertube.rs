@@ -71,11 +71,10 @@ pub fn cookie_value<'a>(cookie: &'a str, name: &str) -> Option<&'a str> {
 }
 
 pub fn build_sapisidhash_header(cookie: &str, timestamp_secs: i64) -> Option<String> {
-    let mut parts = Vec::new();
     for (cookie_key, scheme) in [
         ("SAPISID", "SAPISIDHASH"),
-        ("__Secure-3PAPISID", "SAPISID3PHASH"),
-        ("__Secure-1PAPISID", "SAPISID1PHASH"),
+        ("__Secure-3PAPISID", "SAPISIDHASH"),
+        ("__Secure-1PAPISID", "SAPISIDHASH"),
     ] {
         if let Some(val) = cookie_value(cookie, cookie_key) {
             let mut hasher = Sha1::new();
@@ -85,14 +84,10 @@ pub fn build_sapisidhash_header(cookie: &str, timestamp_secs: i64) -> Option<Str
                 .iter()
                 .map(|b| format!("{b:02x}"))
                 .collect();
-            parts.push(format!("{scheme} {timestamp_secs}_{digest}"));
+            return Some(format!("{scheme} {timestamp_secs}_{digest}"));
         }
     }
-    if parts.is_empty() {
-        None
-    } else {
-        Some(parts.join(" "))
-    }
+    None
 }
 
 fn find_json_field<'a>(html: &'a str, key: &str) -> Option<String> {
@@ -200,6 +195,39 @@ async fn post_innertube(
     resp.json::<Value>().await.map_err(|e| e.to_string())
 }
 
+pub fn parse_account_info_from_value(val: &Value) -> Option<GoogleAccountInfo> {
+    let header_candidates = [
+        "/actions/0/openPopupAction/popup/multiPageMenuRenderer/header/activeAccountHeaderRenderer",
+        "/actions/0/openPopupAction/popup/activeAccountHeaderRenderer",
+        "/topbar/musicTopBarRenderer/activeAccountHeaderRenderer",
+        "/header/activeAccountHeaderRenderer",
+    ];
+    for path in header_candidates {
+        if let Some(header) = val.pointer(path) {
+            let name = runs_text(header.get("accountName"));
+            if !name.is_empty() {
+                let handle = non_empty(runs_text(header.get("channelHandle")));
+                let avatar_url = best_thumb(header.pointer("/accountPhoto/thumbnails"));
+                return Some(GoogleAccountInfo {
+                    name,
+                    handle,
+                    avatar_url,
+                });
+            }
+        }
+    }
+    if let Some(thumbs) = val.pointer("/topbar/musicTopBarRenderer/accountPhoto/thumbnails") {
+        if let Some(avatar_url) = best_thumb(Some(thumbs)) {
+            return Some(GoogleAccountInfo {
+                name: "Mi Cuenta".to_string(),
+                handle: None,
+                avatar_url: Some(avatar_url),
+            });
+        }
+    }
+    None
+}
+
 pub async fn fetch_account_info(
     http: &reqwest::Client,
     session: &GoogleSession,
@@ -215,22 +243,7 @@ pub async fn fetch_account_info(
         }
     });
     let val = post_innertube(http, "account/account_menu", body, Some(session)).await?;
-    let header = val
-        .pointer("/actions/0/openPopupAction/popup/multiPageMenuRenderer/header/activeAccountHeaderRenderer");
-    let Some(header) = header else {
-        return Ok(None);
-    };
-    let name = runs_text(header.get("accountName"));
-    if name.is_empty() {
-        return Ok(None);
-    }
-    let handle = non_empty(runs_text(header.get("channelHandle")));
-    let avatar_url = best_thumb(header.pointer("/accountPhoto/thumbnails"));
-    Ok(Some(GoogleAccountInfo {
-        name,
-        handle,
-        avatar_url,
-    }))
+    Ok(parse_account_info_from_value(&val))
 }
 
 pub async fn fetch_home_feed(
@@ -262,6 +275,11 @@ pub async fn fetch_home_feed(
     let mut feed = HomeFeed::default();
     feed.is_logged_in = session.map(|s| s.has_auth_cookies()).unwrap_or(false);
     feed.account = session.and_then(|s| s.account.clone());
+    if feed.account.is_none() {
+        if let Some(acc) = parse_account_info_from_value(&first) {
+            feed.account = Some(acc);
+        }
+    }
 
     let sec = first.pointer(
         "/contents/singleColumnBrowseResultsRenderer/tabs/0/tabRenderer/content/sectionListRenderer",
@@ -1323,8 +1341,11 @@ mod tests {
     fn sapisidhash_computes_deterministic_header() {
         let cookie = "PREF=f6=400; SAPISID=test_sapisid_123; __Secure-3PAPISID=test_3p_456; SID=abc";
         let hdr = build_sapisidhash_header(cookie, 1_700_000_000).expect("header");
-        assert!(hdr.contains("SAPISIDHASH 1700000000_"));
-        assert!(hdr.contains("SAPISID3PHASH 1700000000_"));
+        assert!(hdr.starts_with("SAPISIDHASH 1700000000_"));
+
+        let cookie_3p = "PREF=f6=400; __Secure-3PAPISID=test_3p_456; SID=abc";
+        let hdr_3p = build_sapisidhash_header(cookie_3p, 1_700_000_000).expect("header");
+        assert!(hdr_3p.starts_with("SAPISIDHASH 1700000000_"));
     }
 
     #[tokio::test]

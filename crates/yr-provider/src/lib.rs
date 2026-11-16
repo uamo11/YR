@@ -13,7 +13,7 @@ use thiserror::Error;
 use tokio::sync::Mutex;
 use yr_core::{
     AlbumDetail, AlbumSummary, ArtistDetail, ArtistSummary, AudioQuality, ExploreFeed,
-    GoogleDeviceAuth, HomeFeed, HomeShelf, HomeShelfCard, HomeShelfLayout, LyricsData, MoodGenre,
+    GoogleAccountInfo, GoogleDeviceAuth, HomeFeed, HomeShelf, HomeShelfCard, HomeShelfLayout, LyricsData, MoodGenre,
     PlaylistDetail, PlaylistSummary, SearchResults, ShelfCardKind, SponsorSegment, StreamInfo,
     Track,
 };
@@ -56,6 +56,9 @@ pub trait MusicProvider: Send + Sync {
     async fn poll_google_device_login(&self) -> Result<bool, ProviderError>;
     async fn login_with_cookie(&self, cookie: &str) -> Result<(), ProviderError>;
     async fn logout(&self) -> Result<(), ProviderError>;
+    async fn get_account_info(&self) -> Option<GoogleAccountInfo> {
+        None
+    }
 }
 
 /// YouTube Music provider backed by `rustypipe` + direct InnerTube WEB_REMIX.
@@ -764,6 +767,10 @@ impl MusicProvider for YtMusicProvider {
         let _ = self.client.user_auth_remove_cookie().await;
         let _ = self.client.user_auth_logout().await;
         Ok(())
+    }
+
+    async fn get_account_info(&self) -> Option<GoogleAccountInfo> {
+        self.google_session.lock().await.as_ref().and_then(|s| s.account.clone())
     }
 }
 
