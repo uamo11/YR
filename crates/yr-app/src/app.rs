@@ -1063,6 +1063,9 @@ impl YrApp {
                             self.store.personalize_home_feed(&mut feed);
                             self.home_feed = feed;
                             self.rebuild_samples_deck();
+                            if !self.explore_loaded_once {
+                                self.load_explore(ctx);
+                            }
                         }
                         Err(e) => {
                             if self.home_feed.shelves.is_empty()
@@ -4986,6 +4989,18 @@ impl YrApp {
                                 RichText::new("Sin recomendaciones relacionadas aún.")
                                     .color(Color32::from_white_alpha(175)),
                             );
+                            ui.add_space(10.0);
+                            if icons::icon_pill_button(
+                                ui,
+                                icons::Icon::Refresh,
+                                "Reintentar",
+                                Color32::from_white_alpha(24),
+                                Color32::WHITE,
+                            )
+                            .clicked()
+                            {
+                                self.load_related(track.id.clone(), ctx);
+                            }
                         } else {
                             let tracks = self.related_tracks.clone();
                             egui::ScrollArea::vertical()
@@ -5092,6 +5107,9 @@ impl YrApp {
                             self.open_album(album_id, ctx);
                         } else {
                             self.action_sheet_track = Some(track.clone());
+                            let q = self.queue.lock().unwrap();
+                            self.action_sheet_context =
+                                q.current_index().map(|idx| (q.tracks().to_vec(), idx));
                         }
                     }
                     ui.add_space(2.0);

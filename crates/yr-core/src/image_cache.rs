@@ -1,9 +1,9 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-pub const MAX_CACHED_IMAGES: usize = 64;
-pub const IDLE_SOFT_LIMIT: usize = 24;
-pub const IDLE_FORGET_AFTER: Duration = Duration::from_secs(6);
+pub const MAX_CACHED_IMAGES: usize = 36;
+pub const IDLE_SOFT_LIMIT: usize = 16;
+pub const IDLE_FORGET_AFTER: Duration = Duration::from_secs(4);
 pub const MIN_ACTIVE_AGE: Duration = Duration::from_secs(2);
 
 pub struct ImageLru {
@@ -179,9 +179,9 @@ mod tests {
         assert!(lru.advance_and_collect_evictions_at(t0).is_empty());
         assert_eq!(lru.len(), 80);
 
-        // After MIN_ACTIVE_AGE while 40..80 are re-touched, inactive 0..40 get trimmed down to MAX_CACHED_IMAGES.
+        // After MIN_ACTIVE_AGE while 50..80 (30 entries) are re-touched, inactive 0..50 get trimmed down to MAX_CACHED_IMAGES.
         let t1 = t0 + MIN_ACTIVE_AGE + Duration::from_millis(100);
-        for i in 40..80 {
+        for i in 50..80 {
             lru.touch_at(&format!("https://img/{i}"), t1);
         }
         let evicted = lru.advance_and_collect_evictions_at(t1);
