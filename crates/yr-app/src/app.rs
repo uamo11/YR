@@ -185,6 +185,7 @@ pub struct YrApp {
     status_banner: Option<(String, Instant)>,
     seeking_secs: Option<f64>,
     home_v_drag_id: Option<egui::Id>,
+    pull_refresh_px: f32,
 
     sample_tracks: Vec<Track>,
     sample_idx: usize,
@@ -376,6 +377,7 @@ impl YrApp {
             status_banner: None,
             seeking_secs: None,
             home_v_drag_id: None,
+            pull_refresh_px: 0.0,
             sample_tracks: Vec::new(),
             sample_idx: 0,
             sample_drag_y: 0.0,
@@ -1360,7 +1362,7 @@ impl YrApp {
             )
         });
         let poll_interval = if has_active_dl || self.active_tab == NavTab::Downloads {
-            Duration::from_millis(500)
+            Duration::from_millis(250)
         } else {
             Duration::from_secs(4)
         };
@@ -2673,11 +2675,79 @@ impl YrApp {
         cards
     }
 
+    fn handle_pull_to_refresh(
+        &mut self,
+        ui: &egui::Ui,
+        scroll_offset_y: f32,
+        viewport_rect: egui::Rect,
+        is_loading: bool,
+    ) -> bool {
+        if scroll_offset_y > 2.0 {
+            self.pull_refresh_px = 0.0;
+            return false;
+        }
+        let (down, in_view, delta) = ui.input(|i| {
+            (
+                i.pointer.any_down(),
+                i.pointer.press_origin().is_some_and(|p| viewport_rect.contains(p)),
+                i.pointer.delta(),
+            )
+        });
+        if down && in_view {
+            if delta.y > 0.0 && delta.y > delta.x.abs() * 0.75 {
+                self.pull_refresh_px = (self.pull_refresh_px + delta.y).min(120.0);
+                ui.ctx().request_repaint();
+            } else if delta.y < -1.0 {
+                self.pull_refresh_px = (self.pull_refresh_px + delta.y).max(0.0);
+                ui.ctx().request_repaint();
+            }
+            false
+        } else {
+            let triggered = self.pull_refresh_px >= 60.0 && !is_loading;
+            self.pull_refresh_px = 0.0;
+            triggered
+        }
+    }
+
+    fn render_pull_refresh_indicator(&self, ui: &mut egui::Ui, is_loading: bool) {
+        if self.pull_refresh_px <= 10.0 && !is_loading {
+            return;
+        }
+        ui.vertical_centered(|ui| {
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.spinner();
+                let label = if is_loading {
+                    "Actualizando canciones..."
+                } else if self.pull_refresh_px >= 60.0 {
+                    "Suelta para recargar..."
+                } else {
+                    "Desliza hacia abajo para recargar"
+                };
+                ui.label(
+                    RichText::new(label)
+                        .size(12.5)
+                        .color(if self.pull_refresh_px >= 60.0 || is_loading {
+                            ACCENT_RED
+                        } else {
+                            TEXT_SECONDARY
+                        }),
+                );
+            });
+            ui.add_space(4.0);
+        });
+    }
+
     fn render_home(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         let expected_v_drag = self.home_v_drag_id;
+        let is_loading = self.home_loading;
+        let pull_px = self.pull_refresh_px;
         let scroll_out = egui::ScrollArea::vertical()
             .id_salt("home_vertical_scroll")
             .show(ui, |ui| {
+                if pull_px > 10.0 || is_loading {
+                    self.render_pull_refresh_indicator(ui, is_loading);
+                }
                 // Mood / Genre Chips row (YT Music style)
             if !self.home_feed.moods.is_empty() {
                 let moods = self.home_feed.moods.clone();
@@ -2958,6 +3028,16 @@ impl YrApp {
             }
         });
         self.home_v_drag_id = Some(scroll_out.id.with("area"));
+        if self.handle_pull_to_refresh(
+            ui,
+            scroll_out.state.offset.y,
+            scroll_out.inner_rect,
+            self.home_loading,
+        ) {
+            self.refresh_home(ctx);
+            self.load_explore(ctx);
+            self.set_banner("Actualizando lista de canciones...");
+        }
     }
 
     /// Rebuilds the deduplicated vertical Samples discovery deck from loaded explore and home feeds.
@@ -4117,9 +4197,13 @@ impl YrApp {
             return;
         }
 
-        egui::ScrollArea::vertical()
+        let lib_loading = self.home_loading;
+        let lib_scroll = egui::ScrollArea::vertical()
             .id_salt("lib_scroll")
             .show(ui, |ui| {
+                if self.pull_refresh_px > 10.0 {
+                    self.render_pull_refresh_indicator(ui, lib_loading);
+                }
                 // Pinned "Música que te gustó" gradient card
                 if matches!(self.library_filter, LibraryFilter::All | LibraryFilter::Playlists | LibraryFilter::Songs) {
                     let liked_count = self.store.data.liked_tracks.len();
@@ -4432,6 +4516,16 @@ impl YrApp {
                     }
                 }
             });
+        if self.handle_pull_to_refresh(
+            ui,
+            lib_scroll.state.offset.y,
+            lib_scroll.inner_rect,
+            self.home_loading,
+        ) {
+            self.refresh_downloads(ctx);
+            self.refresh_home(ctx);
+            self.set_banner("Actualizando biblioteca...");
+        }
     }
 
     fn render_downloads(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {

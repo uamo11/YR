@@ -42,7 +42,7 @@ impl Default for AppConfig {
         Self {
             stream_quality: AudioQuality::High,
             download_quality: AudioQuality::High,
-            max_concurrent_downloads: 3,
+            max_concurrent_downloads: 4,
             volume: 0.85,
             playback_speed: 1.0,
             autoplay_radio: true,
