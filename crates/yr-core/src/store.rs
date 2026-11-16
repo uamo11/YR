@@ -1,6 +1,10 @@
-use crate::models::{AudioQuality, HomeShelfCard, LocalPlaylist, Track};
+use crate::models::{
+    AudioQuality, HomeFeed, HomeShelf, HomeShelfCard, HomeShelfLayout, LocalPlaylist,
+    ShelfCardKind, Track,
+};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
@@ -233,6 +237,205 @@ impl LibraryStore {
             true
         }
     }
+
+    pub fn has_taste_signals(&self) -> bool {
+        !self.data.liked_tracks.is_empty()
+            || !self.data.recent_tracks.is_empty()
+            || self.data.playlists.iter().any(|p| !p.tracks.is_empty())
+            || !self.data.search_history_items.is_empty()
+            || !self.data.search_history.is_empty()
+    }
+
+    /// Excludes explicitly disliked tracks and reranks candidates using local likes,
+    /// playlists, listening recency, and search queries with artist-diversity dampening.
+    pub fn rank_recommendations(&self, tracks: Vec<Track>) -> Vec<Track> {
+        let disliked: HashSet<&str> = self.data.disliked_ids.iter().map(String::as_str).collect();
+        let mut seen_ids = HashSet::new();
+        let filtered: Vec<Track> = tracks
+            .into_iter()
+            .filter(|t| !disliked.contains(t.id.as_str()) && seen_ids.insert(t.id.clone()))
+            .collect();
+
+        if filtered.len() <= 1 || !self.has_taste_signals() {
+            return filtered;
+        }
+
+        let mut artist_weights: HashMap<String, f32> = HashMap::new();
+        let mut token_weights: HashMap<String, f32> = HashMap::new();
+
+        let mut add_weight = |artist: &str, text: &str, a_w: f32, t_w: f32| {
+            let norm_artist = normalize_key(artist);
+            if !norm_artist.is_empty() && norm_artist != "youtube music" {
+                *artist_weights.entry(norm_artist).or_default() += a_w;
+            }
+            for tok in taste_tokens(text) {
+                *token_weights.entry(tok).or_default() += t_w;
+            }
+        };
+
+        for (idx, t) in self.data.liked_tracks.iter().take(40).enumerate() {
+            let decay = 1.0 / (1.0 + idx as f32 * 0.05);
+            add_weight(&t.artist, &t.title, 4.0 * decay, 1.4 * decay);
+        }
+        for pl in &self.data.playlists {
+            for t in pl.tracks.iter().take(30) {
+                add_weight(&t.artist, &t.title, 2.8, 1.0);
+            }
+        }
+        for (idx, t) in self.data.recent_tracks.iter().take(40).enumerate() {
+            let decay = 1.0 / (1.0 + idx as f32 * 0.14);
+            add_weight(&t.artist, &t.title, 2.4 * decay, 0.8 * decay);
+        }
+        for item in self.data.search_history_items.iter().take(15) {
+            for tok in taste_tokens(&item.query) {
+                *token_weights.entry(tok).or_default() += 1.5;
+            }
+        }
+        for q in self.data.search_history.iter().take(15) {
+            for tok in taste_tokens(q) {
+                *token_weights.entry(tok).or_default() += 1.2;
+            }
+        }
+
+        let n = filtered.len().max(1) as f32;
+        let mut scored: Vec<(usize, String, f32, Track)> = filtered
+            .into_iter()
+            .enumerate()
+            .map(|(orig_idx, track)| {
+                let norm_artist = normalize_key(&track.artist);
+                let artist_bonus = artist_weights.get(&norm_artist).copied().unwrap_or(0.0);
+                let tok_bonus: f32 = taste_tokens(&format!("{} {}", track.title, track.artist))
+                    .into_iter()
+                    .filter_map(|tok| token_weights.get(&tok).copied())
+                    .sum::<f32>()
+                    .min(4.0);
+                // Keep subtle baseline preference for upstream ranking so fresh discovery stays crisp.
+                let prior = (1.0 - (orig_idx as f32 / n)) * 1.2;
+                (orig_idx, norm_artist, prior + artist_bonus + tok_bonus, track)
+            })
+            .collect();
+
+        // Greedy selection applying per-artist dampening so no single artist dominates consecutive slots.
+        let mut out = Vec::with_capacity(scored.len());
+        let mut artist_counts: HashMap<String, usize> = HashMap::new();
+        while !scored.is_empty() {
+            let mut best_pos = 0usize;
+            let mut best_eff = f32::NEG_INFINITY;
+            for (pos, (orig_idx, norm_artist, raw_score, _)) in scored.iter().enumerate() {
+                let repeats = artist_counts.get(norm_artist).copied().unwrap_or(0) as f32;
+                let eff = *raw_score - repeats * 2.2 - (*orig_idx as f32 * 0.001);
+                if eff > best_eff {
+                    best_eff = eff;
+                    best_pos = pos;
+                }
+            }
+            let (_, norm_artist, _, track) = scored.remove(best_pos);
+            if !norm_artist.is_empty() {
+                *artist_counts.entry(norm_artist).or_default() += 1;
+            }
+            out.push(track);
+        }
+        out
+    }
+
+    /// Suppresses disliked items from the home feed and enriches recommendations using local taste.
+    pub fn personalize_home_feed(&self, feed: &mut HomeFeed) {
+        let disliked: HashSet<&str> = self.data.disliked_ids.iter().map(String::as_str).collect();
+        if !disliked.is_empty() {
+            feed.quick_picks.retain(|t| !disliked.contains(t.id.as_str()));
+            feed.recommended_tracks
+                .retain(|t| !disliked.contains(t.id.as_str()));
+            feed.listen_again.retain(|t| !disliked.contains(t.id.as_str()));
+            feed.speed_dial.retain(|c| match &c.kind {
+                ShelfCardKind::Track(t) => !disliked.contains(t.id.as_str()),
+                _ => true,
+            });
+            for shelf in &mut feed.shelves {
+                shelf.tracks.retain(|t| !disliked.contains(t.id.as_str()));
+                shelf.cards.retain(|c| match &c.kind {
+                    ShelfCardKind::Track(t) => !disliked.contains(t.id.as_str()),
+                    _ => true,
+                });
+            }
+        }
+
+        if !self.has_taste_signals() {
+            return;
+        }
+
+        feed.recommended_tracks =
+            self.rank_recommendations(std::mem::take(&mut feed.recommended_tracks));
+
+        // Gather broad discovery pool excluding disliked tracks to build a local affinity shelf when needed.
+        let mut pool = Vec::new();
+        pool.extend(feed.recommended_tracks.iter().cloned());
+        pool.extend(feed.quick_picks.iter().cloned());
+        for s in &feed.shelves {
+            pool.extend(s.tracks.iter().cloned());
+        }
+        pool.extend(
+            self.data
+                .liked_tracks
+                .iter()
+                .chain(self.data.recent_tracks.iter())
+                .filter(|t| !t.id.starts_with("local_demo_"))
+                .cloned(),
+        );
+        let personalized = self.rank_recommendations(pool);
+
+        let already_has_personal_shelf = feed.shelves.iter().any(|s| {
+            let l = s.title.to_lowercase();
+            l.contains("tus gustos") || l.contains("para ti")
+        });
+        if !already_has_personal_shelf && personalized.len() >= 4 {
+            let shelf_tracks: Vec<Track> = personalized.into_iter().take(16).collect();
+            let shelf_cards: Vec<HomeShelfCard> = shelf_tracks
+                .iter()
+                .map(|t| HomeShelfCard {
+                    title: t.title.clone(),
+                    subtitle: t.artist.clone(),
+                    thumbnail_url: t.thumbnail_url.clone(),
+                    kind: ShelfCardKind::Track(t.clone()),
+                })
+                .collect();
+            let insert_at = feed
+                .shelves
+                .iter()
+                .position(|s| s.layout == HomeShelfLayout::SpeedDialGrid)
+                .map(|p| p + 1)
+                .unwrap_or(1)
+                .min(feed.shelves.len());
+            feed.shelves.insert(
+                insert_at,
+                HomeShelf {
+                    title: "Basado en tus gustos".to_string(),
+                    eyebrow: Some("RECOMENDADO PARA TI".to_string()),
+                    layout: HomeShelfLayout::QuickPicks4Row,
+                    tracks: shelf_tracks,
+                    cards: shelf_cards,
+                },
+            );
+        }
+    }
+}
+
+fn normalize_key(s: &str) -> String {
+    s.trim()
+        .to_lowercase()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn taste_tokens(s: &str) -> Vec<String> {
+    const STOPWORDS: &[&str] = &[
+        "the", "and", "for", "with", "feat", "official", "audio", "video", "live", "remix",
+        "en", "vivo", "con", "los", "las", "del", "para", "por", "una",
+    ];
+    s.split(|c: char| !c.is_alphanumeric())
+        .map(|w| w.to_lowercase())
+        .filter(|w| w.len() >= 3 && !STOPWORDS.contains(&w.as_str()))
+        .collect()
 }
 
 #[cfg(test)]
@@ -260,6 +463,82 @@ mod tests {
         let reloaded = LibraryStore::load_or_default(&dir);
         assert!(reloaded.is_liked("abc"));
         assert_eq!(reloaded.data.recent_tracks.len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn make_track(id: &str, title: &str, artist: &str) -> Track {
+        Track {
+            id: id.into(),
+            title: title.into(),
+            artist: artist.into(),
+            artist_id: None,
+            album: None,
+            album_id: None,
+            duration_secs: Some(180),
+            thumbnail_url: None,
+            local_path: None,
+        }
+    }
+
+    #[test]
+    fn rank_recommendations_excludes_disliked_and_boosts_liked_artists() {
+        let dir = std::env::temp_dir().join(format!("yr_rank_test_{}", Uuid::new_v4()));
+        let mut store = LibraryStore::load_or_default(&dir);
+        store.toggle_like(make_track("like1", "Believer", "Imagine Dragons"));
+        store.toggle_dislike("bad1");
+
+        let ranked = store.rank_recommendations(vec![
+            make_track("bad1", "Terrible Song", "Imagine Dragons"),
+            make_track("other1", "Random Track", "Unknown Band"),
+            make_track("good1", "Thunder", "Imagine Dragons"),
+        ]);
+
+        assert_eq!(ranked.len(), 2);
+        assert!(ranked.iter().all(|t| t.id != "bad1"));
+        assert_eq!(ranked[0].id, "good1");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rank_recommendations_applies_artist_diversity_dampening() {
+        let dir = std::env::temp_dir().join(format!("yr_div_test_{}", Uuid::new_v4()));
+        let mut store = LibraryStore::load_or_default(&dir);
+        store.toggle_like(make_track("like_a", "Track A", "Artist A"));
+        store.record_play(make_track("play_b", "Track B", "Artist B"));
+
+        let ranked = store.rank_recommendations(vec![
+            make_track("a1", "One", "Artist A"),
+            make_track("a2", "Two", "Artist A"),
+            make_track("a3", "Three", "Artist A"),
+            make_track("b1", "Four", "Artist B"),
+        ]);
+
+        assert_eq!(ranked[0].artist, "Artist A");
+        // After the first Artist A pick, dampening lets Artist B appear before exhausting all Artist A items.
+        assert!(ranked[1].artist == "Artist B" || ranked[2].artist == "Artist B");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn personalize_home_feed_filters_dislikes_and_injects_taste_shelf() {
+        let dir = std::env::temp_dir().join(format!("yr_home_test_{}", Uuid::new_v4()));
+        let mut store = LibraryStore::load_or_default(&dir);
+        store.toggle_like(make_track("liked1", "Favorite Hit", "Fav Artist"));
+        store.toggle_dislike("hate1");
+
+        let mut feed = HomeFeed {
+            quick_picks: vec![
+                make_track("hate1", "Hated", "Other"),
+                make_track("q1", "Q1", "Other"),
+                make_track("q2", "Q2", "Fav Artist"),
+                make_track("q3", "Q3", "Someone"),
+            ],
+            ..Default::default()
+        };
+        store.personalize_home_feed(&mut feed);
+
+        assert!(feed.quick_picks.iter().all(|t| t.id != "hate1"));
+        assert!(feed.shelves.iter().any(|s| s.title == "Basado en tus gustos"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -1008,7 +1008,8 @@ impl YrApp {
                 AppEvent::HomeLoaded(res) => {
                     self.home_loading = false;
                     match res {
-                        Ok(feed) => {
+                        Ok(mut feed) => {
+                            self.store.personalize_home_feed(&mut feed);
                             self.home_feed = feed;
                             self.rebuild_samples_deck();
                         }
@@ -1072,30 +1073,35 @@ impl YrApp {
                     }
                 }
                 AppEvent::RadioLoaded(res) => match res {
-                    Ok(tracks) if !tracks.is_empty() => {
-                        {
-                            let mut q = self.queue.lock().unwrap();
-                            for t in &tracks {
-                                q.enqueue_or_enrich(t.clone());
+                    Ok(tracks) => {
+                        let tracks = self.store.rank_recommendations(tracks);
+                        if tracks.is_empty() {
+                            self.set_banner("No se encontraron canciones similares");
+                        } else {
+                            {
+                                let mut q = self.queue.lock().unwrap();
+                                for t in &tracks {
+                                    q.enqueue_or_enrich(t.clone());
+                                }
                             }
-                        }
-                        let mut existing: HashSet<String> =
-                            self.sample_tracks.iter().map(|t| t.id.clone()).collect();
-                        for t in tracks {
-                            if !t.id.starts_with("local_demo_") && existing.insert(t.id.clone()) {
-                                self.sample_tracks.push(t);
+                            let mut existing: HashSet<String> =
+                                self.sample_tracks.iter().map(|t| t.id.clone()).collect();
+                            for t in tracks {
+                                if !t.id.starts_with("local_demo_") && existing.insert(t.id.clone())
+                                {
+                                    self.sample_tracks.push(t);
+                                }
                             }
+                            self.set_banner("Radio añadida a la cola");
                         }
-                        self.set_banner("Radio añadida a la cola");
                     }
-                    Ok(_) => self.set_banner("No se encontraron canciones similares"),
                     Err(e) => self.set_banner(friendly_error_message("Error de radio", &e)),
                 },
                 AppEvent::RelatedLoaded { track_id, result } => {
                     if self.related_track_id.as_deref() == Some(&track_id) {
                         self.related_loading = false;
                         if let Ok(tracks) = result {
-                            self.related_tracks = tracks;
+                            self.related_tracks = self.store.rank_recommendations(tracks);
                         }
                     }
                 }
@@ -2113,8 +2119,33 @@ impl YrApp {
         let gap = 8.0_f32;
         let tile_size = ((avail - gap * 2.0 - 8.0) / 3.0).clamp(90.0, 140.0);
         let page_width = tile_size * 3.0 + gap * 2.0;
-        let sibling_tracks = shelf.tracks.clone();
-        let pages: Vec<&[HomeShelfCard]> = shelf.cards.chunks(9).collect();
+
+        let mut cards = shelf.cards.clone();
+        if cards.len() < 9 {
+            let mut seen_titles: HashSet<String> = cards
+                .iter()
+                .map(|c| c.title.trim().to_lowercase())
+                .collect();
+            for extra in self.synthesize_speed_dial_cards() {
+                if cards.len() >= 18 {
+                    break;
+                }
+                if seen_titles.insert(extra.title.trim().to_lowercase()) {
+                    cards.push(extra);
+                }
+            }
+        }
+        let mut sibling_tracks = shelf.tracks.clone();
+        let mut seen_track_ids: HashSet<String> =
+            sibling_tracks.iter().map(|t| t.id.clone()).collect();
+        for c in &cards {
+            if let ShelfCardKind::Track(t) = &c.kind {
+                if seen_track_ids.insert(t.id.clone()) {
+                    sibling_tracks.push(t.clone());
+                }
+            }
+        }
+        let pages: Vec<&[HomeShelfCard]> = cards.chunks(9).collect();
         let draw_page = |ui: &mut egui::Ui, page: &[HomeShelfCard], app: &mut Self| {
             ui.vertical(|ui| {
                 ui.set_width(page_width);
@@ -2211,12 +2242,13 @@ impl YrApp {
             });
         };
 
+        let mut active_page = 0usize;
         if pages.len() <= 1 {
             if let Some(page) = pages.first() {
                 draw_page(ui, page, self);
             }
         } else {
-            egui::ScrollArea::horizontal()
+            let hscroll = egui::ScrollArea::horizontal()
                 .id_salt(salt)
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
@@ -2226,18 +2258,26 @@ impl YrApp {
                         }
                     });
                 });
+            let step = (page_width + 12.0).max(1.0);
+            active_page = ((hscroll.state.offset.x / step).round() as usize)
+                .min(pages.len().saturating_sub(1));
         }
 
         if pages.len() > 1 {
             ui.add_space(4.0);
+            let dot_count = pages.len().min(4);
             ui.horizontal(|ui| {
-                ui.add_space((avail - 24.0) * 0.5);
-                for i in 0..pages.len().min(4) {
+                ui.add_space(((avail - dot_count as f32 * 14.0) * 0.5).max(0.0));
+                for i in 0..dot_count {
                     let (dot_r, _) = ui.allocate_exact_size(Vec2::splat(8.0), Sense::hover());
                     ui.painter().circle_filled(
                         dot_r.center(),
                         3.0,
-                        if i == 0 { Color32::WHITE } else { TEXT_SECONDARY },
+                        if i == active_page {
+                            Color32::WHITE
+                        } else {
+                            TEXT_SECONDARY
+                        },
                     );
                 }
             });
@@ -2650,9 +2690,12 @@ impl YrApp {
             deck.push(t.clone());
         }
         if !deck.is_empty() {
-            self.sample_tracks = deck;
-            if self.sample_idx >= self.sample_tracks.len() {
-                self.sample_idx = 0;
+            let ranked = self.store.rank_recommendations(deck);
+            if !ranked.is_empty() {
+                self.sample_tracks = ranked;
+                if self.sample_idx >= self.sample_tracks.len() {
+                    self.sample_idx = 0;
+                }
             }
         }
     }
