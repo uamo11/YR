@@ -1081,7 +1081,10 @@ impl YrApp {
                 AppEvent::ExploreLoaded(res) => {
                     self.explore_loading = false;
                     if let Ok(feed) = res {
-                        if !feed.trending_tracks.is_empty() || !feed.new_albums.is_empty() {
+                        if !feed.trending_tracks.is_empty()
+                            || !feed.new_albums.is_empty()
+                            || !feed.moods.is_empty()
+                        {
                             yr_core::models::save_json_cache(
                                 &self.data_dir.join("explore_cache.json"),
                                 &feed,
@@ -3516,6 +3519,90 @@ impl YrApp {
                         }
                     });
 
+                    let trending = if !self.explore_feed.trending_tracks.is_empty() {
+                        self.explore_feed.trending_tracks.clone()
+                    } else {
+                        self.home_feed.trending_tracks.clone()
+                    };
+                    if !trending.is_empty() {
+                        let ranked = self.store.rank_recommendations(trending);
+                        let top: Vec<Track> = ranked.into_iter().take(6).collect();
+                        self.render_shelf_header(
+                            ui,
+                            ctx,
+                            "Tendencias ahora",
+                            Some("EXPLORAR"),
+                            false,
+                            Some(&top),
+                        );
+                        ui.add_space(6.0);
+                        for (idx, t) in top.iter().enumerate() {
+                            self.render_track_row(ui, ctx, t, &top, idx, false);
+                            ui.add_space(4.0);
+                        }
+                    }
+
+                    let albums = if !self.explore_feed.new_albums.is_empty() {
+                        self.explore_feed.new_albums.clone()
+                    } else {
+                        self.home_feed.new_albums.clone()
+                    };
+                    if !albums.is_empty() {
+                        self.render_shelf_header(
+                            ui,
+                            ctx,
+                            "Nuevos álbumes y sencillos",
+                            None,
+                            false,
+                            None,
+                        );
+                        ui.add_space(6.0);
+                        egui::ScrollArea::horizontal()
+                            .id_salt("explore_albums_h")
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    ui.spacing_mut().item_spacing.x = 12.0;
+                                    for a in albums.iter().take(10) {
+                                        ui.vertical(|ui| {
+                                            ui.set_width(120.0);
+                                            let r = ui
+                                                .allocate_ui(Vec2::splat(120.0), |ui| {
+                                                    render_thumb(
+                                                        ui,
+                                                        a.thumbnail_url.as_deref(),
+                                                        120.0,
+                                                    );
+                                                })
+                                                .response
+                                                .interact(Sense::click());
+                                            if r.clicked() {
+                                                self.open_album(a.id.clone(), ctx);
+                                            }
+                                            ui.add(
+                                                egui::Label::new(
+                                                    RichText::new(&a.title)
+                                                        .size(13.0)
+                                                        .strong()
+                                                        .color(TEXT_PRIMARY),
+                                                )
+                                                .truncate()
+                                                .selectable(false),
+                                            );
+                                            ui.add(
+                                                egui::Label::new(
+                                                    RichText::new(&a.artist)
+                                                        .size(11.5)
+                                                        .color(TEXT_SECONDARY),
+                                                )
+                                                .truncate()
+                                                .selectable(false),
+                                            );
+                                        });
+                                    }
+                                });
+                            });
+                    }
+
                     return;
                 }
 
@@ -4642,7 +4729,7 @@ impl YrApp {
                                                 let row_start = ui.next_widget_position();
                                                 render_thumb(ui, t.thumbnail_url.as_deref(), 44.0);
                                                 ui.add_space(6.0);
-                                                let right_reserve = if is_curr { 56.0 } else { 88.0 };
+                                                let right_reserve = if is_curr { 66.0 } else { 98.0 };
                                                 let tw = (ui.available_width() - right_reserve - 6.0).max(70.0);
                                                 ui.allocate_ui(Vec2::new(tw, 48.0), |ui| {
                                                     ui.vertical(|ui| {
