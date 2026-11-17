@@ -2262,7 +2262,7 @@ impl YrApp {
                 && icons::icon_pill_button(
                     ui,
                     icons::Icon::Download,
-                    "Descargar todo",
+                    "Descargar",
                     BG_ELEVATED,
                     TEXT_PRIMARY,
                 )
@@ -2299,24 +2299,25 @@ impl YrApp {
             DetailView::None => false,
             DetailView::Album(album) => {
                 ui.horizontal(|ui| {
-                    if icons::icon_pill_button(
-                    ui,
-                    icons::Icon::ArrowBack,
-                    "Volver",
-                    BG_ELEVATED,
-                    TEXT_PRIMARY,
-                )
-                .clicked() {
+                    if icons::icon_button(
+                        ui,
+                        icons::Icon::ArrowBack,
+                        36.0,
+                        18.0,
+                        BG_ELEVATED,
+                        TEXT_PRIMARY,
+                        18.0,
+                    )
+                    .clicked()
+                    {
                         self.detail_view = DetailView::None;
                     }
-                    ui.heading(&album.summary.title);
-                });
-                ui.horizontal(|ui| {
-                    render_thumb(ui, album.summary.thumbnail_url.as_deref(), 64.0);
-                    ui.vertical(|ui| {
-                        ui.label(RichText::new(&album.summary.artist).color(TEXT_SECONDARY));
-                        self.render_collection_actions(ui, ctx, &album.tracks, true);
-                    });
+                    ui.add_space(6.0);
+                    ui.label(
+                        RichText::new("Álbum")
+                            .size(15.0)
+                            .color(TEXT_SECONDARY),
+                    );
                 });
                 ui.add_space(6.0);
                 let detail_viewport = ui.available_rect_before_wrap();
@@ -2325,6 +2326,69 @@ impl YrApp {
                     .vertical_scroll_offset(self.detail_scroller.offset_y)
                     .drag_to_scroll(false)
                     .show(ui, |ui| {
+                        ui.vertical_centered(|ui| {
+                            let (art_rect, _) =
+                                ui.allocate_exact_size(Vec2::splat(156.0), Sense::hover());
+                            ui.painter().rect_filled(
+                                art_rect,
+                                CornerRadius::same(12),
+                                BG_ELEVATED,
+                            );
+                            let note_rect = egui::Rect::from_center_size(
+                                art_rect.center(),
+                                Vec2::splat(52.0),
+                            );
+                            icons::draw_icon(
+                                ui.painter(),
+                                note_rect,
+                                icons::Icon::MusicNote,
+                                Color32::from_white_alpha(95),
+                            );
+                            if let Some(u) = album.summary.thumbnail_url.as_deref() {
+                                paint_progressive_image(
+                                    ui,
+                                    art_rect,
+                                    u,
+                                    544,
+                                    Vec2::splat(156.0),
+                                    CornerRadius::same(12),
+                                );
+                            }
+                            ui.add_space(10.0);
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(&album.summary.title)
+                                        .size(19.0)
+                                        .strong()
+                                        .color(TEXT_PRIMARY),
+                                )
+                                .wrap()
+                                .selectable(false),
+                            );
+                            ui.add_space(2.0);
+                            ui.label(
+                                RichText::new(&album.summary.artist)
+                                    .size(14.0)
+                                    .color(TEXT_SECONDARY),
+                            );
+                            let count = album.tracks.len();
+                            let total_secs: u64 =
+                                album.tracks.iter().filter_map(|t| t.duration_secs).sum();
+                            let count_txt = if count == 1 {
+                                "1 canción".to_string()
+                            } else {
+                                format!("{count} canciones")
+                            };
+                            let meta = if total_secs > 0 {
+                                format!("{count_txt} • {}", format_seconds(total_secs))
+                            } else {
+                                count_txt
+                            };
+                            ui.label(RichText::new(meta).size(12.0).color(TEXT_SECONDARY));
+                            ui.add_space(10.0);
+                            self.render_collection_actions(ui, ctx, &album.tracks, true);
+                        });
+                        ui.add_space(10.0);
                         for (idx, track) in album.tracks.iter().enumerate() {
                             self.render_track_row(ui, ctx, track, &album.tracks, idx, false);
                         }
@@ -2344,20 +2408,36 @@ impl YrApp {
             }
             DetailView::Playlist(pl) => {
                 ui.horizontal(|ui| {
-                    if icons::icon_pill_button(
-                    ui,
-                    icons::Icon::ArrowBack,
-                    "Volver",
-                    BG_ELEVATED,
-                    TEXT_PRIMARY,
-                )
-                .clicked() {
+                    if icons::icon_button(
+                        ui,
+                        icons::Icon::ArrowBack,
+                        36.0,
+                        18.0,
+                        BG_ELEVATED,
+                        TEXT_PRIMARY,
+                        18.0,
+                    )
+                    .clicked()
+                    {
                         self.detail_view = DetailView::None;
                     }
-                    ui.heading(&pl.summary.title);
+                    ui.add_space(6.0);
+                    ui.label(
+                        RichText::new("Playlist")
+                            .size(15.0)
+                            .color(TEXT_SECONDARY),
+                    );
                 });
-                self.render_collection_actions(ui, ctx, &pl.tracks, true);
                 ui.add_space(6.0);
+                ui.label(
+                    RichText::new(&pl.summary.title)
+                        .size(18.0)
+                        .strong()
+                        .color(TEXT_PRIMARY),
+                );
+                ui.add_space(6.0);
+                self.render_collection_actions(ui, ctx, &pl.tracks, true);
+                ui.add_space(8.0);
                 let detail_viewport = ui.available_rect_before_wrap();
                 self.detail_scroller.update(ui, detail_viewport, !self.detail_loading);
                 let detail_scroll = egui::ScrollArea::vertical()
@@ -7615,7 +7695,7 @@ impl YrApp {
                     ui.label(RichText::new("Ajusta los mixes de inicio según tu historial de reproducción, canciones favoritas y artistas seguidos.").size(12.0).color(TEXT_SECONDARY));
                 }
                 SettingsCategory::About => {
-                    ui.heading("YR Music v0.6.4");
+                    ui.heading("YR Music v0.6.5");
                     ui.label("Cliente nativo de música 100% en Rust para Android y escritorio.");
                     ui.add_space(6.0);
                     ui.label(RichText::new("Motor de audio Symphonia PCM de ultra-baja latencia con ecualizador paramétrico de 5 bandas en tiempo real, prefetch predictivo en disco y compatibilidad completa con YouTube Music.").size(12.0).color(TEXT_SECONDARY));
@@ -8533,6 +8613,7 @@ impl YrApp {
             .order(egui::Order::Foreground)
             .interactable(true)
             .show(ctx, |ui| {
+                ui.painter().rect_filled(screen, CornerRadius::ZERO, Color32::BLACK);
                 ui.set_width(screen.width());
                 ui.set_max_width(screen.width());
                 ui.set_height(screen.height());
@@ -8577,14 +8658,14 @@ impl YrApp {
                         ui.add_space(16.0);
 
                         // Profile Header Card (matching media_1794881820029_c543419e.jpg)
-                        let (card_rect, card_resp) = ui.allocate_exact_size(Vec2::new(inner_w, 64.0), Sense::click());
+                        let (card_rect, card_resp) = ui.allocate_exact_size(Vec2::new(inner_w, 76.0), Sense::click());
                         if ui.is_rect_visible(card_rect) {
                             if card_resp.hovered() {
                                 ui.painter().rect_filled(card_rect, CornerRadius::same(10), Color32::from_white_alpha(15));
                             }
-                            let avatar_sz = 44.0;
+                            let avatar_sz = 46.0;
                             let av_rect = Rect::from_min_size(
-                                Pos2::new(card_rect.left(), card_rect.center().y - avatar_sz * 0.5),
+                                Pos2::new(card_rect.left(), card_rect.top() + 4.0),
                                 Vec2::splat(avatar_sz),
                             );
                             let radius = CornerRadius::same((avatar_sz * 0.5) as u8);
@@ -8615,10 +8696,10 @@ impl YrApp {
                                 );
                             }
 
-                            let text_left = av_rect.right() + 10.0;
+                            let text_left = av_rect.right() + 12.0;
                             let chev_sz = 16.0;
                             let chev_rect = Rect::from_center_size(
-                                Pos2::new(card_rect.right() - 10.0, card_rect.top() + 14.0),
+                                Pos2::new(card_rect.right() - 8.0, card_rect.top() + 24.0),
                                 Vec2::splat(chev_sz),
                             );
                             icons::draw_icon(ui.painter(), chev_rect, icons::Icon::ChevronRight, TEXT_SECONDARY);
@@ -8627,24 +8708,24 @@ impl YrApp {
                                 Pos2::new(text_left, card_rect.top() + 14.0),
                                 Align2::LEFT_CENTER,
                                 &user_name,
-                                egui::FontId::proportional(16.0),
+                                egui::FontId::proportional(16.5),
                                 Color32::WHITE,
                             );
 
                             ui.painter().text(
-                                Pos2::new(text_left, card_rect.top() + 32.0),
+                                Pos2::new(text_left, card_rect.top() + 34.0),
                                 Align2::LEFT_CENTER,
                                 &user_handle,
-                                egui::FontId::proportional(12.5),
+                                egui::FontId::proportional(13.5),
                                 TEXT_SECONDARY,
                             );
 
                             ui.painter().text(
-                                Pos2::new(text_left, card_rect.top() + 48.0),
+                                Pos2::new(text_left, card_rect.top() + 62.0),
                                 Align2::LEFT_CENTER,
                                 "Administra tu Cuenta de Google",
-                                egui::FontId::proportional(12.0),
-                                Color32::from_rgb(96, 160, 255),
+                                egui::FontId::proportional(13.0),
+                                Color32::from_rgb(108, 168, 255),
                             );
                         }
 
@@ -8653,13 +8734,18 @@ impl YrApp {
                             self.show_google_login = true;
                         }
 
-                        ui.add_space(10.0);
-                        ui.separator();
+                        ui.add_space(12.0);
+                        let (_, div_rect) = ui.allocate_space(Vec2::new(inner_w, 1.0));
+                        ui.painter().hline(
+                            screen.x_range(),
+                            div_rect.center().y,
+                            Stroke::new(1.0_f32, Color32::from_white_alpha(28)),
+                        );
                         ui.add_space(6.0);
 
                         // Menu Rows
                         let menu_row = |ui: &mut egui::Ui, icon: icons::Icon, title: &str| -> egui::Response {
-                            let (rect, resp) = ui.allocate_exact_size(Vec2::new(inner_w, 42.0), Sense::click());
+                            let (rect, resp) = ui.allocate_exact_size(Vec2::new(inner_w, 46.0), Sense::click());
                             if ui.is_rect_visible(rect) {
                                 let bg = if resp.hovered() {
                                     Color32::from_white_alpha(18)
@@ -8721,10 +8807,15 @@ impl YrApp {
                         }
                         if menu_row(ui, icons::Icon::Help, "Ayuda y comentarios").clicked() {
                             self.show_account_modal = false;
-                            self.set_banner("YR Music v0.6.4 • Pure Rust");
+                            self.set_banner("YR Music v0.6.5 • Pure Rust");
                         }
 
-                        ui.add_space(14.0);
+                        #[cfg(target_os = "android")]
+                        let footer_reserve = 78.0;
+                        #[cfg(not(target_os = "android"))]
+                        let footer_reserve = 36.0;
+                        let rem_h = (screen.bottom() - ui.cursor().top() - footer_reserve).max(14.0);
+                        ui.add_space(rem_h);
                         ui.horizontal(|ui| {
                             ui.spacing_mut().item_spacing.x = 0.0;
                             let pad = (inner_w - 230.0).max(0.0) * 0.5;
