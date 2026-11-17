@@ -49,6 +49,17 @@ pub enum Icon {
     Equalizer,
     Headphones,
     Cast,
+    ChevronRight,
+    Channel,
+    Recap,
+    Badge,
+    SwitchAccount,
+    Help,
+    Video,
+    DataSaver,
+    Storage,
+    Bell,
+    Shield,
 }
 
 /// Renders a crisp vector icon centered inside `rect`.
@@ -495,6 +506,86 @@ pub fn draw_icon(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32
             for pair in arc2.windows(2) {
                 painter.line_segment([pair[0], pair[1]], stroke);
             }
+        }
+        Icon::ChevronRight => {
+            painter.line_segment([pt(-0.18, -0.42), pt(0.30, 0.0)], stroke);
+            painter.line_segment([pt(0.30, 0.0), pt(-0.18, 0.42)], stroke);
+        }
+        Icon::Channel => {
+            let card = Rect::from_center_size(c, Vec2::new(s * 1.5, s * 1.3));
+            painter.rect_stroke(card, 3.0, stroke, egui::StrokeKind::Outside);
+            painter.circle_filled(pt(0.0, -0.15), s * 0.22, color);
+            painter.line_segment([pt(-0.35, 0.35), pt(0.35, 0.35)], stroke);
+        }
+        Icon::Recap => {
+            let t1 = vec![pt(-0.04, 0.0), pt(0.36, -0.36), pt(0.36, 0.36)];
+            let t2 = vec![pt(-0.46, 0.0), pt(-0.06, -0.36), pt(-0.06, 0.36)];
+            painter.add(egui::Shape::convex_polygon(t1, color, Stroke::NONE));
+            painter.add(egui::Shape::convex_polygon(t2, color, Stroke::NONE));
+        }
+        Icon::Badge => {
+            painter.line_segment([pt(0.0, -0.48), pt(0.0, 0.48)], stroke);
+            painter.line_segment([pt(-0.48, 0.0), pt(0.48, 0.0)], stroke);
+            painter.line_segment([pt(-0.32, -0.32), pt(0.32, 0.32)], stroke);
+            painter.line_segment([pt(-0.32, 0.32), pt(0.32, -0.32)], stroke);
+        }
+        Icon::SwitchAccount => {
+            painter.circle_stroke(pt(-0.10, -0.10), s * 0.26, stroke);
+            painter.line_segment([pt(-0.42, 0.38), pt(0.20, 0.38)], stroke);
+            painter.line_segment([pt(0.25, -0.38), pt(0.48, -0.38)], stroke);
+            painter.line_segment([pt(0.38, -0.48), pt(0.48, -0.38)], stroke);
+            painter.line_segment([pt(0.38, -0.28), pt(0.48, -0.38)], stroke);
+        }
+        Icon::Help => {
+            painter.circle_stroke(c, s * 0.48, stroke);
+            painter.line_segment([pt(-0.12, -0.20), pt(0.0, -0.28)], stroke);
+            painter.line_segment([pt(0.0, -0.28), pt(0.14, -0.18)], stroke);
+            painter.line_segment([pt(0.14, -0.18), pt(0.0, 0.05)], stroke);
+            painter.circle_filled(pt(0.0, 0.24), stroke_w * 0.7, color);
+        }
+        Icon::Video => {
+            let screen = Rect::from_center_size(c, Vec2::new(s * 1.5, s * 1.05));
+            painter.rect_stroke(screen, 3.0, stroke, egui::StrokeKind::Outside);
+            let tri = vec![pt(-0.12, -0.20), pt(0.20, 0.0), pt(-0.12, 0.20)];
+            painter.add(egui::Shape::convex_polygon(tri, color, Stroke::NONE));
+        }
+        Icon::DataSaver => {
+            let batt = Rect::from_center_size(c, Vec2::new(s * 1.4, s * 0.85));
+            painter.rect_stroke(batt, 2.0, stroke, egui::StrokeKind::Outside);
+            painter.line_segment([pt(-0.40, 0.0), pt(0.10, 0.0)], stroke);
+        }
+        Icon::Storage => {
+            painter.rect_stroke(
+                Rect::from_center_size(pt(0.0, -0.24), Vec2::new(s * 1.4, s * 0.38)),
+                2.0,
+                stroke,
+                egui::StrokeKind::Outside,
+            );
+            painter.rect_stroke(
+                Rect::from_center_size(pt(0.0, 0.24), Vec2::new(s * 1.4, s * 0.38)),
+                2.0,
+                stroke,
+                egui::StrokeKind::Outside,
+            );
+        }
+        Icon::Bell => {
+            painter.line_segment([pt(-0.35, 0.24), pt(0.35, 0.24)], stroke);
+            painter.line_segment([pt(-0.25, 0.24), pt(-0.20, -0.14)], stroke);
+            painter.line_segment([pt(0.25, 0.24), pt(0.20, -0.14)], stroke);
+            painter.line_segment([pt(-0.20, -0.14), pt(0.0, -0.38)], stroke);
+            painter.line_segment([pt(0.20, -0.14), pt(0.0, -0.38)], stroke);
+            painter.circle_filled(pt(0.0, 0.38), stroke_w * 0.8, color);
+        }
+        Icon::Shield => {
+            let sh = vec![
+                pt(0.0, -0.45),
+                pt(0.38, -0.28),
+                pt(0.30, 0.15),
+                pt(0.0, 0.45),
+                pt(-0.30, 0.15),
+                pt(-0.38, -0.28),
+            ];
+            painter.add(egui::Shape::closed_line(sh, stroke));
         }
     }
 }

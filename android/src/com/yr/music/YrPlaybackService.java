@@ -371,6 +371,18 @@ public class YrPlaybackService extends Service {
         });
     }
 
+    public static void openVideo(final Context ctx, final String videoUrl) {
+        if (ctx == null || videoUrl == null) return;
+        new Handler(Looper.getMainLooper()).post(() -> {
+            try {
+                Intent intent = new Intent(Intent.ACTION_VIEW, Uri.parse(videoUrl));
+                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                ctx.startActivity(intent);
+            } catch (Throwable ignored) {
+            }
+        });
+    }
+
     public static void openGoogleLogin(final Context ctx) {
         Log.i("YR_LOGIN", "openGoogleLogin called");
         if (ctx == null) return;

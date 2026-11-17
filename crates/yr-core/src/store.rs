@@ -86,6 +86,30 @@ pub struct AppConfig {
     pub sponsorblock_enabled: bool,
     #[serde(default)]
     pub equalizer: EqualizerConfig,
+
+    // Ahorro de datos y batería
+    #[serde(default)]
+    pub wifi_only_streaming: bool,
+    #[serde(default = "default_true")]
+    pub mobile_data_saver: bool,
+    #[serde(default)]
+    pub battery_saver: bool,
+    #[serde(default)]
+    pub prefer_video_mode: bool,
+
+    // Descargas y almacenamiento
+    #[serde(default)]
+    pub smart_downloads: bool,
+    #[serde(default = "default_true")]
+    pub wifi_only_downloads: bool,
+
+    // Notificaciones y privacidad
+    #[serde(default = "default_true")]
+    pub notifications_enabled: bool,
+    #[serde(default)]
+    pub incognito_mode: bool,
+    #[serde(default = "default_true")]
+    pub personalized_recommendations: bool,
 }
 
 fn default_true() -> bool {
@@ -107,6 +131,15 @@ impl Default for AppConfig {
             autoplay_radio: true,
             sponsorblock_enabled: true,
             equalizer: EqualizerConfig::default(),
+            wifi_only_streaming: false,
+            mobile_data_saver: true,
+            battery_saver: false,
+            prefer_video_mode: false,
+            smart_downloads: false,
+            wifi_only_downloads: true,
+            notifications_enabled: true,
+            incognito_mode: false,
+            personalized_recommendations: true,
         }
     }
 }

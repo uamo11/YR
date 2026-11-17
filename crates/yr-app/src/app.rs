@@ -48,6 +48,36 @@ enum LibraryFilter {
     Artists,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SettingsCategory {
+    #[default]
+    Root,
+    General,
+    Playback,
+    DataSaver,
+    DownloadsStorage,
+    Notifications,
+    Privacy,
+    Recommendations,
+    About,
+}
+
+impl SettingsCategory {
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::Root => "Configuración",
+            Self::General => "General",
+            Self::Playback => "Reproducción",
+            Self::DataSaver => "Ahorro de datos",
+            Self::DownloadsStorage => "Descargas y almacenamiento",
+            Self::Notifications => "Notificaciones",
+            Self::Privacy => "Privacidad y datos",
+            Self::Recommendations => "Recomendaciones",
+            Self::About => "Acerca de YR Music",
+        }
+    }
+}
+
 #[derive(Clone)]
 enum DetailView {
     None,
@@ -147,7 +177,7 @@ impl SmoothTouchScroller {
                     self.vel_y = 0.0;
 
                     // If pulling down at top, let pull-to-refresh handle it without scrolling
-                    if !(self.offset_y <= 0.0 && delta.y > 0.0 && can_pull_refresh) {
+                    if !(self.offset_y <= 3.0 && delta.y > 0.0 && can_pull_refresh) {
                         self.offset_y = (self.offset_y - delta.y).clamp(0.0, self.max_offset_y);
                         ui.ctx().request_repaint();
                     }
@@ -247,6 +277,9 @@ pub struct YrApp {
     sponsor_skipped_idx: Option<usize>,
 
     show_settings: bool,
+    show_account_modal: bool,
+    settings_category: SettingsCategory,
+    is_video_mode: bool,
     show_google_login: bool,
     dismiss_google_banner: bool,
     google_device_auth: Option<GoogleDeviceAuth>,
@@ -272,6 +305,7 @@ pub struct YrApp {
     last_media_sync: Option<(String, bool, u64, Instant)>,
     status_banner: Option<(String, Instant)>,
     seeking_secs: Option<f64>,
+    last_autoplay_track_id: Option<String>,
     pull_refresh_px: f32,
 
     sample_tracks: Vec<Track>,
@@ -463,6 +497,9 @@ impl YrApp {
             sponsor_segments: Vec::new(),
             sponsor_skipped_idx: None,
             show_settings: false,
+            show_account_modal: false,
+            settings_category: SettingsCategory::Root,
+            is_video_mode: false,
             show_google_login: false,
             dismiss_google_banner: false,
             google_device_auth: None,
@@ -485,6 +522,7 @@ impl YrApp {
             last_media_sync: None,
             status_banner: None,
             seeking_secs: None,
+            last_autoplay_track_id: None,
             pull_refresh_px: 0.0,
             sample_tracks: Vec::new(),
             sample_idx: 0,
@@ -1061,22 +1099,28 @@ impl YrApp {
     }
 
     fn play_current_queue_track(&mut self, ctx: &egui::Context) {
-        let (track_opt, next_track_id) = {
+        let (track_opt, next_track_id, is_near_end) = {
             let q = self.queue.lock().unwrap();
             let curr = q.current_track().cloned();
             let ordered = q.ordered_tracks();
-            let next_id = curr.as_ref().and_then(|c| {
-                ordered
-                    .iter()
-                    .position(|(_, t)| t.id == c.id)
-                    .and_then(|p| ordered.get(p + 1))
-                    .map(|(_, t)| t.id.clone())
+            let curr_pos = curr.as_ref().and_then(|c| {
+                ordered.iter().position(|(_, t)| t.id == c.id)
             });
-            (curr, next_id)
+            let next_id = curr_pos
+                .and_then(|p| ordered.get(p + 1))
+                .map(|(_, t)| t.id.clone());
+            let near_end = curr_pos.map(|p| p + 2 >= ordered.len()).unwrap_or(true);
+            (curr, next_id, near_end)
         };
         let Some(track) = track_opt else {
             return;
         };
+        if self.store.data.config.autoplay_radio && is_near_end {
+            if self.last_autoplay_track_id.as_deref() != Some(&track.id) {
+                self.last_autoplay_track_id = Some(track.id.clone());
+                self.fetch_radio_internal(track.id.clone(), ctx);
+            }
+        }
         self.store.record_play(track.clone());
         self.sync_last_queue_snapshot();
         self.seeking_secs = None;
@@ -1749,6 +1793,7 @@ impl eframe::App for YrApp {
         self.render_sleep_timer_modal(ctx);
         self.render_equalizer_modal(ctx);
         self.render_playlist_picker_modal(ctx);
+        self.render_account_modal(ctx);
         self.render_google_login_modal(ctx);
         self.render_status_toast(ctx);
         crate::android_media::set_ui_at_root(self.is_at_root());
@@ -1808,6 +1853,7 @@ impl YrApp {
 
     fn is_at_root(&self) -> bool {
         !self.show_settings
+            && !self.show_account_modal
             && !self.now_playing_open
             && matches!(self.detail_view, DetailView::None)
             && self.active_tab == NavTab::Home
@@ -1825,7 +1871,9 @@ impl YrApp {
             || !self.search_results.artists.is_empty()
             || !self.search_results.playlists.is_empty();
 
-        if self.show_equalizer_modal {
+        if self.show_account_modal {
+            self.show_account_modal = false;
+        } else if self.show_equalizer_modal {
             self.show_equalizer_modal = false;
         } else if self.show_sleep_timer_sheet {
             self.show_sleep_timer_sheet = false;
@@ -1837,7 +1885,11 @@ impl YrApp {
         } else if self.show_new_playlist_dialog {
             self.show_new_playlist_dialog = false;
         } else if self.show_settings {
-            self.show_settings = false;
+            if self.settings_category != SettingsCategory::Root {
+                self.settings_category = SettingsCategory::Root;
+            } else {
+                self.show_settings = false;
+            }
         } else if self.now_playing_open {
             if self.show_queue || self.show_lyrics || self.show_related {
                 self.show_queue = false;
@@ -2001,7 +2053,7 @@ impl YrApp {
             }
         }
         if resp.clicked() {
-            self.show_google_login = true;
+            self.show_account_modal = true;
         }
     }
 
@@ -2907,7 +2959,7 @@ impl YrApp {
         viewport_rect: egui::Rect,
         is_loading: bool,
     ) -> bool {
-        if scroll_offset_y > 1.0 {
+        if scroll_offset_y > 4.0 {
             self.pull_refresh_px = 0.0;
             return false;
         }
@@ -2919,8 +2971,8 @@ impl YrApp {
             )
         });
         if down && in_view {
-            if delta.y > 0.0 && delta.y > delta.x.abs() * 0.75 {
-                self.pull_refresh_px = (self.pull_refresh_px + delta.y * 0.6).min(100.0);
+            if delta.y > 0.0 && delta.y >= delta.x.abs() * 0.5 {
+                self.pull_refresh_px = (self.pull_refresh_px + delta.y * 0.75).min(110.0);
                 ui.ctx().request_repaint();
             } else if delta.y < -1.0 {
                 self.pull_refresh_px = (self.pull_refresh_px + delta.y).max(0.0);
@@ -2928,7 +2980,7 @@ impl YrApp {
             }
             false
         } else {
-            let triggered = self.pull_refresh_px >= 55.0 && !is_loading;
+            let triggered = self.pull_refresh_px >= 38.0 && !is_loading;
             self.pull_refresh_px = 0.0;
             triggered
         }
@@ -2940,42 +2992,64 @@ impl YrApp {
         viewport_rect: egui::Rect,
         is_loading: bool,
     ) {
-        if self.pull_refresh_px <= 10.0 && !is_loading {
+        if self.pull_refresh_px <= 6.0 && !is_loading {
             return;
         }
-        let top_y = viewport_rect.top() + (self.pull_refresh_px * 0.45).clamp(8.0, 48.0);
+        let top_y = viewport_rect.top() + (self.pull_refresh_px * 0.55).clamp(10.0, 56.0);
         let center = Pos2::new(viewport_rect.center().x, top_y);
-        let badge_rect = Rect::from_center_size(center, Vec2::new(176.0, 32.0));
+        let badge_rect = Rect::from_center_size(center, Vec2::new(184.0, 36.0));
         let painter = ctx.layer_painter(egui::LayerId::new(
             egui::Order::Foreground,
             egui::Id::new("yr_pull_refresh_badge"),
         ));
-        painter.rect_filled(badge_rect, CornerRadius::same(16), Color32::from_rgb(28, 28, 32));
+        painter.rect_filled(badge_rect, CornerRadius::same(18), Color32::from_rgb(32, 32, 36));
         painter.rect_stroke(
             badge_rect,
-            CornerRadius::same(16),
-            Stroke::new(1.0_f32, Color32::from_rgb(55, 55, 60)),
+            CornerRadius::same(18),
+            Stroke::new(1.0_f32, Color32::from_rgb(60, 60, 68)),
             egui::StrokeKind::Outside,
         );
 
-        let label = if is_loading {
-            "Actualizando música..."
-        } else if self.pull_refresh_px >= 55.0 {
-            "Suelta para recargar"
+        let icon_center = Pos2::new(badge_rect.left() + 20.0, center.y);
+        let text_center = Pos2::new(badge_rect.left() + 104.0, center.y);
+
+        if is_loading {
+            let time = ctx.input(|i| i.time);
+            let angle = (time * 6.0) as f32;
+            let radius = 6.0;
+            for i in 0..4 {
+                let a = angle + i as f32 * std::f32::consts::FRAC_PI_2;
+                let pt = icon_center + Vec2::new(a.cos() * radius, a.sin() * radius);
+                let alpha = (60 + i * 50) as u8;
+                painter.circle_filled(pt, 1.8, Color32::from_rgba_unmultiplied(255, 255, 255, alpha));
+            }
+            painter.text(
+                text_center,
+                egui::Align2::CENTER_CENTER,
+                "Actualizando canciones...",
+                egui::FontId::proportional(12.5),
+                Color32::WHITE,
+            );
+        } else if self.pull_refresh_px >= 38.0 {
+            painter.circle_filled(icon_center, 5.0, ACCENT_RED);
+            painter.text(
+                text_center,
+                egui::Align2::CENTER_CENTER,
+                "Suelta para actualizar",
+                egui::FontId::proportional(12.5),
+                Color32::WHITE,
+            );
         } else {
-            "Desliza para recargar"
-        };
-        painter.text(
-            center,
-            egui::Align2::CENTER_CENTER,
-            label,
-            egui::FontId::proportional(12.0),
-            if self.pull_refresh_px >= 55.0 || is_loading {
-                Color32::WHITE
-            } else {
-                TEXT_SECONDARY
-            },
-        );
+            let frac = (self.pull_refresh_px / 38.0).clamp(0.0, 1.0);
+            painter.circle_filled(icon_center, 4.0 * frac, TEXT_SECONDARY);
+            painter.text(
+                text_center,
+                egui::Align2::CENTER_CENTER,
+                "Desliza para actualizar",
+                egui::FontId::proportional(12.5),
+                TEXT_SECONDARY,
+            );
+        }
     }
 
     fn render_home(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
@@ -5460,21 +5534,38 @@ impl YrApp {
                     .inner_margin(egui::Margin::symmetric(3, 2))
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
+                            let is_video = self.is_video_mode;
                             let (ar, a_resp) = ui.allocate_exact_size(Vec2::new(44.0, 26.0), Sense::click());
                             if ui.is_rect_visible(ar) {
-                                ui.painter().rect_filled(ar, CornerRadius::same(13), Color32::from_white_alpha(48));
-                                icons::draw_icon(ui.painter(), egui::Rect::from_center_size(ar.center(), Vec2::splat(15.0)), icons::Icon::Headphones, Color32::WHITE);
+                                if !is_video {
+                                    ui.painter().rect_filled(ar, CornerRadius::same(13), Color32::from_white_alpha(55));
+                                }
+                                icons::draw_icon(
+                                    ui.painter(),
+                                    egui::Rect::from_center_size(ar.center(), Vec2::splat(15.0)),
+                                    icons::Icon::Headphones,
+                                    if !is_video { Color32::WHITE } else { Color32::from_white_alpha(140) },
+                                );
                             }
                             if a_resp.clicked() {
-                                self.set_banner("Modo Audio (alta fidelidad)");
+                                self.is_video_mode = false;
+                                self.set_banner("Modo Canción (Solo audio • Ahorro de batería)");
                             }
                             let (vr, v_resp) = ui.allocate_exact_size(Vec2::new(44.0, 26.0), Sense::click());
                             if ui.is_rect_visible(vr) {
-                                icons::draw_icon(ui.painter(), egui::Rect::from_center_size(vr.center(), Vec2::splat(13.0)), icons::Icon::Play, Color32::from_white_alpha(150));
+                                if is_video {
+                                    ui.painter().rect_filled(vr, CornerRadius::same(13), ACCENT_RED);
+                                }
+                                icons::draw_icon(
+                                    ui.painter(),
+                                    egui::Rect::from_center_size(vr.center(), Vec2::splat(13.0)),
+                                    icons::Icon::Play,
+                                    if is_video { Color32::WHITE } else { Color32::from_white_alpha(140) },
+                                );
                             }
                             if v_resp.clicked() {
-                                let url = format!("https://music.youtube.com/watch?v={}", track.id);
-                                crate::android_media::share_text(&track.title, &url);
+                                self.is_video_mode = true;
+                                self.set_banner("Modo Video activado");
                             }
                         });
                     });
@@ -6076,6 +6167,86 @@ impl YrApp {
                                 });
                         }
                     }
+                } else if self.is_video_mode {
+                    // Widescreen Video Surface (16:9 YouTube Music style)
+                    ui.add_space(6.0);
+                    let video_w = (avail_w - 24.0).min(380.0);
+                    let video_h = (video_w * 9.0 / 16.0).clamp(140.0, 210.0);
+                    let video_size = Vec2::new(video_w, video_h);
+                    ui.vertical_centered(|ui| {
+                        let (video_rect, video_resp) = ui.allocate_exact_size(video_size, Sense::click());
+                        ui.painter().rect_filled(video_rect, CornerRadius::same(12), Color32::from_rgb(10, 10, 12));
+                        ui.painter().rect_stroke(video_rect, CornerRadius::same(12), Stroke::new(1.0_f32, Color32::from_white_alpha(32)), egui::StrokeKind::Outside);
+
+                        // High resolution video frame thumbnail
+                        if let Some(u) = resolved_cover.as_deref() {
+                            let video_uri = tracked_thumb_uri(u, 720);
+                            paint_ready_image(ui, video_rect, video_uri, video_size, CornerRadius::same(12));
+                        }
+
+                        // Play circle overlay
+                        let overlay_c = video_rect.center();
+                        ui.painter().circle_filled(overlay_c, 24.0, Color32::from_rgba_unmultiplied(0, 0, 0, 170));
+                        ui.painter().circle_stroke(overlay_c, 24.0, Stroke::new(1.5_f32, Color32::WHITE));
+                        icons::draw_icon(
+                            ui.painter(),
+                            Rect::from_center_size(overlay_c + Vec2::new(2.0, 0.0), Vec2::splat(18.0)),
+                            icons::Icon::Play,
+                            Color32::WHITE,
+                        );
+
+                        // Video Badge top right
+                        let badge_rect = Rect::from_min_size(
+                            Pos2::new(video_rect.right() - 86.0, video_rect.top() + 8.0),
+                            Vec2::new(76.0, 20.0),
+                        );
+                        ui.painter().rect_filled(badge_rect, CornerRadius::same(4), Color32::from_rgba_unmultiplied(0, 0, 0, 190));
+                        ui.painter().text(
+                            badge_rect.center(),
+                            Align2::CENTER_CENTER,
+                            "1080p HD",
+                            egui::FontId::proportional(11.0),
+                            Color32::WHITE,
+                        );
+
+                        let v_url = format!("https://www.youtube.com/watch?v={}", track.id);
+                        if video_resp.clicked() {
+                            crate::android_media::open_video(&v_url);
+                            ctx.open_url(egui::OpenUrl::new_tab(&v_url));
+                        }
+
+                        ui.add_space(8.0);
+                        ui.horizontal(|ui| {
+                            let pad = (video_w - 230.0).max(0.0) * 0.5;
+                            if pad > 0.0 {
+                                ui.add_space(pad);
+                            }
+                            if icons::icon_pill_button(
+                                ui,
+                                icons::Icon::Video,
+                                "Abrir Video",
+                                ACCENT_RED,
+                                Color32::WHITE,
+                            )
+                            .clicked()
+                            {
+                                crate::android_media::open_video(&v_url);
+                                ctx.open_url(egui::OpenUrl::new_tab(&v_url));
+                            }
+                            ui.add_space(6.0);
+                            if icons::icon_pill_button(
+                                ui,
+                                icons::Icon::Headphones,
+                                "Solo Audio",
+                                Color32::from_white_alpha(26),
+                                Color32::WHITE,
+                            )
+                            .clicked()
+                            {
+                                self.is_video_mode = false;
+                            }
+                        });
+                    });
                 } else {
                     // Main Cover Now Playing view
                     ui.add_space(4.0);
@@ -6799,196 +6970,338 @@ impl YrApp {
     }
 
     fn render_settings(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        let is_root = self.settings_category == SettingsCategory::Root;
+        let title = self.settings_category.title();
+
         ui.horizontal(|ui| {
-            ui.heading("Ajustes de YR");
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if ui.button("Cerrar").clicked() {
+            if icons::icon_button(
+                ui,
+                icons::Icon::ArrowBack,
+                36.0,
+                18.0,
+                Color32::TRANSPARENT,
+                Color32::WHITE,
+                18.0,
+            )
+            .clicked()
+            {
+                if is_root {
                     self.show_settings = false;
-                }
-            });
-        });
-
-        ui.add_space(10.0);
-        ui.label("Calidad de streaming:");
-        ui.horizontal_wrapped(|ui| {
-            for q in [
-                AudioQuality::Low,
-                AudioQuality::Medium,
-                AudioQuality::High,
-                AudioQuality::Best,
-            ] {
-                if ui
-                    .selectable_value(&mut self.store.data.config.stream_quality, q, q.label())
-                    .clicked()
-                {
-                    let _ = self.store.save();
+                } else {
+                    self.settings_category = SettingsCategory::Root;
                 }
             }
-        });
-
-        ui.add_space(10.0);
-        ui.label("Calidad de descargas:");
-        ui.horizontal_wrapped(|ui| {
-            for q in [
-                AudioQuality::Low,
-                AudioQuality::Medium,
-                AudioQuality::High,
-                AudioQuality::Best,
-            ] {
-                if ui
-                    .selectable_value(&mut self.store.data.config.download_quality, q, q.label())
-                    .clicked()
-                {
-                    let _ = self.store.save();
-                }
+            ui.add_space(6.0);
+            ui.label(RichText::new(title).size(19.0).strong().color(Color32::WHITE));
+            if !is_root {
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if ui.button("Cerrar").clicked() {
+                        self.show_settings = false;
+                        self.settings_category = SettingsCategory::Root;
+                    }
+                });
             }
         });
 
         ui.add_space(10.0);
-        ui.label("Volumen interno de reproducción:");
-        let mut vol_pct = (self.store.data.config.volume.clamp(0.0, 1.0) * 100.0).round() as u32;
-        ui.horizontal(|ui| {
-            let slider_resp = ui.add(egui::Slider::new(&mut vol_pct, 0..=100).suffix("%"));
-            if slider_resp.changed() {
-                let v = (vol_pct as f32 / 100.0).clamp(0.0, 1.0);
-                self.store.data.config.volume = v;
-                self.audio.set_volume(v);
-            }
-            if slider_resp.drag_stopped() || slider_resp.lost_focus() {
-                let _ = self.store.save();
-            }
-        });
 
-        ui.add_space(10.0);
-        let eq_active = self.store.data.config.equalizer.enabled;
-        let eq_preset = self.store.data.config.equalizer.preset_name.clone();
-        egui::Frame::new()
-            .fill(Color32::from_white_alpha(14))
-            .stroke(Stroke::new(0.8_f32, Color32::from_white_alpha(28)))
-            .corner_radius(CornerRadius::same(12))
-            .inner_margin(egui::Margin::symmetric(14, 10))
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    let (r, _) = ui.allocate_exact_size(Vec2::splat(20.0), Sense::hover());
+        if is_root {
+            // Categorized settings menu list (matches YouTube Music settings screen)
+            let cat_row = |ui: &mut egui::Ui, cat_title: &str, subtitle: &str| -> egui::Response {
+                let w = ui.available_width();
+                let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, 54.0), Sense::click());
+                if ui.is_rect_visible(rect) {
+                    let bg = if resp.hovered() {
+                        Color32::from_white_alpha(16)
+                    } else {
+                        Color32::TRANSPARENT
+                    };
+                    if bg != Color32::TRANSPARENT {
+                        ui.painter().rect_filled(rect, CornerRadius::same(8), bg);
+                    }
+                    ui.painter().text(
+                        Pos2::new(rect.left() + 8.0, rect.top() + 10.0),
+                        Align2::LEFT_TOP,
+                        cat_title,
+                        egui::FontId::proportional(15.5),
+                        Color32::WHITE,
+                    );
+                    ui.painter().text(
+                        Pos2::new(rect.left() + 8.0, rect.top() + 32.0),
+                        Align2::LEFT_TOP,
+                        subtitle,
+                        egui::FontId::proportional(12.0),
+                        TEXT_SECONDARY,
+                    );
                     icons::draw_icon(
                         ui.painter(),
-                        r,
-                        icons::Icon::Equalizer,
-                        if eq_active { ACCENT_RED } else { Color32::WHITE },
+                        Rect::from_center_size(
+                            Pos2::new(rect.right() - 16.0, rect.center().y),
+                            Vec2::splat(14.0),
+                        ),
+                        icons::Icon::ChevronRight,
+                        Color32::from_white_alpha(120),
                     );
-                    ui.vertical(|ui| {
-                        ui.label(RichText::new("Ecualizador & Bass Boost").strong());
-                        ui.label(
-                            RichText::new(if eq_active {
-                                format!("Activo • Preset: {}", eq_preset)
-                            } else {
-                                "Desactivado (bypass)".to_string()
-                            })
-                            .size(12.0)
-                            .color(TEXT_SECONDARY),
-                        );
-                    });
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if icons::icon_pill_button(
-                            ui,
-                            icons::Icon::Equalizer,
-                            "Ajustar",
-                            Color32::from_white_alpha(24),
-                            Color32::WHITE,
-                        )
-                        .clicked()
-                        {
-                            self.show_equalizer_modal = true;
+                }
+                resp
+            };
+
+            if cat_row(ui, "General", "Idioma, tema visual oscuro y volumen").clicked() {
+                self.settings_category = SettingsCategory::General;
+            }
+            if cat_row(ui, "Reproducción", "Calidad de audio, ecualizador, autoplay y SponsorBlock").clicked() {
+                self.settings_category = SettingsCategory::Playback;
+            }
+            if cat_row(ui, "Ahorro de datos", "Sistemas de ahorro de batería y datos móviles").clicked() {
+                self.settings_category = SettingsCategory::DataSaver;
+            }
+            if cat_row(ui, "Descargas y almacenamiento", "Auto-descarga, modo Wi-Fi y gestión de espacio").clicked() {
+                self.settings_category = SettingsCategory::DownloadsStorage;
+            }
+            if cat_row(ui, "Notificaciones", "Controles en barra de estado y alertas de lanzamientos").clicked() {
+                self.settings_category = SettingsCategory::Notifications;
+            }
+            if cat_row(ui, "Privacidad y datos", "Modo incógnito y borrado de historial").clicked() {
+                self.settings_category = SettingsCategory::Privacy;
+            }
+            if cat_row(ui, "Recomendaciones", "Personalización de feeds con cuenta Google").clicked() {
+                self.settings_category = SettingsCategory::Recommendations;
+            }
+            if cat_row(ui, "Acerca de YR Music", "Versión v0.5.0, motor 100% Rust, MIT").clicked() {
+                self.settings_category = SettingsCategory::About;
+            }
+        } else {
+            // Category detail page
+            match self.settings_category {
+                SettingsCategory::Root => {}
+                SettingsCategory::General => {
+                    ui.label("Idioma de la aplicación:");
+                    ui.label(RichText::new("Español (Latinoamérica)").color(TEXT_SECONDARY));
+                    ui.add_space(10.0);
+                    ui.label("Tema visual:");
+                    ui.label(RichText::new("Negro puro OLED (Ahorro de energía en pantallas AMOLED)").color(TEXT_SECONDARY));
+                    ui.add_space(10.0);
+                    ui.label("Volumen interno de reproducción:");
+                    let mut vol_pct = (self.store.data.config.volume.clamp(0.0, 1.0) * 100.0).round() as u32;
+                    let slider_resp = ui.add(egui::Slider::new(&mut vol_pct, 0..=100).suffix("%"));
+                    if slider_resp.changed() {
+                        let v = (vol_pct as f32 / 100.0).clamp(0.0, 1.0);
+                        self.store.data.config.volume = v;
+                        self.audio.set_volume(v);
+                    }
+                    if slider_resp.drag_stopped() || slider_resp.lost_focus() {
+                        let _ = self.store.save();
+                    }
+                }
+                SettingsCategory::Playback => {
+                    ui.label("Calidad de streaming de audio:");
+                    ui.horizontal_wrapped(|ui| {
+                        for q in [AudioQuality::Low, AudioQuality::Medium, AudioQuality::High, AudioQuality::Best] {
+                            if ui.selectable_value(&mut self.store.data.config.stream_quality, q, q.label()).clicked() {
+                                let _ = self.store.save();
+                            }
                         }
                     });
-                });
-            });
-
-        ui.add_space(12.0);
-        if ui
-            .checkbox(
-                &mut self.store.data.config.autoplay_radio,
-                "Radio automática al reproducir una canción",
-            )
-            .changed()
-        {
-            let _ = self.store.save();
-        }
-        if ui
-            .checkbox(
-                &mut self.store.data.config.sponsorblock_enabled,
-                "SponsorBlock: saltar intros/patrocinios automáticamente",
-            )
-            .changed()
-        {
-            let _ = self.store.save();
-        }
-
-        ui.add_space(12.0);
-        let mb = self.total_downloaded_bytes as f64 / (1024.0 * 1024.0);
-        let cache_mb = self.stream_cache_bytes as f64 / (1024.0 * 1024.0);
-        ui.label(
-            RichText::new(format!("Almacenamiento offline: {mb:.1} MB"))
-                .color(TEXT_SECONDARY),
-        );
-        ui.label(
-            RichText::new(format!("Caché de streaming: {cache_mb:.1} MB"))
-                .color(TEXT_SECONDARY),
-        );
-        ui.add_space(6.0);
-        if ui.button("Limpiar caché de streaming y portadas").clicked() {
-            let cache_dir = self.data_dir.join("stream_cache");
-            let _ = std::fs::remove_dir_all(&cache_dir);
-            let _ = std::fs::create_dir_all(&cache_dir);
-            let _ = std::fs::remove_file(self.data_dir.join("home_cache.json"));
-            let _ = std::fs::remove_file(self.data_dir.join("explore_cache.json"));
-            self.stream_cache_bytes = 0;
-            ctx.forget_all_images();
-            self.set_banner("Caché y portadas liberadas");
-        }
-
-        ui.add_space(10.0);
-        if icons::icon_pill_button(
-            ui,
-            icons::Icon::MusicNote,
-            "Probar audio local (2 pistas)",
-            BG_ELEVATED,
-            TEXT_PRIMARY,
-        )
-        .clicked()
-        {
-            let p1 = self.data_dir.join("yr_demo_1.wav");
-            let p2 = self.data_dir.join("yr_demo_2.wav");
-            if generate_test_wav(&p1, 440.0, 25).is_ok()
-                && generate_test_wav(&p2, 523.25, 25).is_ok()
-            {
-                let tracks = vec![
-                    Track {
-                        id: "local_demo_1".into(),
-                        title: "Demo Local 440 Hz (Motor Rust)".into(),
-                        artist: "YR Audio Engine".into(),
-                        artist_id: None,
-                        album: Some("Test Local".into()),
-                        album_id: None,
-                        duration_secs: Some(25),
-                        thumbnail_url: None,
-                        local_path: Some(p1.to_string_lossy().into_owned()),
-                    },
-                    Track {
-                        id: "local_demo_2".into(),
-                        title: "Demo Local 523 Hz (Pista 2)".into(),
-                        artist: "YR Audio Engine".into(),
-                        artist_id: None,
-                        album: Some("Test Local".into()),
-                        album_id: None,
-                        duration_secs: Some(25),
-                        thumbnail_url: None,
-                        local_path: Some(p2.to_string_lossy().into_owned()),
-                    },
-                ];
-                self.play_track_in_list(tracks, 0, ctx);
-            } else {
-                self.set_banner("No se pudo crear audio local de prueba");
+                    ui.add_space(12.0);
+                    let eq_active = self.store.data.config.equalizer.enabled;
+                    let eq_preset = self.store.data.config.equalizer.preset_name.clone();
+                    egui::Frame::new()
+                        .fill(Color32::from_white_alpha(14))
+                        .stroke(Stroke::new(0.8_f32, Color32::from_white_alpha(28)))
+                        .corner_radius(CornerRadius::same(12))
+                        .inner_margin(egui::Margin::symmetric(14, 10))
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                let (r, _) = ui.allocate_exact_size(Vec2::splat(20.0), Sense::hover());
+                                icons::draw_icon(
+                                    ui.painter(),
+                                    r,
+                                    icons::Icon::Equalizer,
+                                    if eq_active { ACCENT_RED } else { Color32::WHITE },
+                                );
+                                ui.vertical(|ui| {
+                                    ui.label(RichText::new("Ecualizador & Bass Boost").strong());
+                                    ui.label(
+                                        RichText::new(if eq_active {
+                                            format!("Activo • Preset: {}", eq_preset)
+                                        } else {
+                                            "Desactivado (bypass)".to_string()
+                                        })
+                                        .size(12.0)
+                                        .color(TEXT_SECONDARY),
+                                    );
+                                });
+                                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                    if icons::icon_pill_button(
+                                        ui,
+                                        icons::Icon::Equalizer,
+                                        "Ajustar",
+                                        Color32::from_white_alpha(24),
+                                        Color32::WHITE,
+                                    )
+                                    .clicked()
+                                    {
+                                        self.show_equalizer_modal = true;
+                                    }
+                                });
+                            });
+                        });
+                    ui.add_space(12.0);
+                    if ui.checkbox(&mut self.store.data.config.autoplay_radio, "Radio automática continua al terminar la cola").changed() {
+                        let _ = self.store.save();
+                    }
+                    if ui.checkbox(&mut self.store.data.config.sponsorblock_enabled, "SponsorBlock: omitir intros/patrocinios en audio").changed() {
+                        let _ = self.store.save();
+                    }
+                }
+                SettingsCategory::DataSaver => {
+                    ui.heading("Ahorro de batería y datos móviles");
+                    ui.add_space(4.0);
+                    if ui.checkbox(&mut self.store.data.config.mobile_data_saver, "Ahorro de datos móviles").changed() {
+                        let _ = self.store.save();
+                    }
+                    ui.label(RichText::new("Reduce el streaming a 64 kbps al reproducir con datos móviles para ahorrar consumo y batería.").size(12.0).color(TEXT_SECONDARY));
+                    ui.add_space(10.0);
+                    if ui.checkbox(&mut self.store.data.config.wifi_only_streaming, "Transmitir solo mediante Wi-Fi").changed() {
+                        let _ = self.store.save();
+                    }
+                    ui.label(RichText::new("Bloquea la descarga de streams en conexiones de datos móviles.").size(12.0).color(TEXT_SECONDARY));
+                    ui.add_space(10.0);
+                    if ui.checkbox(&mut self.store.data.config.battery_saver, "Modo ahorro de batería").changed() {
+                        let _ = self.store.save();
+                    }
+                    ui.label(RichText::new("Desactiva animaciones de carátula y suspende la precarga de la siguiente canción cuando la batería esté baja.").size(12.0).color(TEXT_SECONDARY));
+                    ui.add_space(10.0);
+                    if ui.checkbox(&mut self.store.data.config.prefer_video_mode, "Desactivar videos en datos móviles").changed() {
+                        let _ = self.store.save();
+                    }
+                    ui.label(RichText::new("Fuerza reproducción de solo audio en el reproductor para máxima autonomía.").size(12.0).color(TEXT_SECONDARY));
+                }
+                SettingsCategory::DownloadsStorage => {
+                    ui.heading("Descargas y almacenamiento");
+                    ui.add_space(4.0);
+                    if ui.checkbox(&mut self.store.data.config.smart_downloads, "Descargas inteligentes (Auto-descarga)").changed() {
+                        let _ = self.store.save();
+                    }
+                    ui.label(RichText::new("Descarga automáticamente en segundo plano tus canciones favoritas y mixes recientes para escuchar offline.").size(12.0).color(TEXT_SECONDARY));
+                    ui.add_space(10.0);
+                    if ui.checkbox(&mut self.store.data.config.wifi_only_downloads, "Descargar solo mediante Wi-Fi").changed() {
+                        let _ = self.store.save();
+                    }
+                    ui.add_space(10.0);
+                    ui.label("Calidad de descargas offline:");
+                    ui.horizontal_wrapped(|ui| {
+                        for q in [AudioQuality::Low, AudioQuality::Medium, AudioQuality::High, AudioQuality::Best] {
+                            if ui.selectable_value(&mut self.store.data.config.download_quality, q, q.label()).clicked() {
+                                let _ = self.store.save();
+                            }
+                        }
+                    });
+                    ui.add_space(14.0);
+                    let mb = self.total_downloaded_bytes as f64 / (1024.0 * 1024.0);
+                    let cache_mb = self.stream_cache_bytes as f64 / (1024.0 * 1024.0);
+                    ui.label(RichText::new(format!("Almacenamiento offline usado: {mb:.1} MB")).strong());
+                    ui.label(RichText::new(format!("Caché de streaming en disco: {cache_mb:.1} MB")).color(TEXT_SECONDARY));
+                    ui.add_space(8.0);
+                    if ui.button("Limpiar caché de streaming y portadas").clicked() {
+                        let cache_dir = self.data_dir.join("stream_cache");
+                        let _ = std::fs::remove_dir_all(&cache_dir);
+                        let _ = std::fs::create_dir_all(&cache_dir);
+                        let _ = std::fs::remove_file(self.data_dir.join("home_cache.json"));
+                        let _ = std::fs::remove_file(self.data_dir.join("explore_cache.json"));
+                        self.stream_cache_bytes = 0;
+                        ctx.forget_all_images();
+                        self.set_banner("Caché y portadas liberadas");
+                    }
+                }
+                SettingsCategory::Notifications => {
+                    ui.heading("Notificaciones y barra de estado");
+                    ui.add_space(4.0);
+                    if ui.checkbox(&mut self.store.data.config.notifications_enabled, "Notificación multimedia en segundo plano").changed() {
+                        let _ = self.store.save();
+                    }
+                    ui.label(RichText::new("Muestra la carátula, título y controles de pausa/saltar en la barra de notificaciones del sistema.").size(12.0).color(TEXT_SECONDARY));
+                }
+                SettingsCategory::Privacy => {
+                    ui.heading("Privacidad y datos");
+                    ui.add_space(4.0);
+                    if ui.checkbox(&mut self.store.data.config.incognito_mode, "Modo incógnito (Pausar historial)").changed() {
+                        let _ = self.store.save();
+                    }
+                    ui.label(RichText::new("Las canciones que escuches no se guardarán en tu historial ni alterarán tus recomendaciones.").size(12.0).color(TEXT_SECONDARY));
+                    ui.add_space(12.0);
+                    if ui.button("Borrar historial de reproducciones").clicked() {
+                        self.store.data.recent_tracks.clear();
+                        let _ = self.store.save();
+                        self.set_banner("Historial de reproducciones borrado");
+                    }
+                    if ui.button("Borrar historial de búsquedas").clicked() {
+                        self.store.data.search_history.clear();
+                        self.store.data.search_history_items.clear();
+                        let _ = self.store.save();
+                        self.set_banner("Historial de búsquedas borrado");
+                    }
+                }
+                SettingsCategory::Recommendations => {
+                    ui.heading("Recomendaciones de música");
+                    ui.add_space(4.0);
+                    if ui.checkbox(&mut self.store.data.config.personalized_recommendations, "Recomendaciones personalizadas con cuenta Google").changed() {
+                        let _ = self.store.save();
+                    }
+                    ui.label(RichText::new("Ajusta los mixes de inicio según tu historial de reproducción, canciones favoritas y artistas seguidos.").size(12.0).color(TEXT_SECONDARY));
+                }
+                SettingsCategory::About => {
+                    ui.heading("YR Music v0.5.0");
+                    ui.label("Cliente nativo de música 100% en Rust para Android y escritorio.");
+                    ui.add_space(6.0);
+                    ui.label(RichText::new("Motor de audio Symphonia PCM de ultra-baja latencia con ecualizador paramétrico de 5 bandas en tiempo real, prefetch predictivo en disco y compatibilidad completa con YouTube Music.").size(12.0).color(TEXT_SECONDARY));
+                    ui.add_space(8.0);
+                    ui.label(RichText::new("Licencia MIT • Código abierto").size(12.0).color(TEXT_SECONDARY));
+                    ui.add_space(10.0);
+                    if icons::icon_pill_button(
+                        ui,
+                        icons::Icon::MusicNote,
+                        "Probar audio local (2 pistas)",
+                        BG_ELEVATED,
+                        TEXT_PRIMARY,
+                    )
+                    .clicked()
+                    {
+                        let p1 = self.data_dir.join("yr_demo_1.wav");
+                        let p2 = self.data_dir.join("yr_demo_2.wav");
+                        if generate_test_wav(&p1, 440.0, 25).is_ok()
+                            && generate_test_wav(&p2, 523.25, 25).is_ok()
+                        {
+                            let tracks = vec![
+                                Track {
+                                    id: "local_demo_1".into(),
+                                    title: "Demo Local 440 Hz (Motor Rust)".into(),
+                                    artist: "YR Audio Engine".into(),
+                                    artist_id: None,
+                                    album: Some("Test Local".into()),
+                                    album_id: None,
+                                    duration_secs: Some(25),
+                                    thumbnail_url: None,
+                                    local_path: Some(p1.to_string_lossy().into_owned()),
+                                },
+                                Track {
+                                    id: "local_demo_2".into(),
+                                    title: "Demo Local 523 Hz (Pista 2)".into(),
+                                    artist: "YR Audio Engine".into(),
+                                    artist_id: None,
+                                    album: Some("Test Local".into()),
+                                    album_id: None,
+                                    duration_secs: Some(25),
+                                    thumbnail_url: None,
+                                    local_path: Some(p2.to_string_lossy().into_owned()),
+                                },
+                            ];
+                            self.play_track_in_list(tracks, 0, ctx);
+                        } else {
+                            self.set_banner("No se pudo crear audio local de prueba");
+                        }
+                    }
+                }
             }
         }
     }
@@ -7794,6 +8107,254 @@ impl YrApp {
         if close_sheet {
             self.playlist_picker_track = None;
         }
+    }
+
+    fn render_account_modal(&mut self, ctx: &egui::Context) {
+        if !self.show_account_modal {
+            return;
+        }
+
+        let screen = ctx.screen_rect();
+        if render_modal_scrim(ctx, "yr_account_modal_scrim") {
+            self.show_account_modal = false;
+        }
+
+        let (avatar_url, user_name, user_handle) = {
+            let account_info = self
+                .home_feed
+                .account
+                .as_ref()
+                .or(self.store.data.google_account.as_ref());
+            let is_logged = self.home_feed.is_logged_in || self.store.data.google_cookie.is_some();
+            let av = account_info.and_then(|a| a.avatar_url.clone());
+            let name = account_info
+                .map(|a| a.name.clone())
+                .unwrap_or_else(|| {
+                    if is_logged {
+                        "Usuario de Google".to_string()
+                    } else {
+                        "Antony".to_string()
+                    }
+                });
+            let handle = account_info
+                .and_then(|a| a.handle.clone())
+                .unwrap_or_else(|| {
+                    if is_logged {
+                        "Cuenta sincronizada".to_string()
+                    } else {
+                        "@IsAntonyVs".to_string()
+                    }
+                });
+            (av, name, handle)
+        };
+
+        egui::Area::new(egui::Id::new("yr_account_modal_panel"))
+            .anchor(egui::Align2::LEFT_BOTTOM, Vec2::ZERO)
+            .order(egui::Order::Foreground)
+            .interactable(true)
+            .show(ctx, |ui| {
+                ui.set_width(screen.width());
+                ui.set_max_width(screen.width());
+                egui::Frame::new()
+                    .fill(Color32::from_rgb(18, 18, 20))
+                    .stroke(Stroke::new(0.8_f32, Color32::from_rgb(42, 42, 48)))
+                    .corner_radius(CornerRadius {
+                        nw: 20,
+                        ne: 20,
+                        sw: 0,
+                        se: 0,
+                    })
+                    .inner_margin(egui::Margin::symmetric(16, 14))
+                    .show(ui, |ui| {
+                        let inner_w = (screen.width() - 32.0).max(200.0);
+                        ui.set_width(inner_w);
+                        ui.set_max_width(inner_w);
+
+                        // Top bar: ✕ close | "Cuenta"
+                        ui.horizontal(|ui| {
+                            if icons::icon_button(
+                                ui,
+                                icons::Icon::Close,
+                                32.0,
+                                16.0,
+                                Color32::TRANSPARENT,
+                                Color32::WHITE,
+                                16.0,
+                            )
+                            .clicked()
+                            {
+                                self.show_account_modal = false;
+                            }
+                            ui.add_space(8.0);
+                            ui.label(
+                                RichText::new("Cuenta")
+                                    .size(19.0)
+                                    .strong()
+                                    .color(Color32::WHITE),
+                            );
+                        });
+
+                        ui.add_space(14.0);
+
+                        // Profile Header Card (matching media_1794881820029_c543419e.jpg)
+                        let avatar_sz = 44.0;
+                        ui.horizontal(|ui| {
+                            let (r, _) = ui.allocate_exact_size(Vec2::splat(avatar_sz), Sense::hover());
+                            let radius = CornerRadius::same((avatar_sz * 0.5) as u8);
+                            ui.painter().rect_filled(r, radius, Color32::from_rgb(38, 38, 44));
+
+                            let mut painted = false;
+                            if let Some(url) = &avatar_url {
+                                let thumb_uri = tracked_thumb_uri(url, 192);
+                                let img = Image::new(thumb_uri)
+                                    .fit_to_exact_size(Vec2::splat(avatar_sz))
+                                    .corner_radius(radius);
+                                match img.load_for_size(ui.ctx(), Vec2::splat(avatar_sz)) {
+                                    Ok(egui::load::TexturePoll::Ready { .. }) => {
+                                        img.paint_at(ui, r);
+                                        painted = true;
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            if !painted {
+                                let initial = user_name.chars().next().unwrap_or('A').to_uppercase().to_string();
+                                ui.painter().text(
+                                    r.center(),
+                                    Align2::CENTER_CENTER,
+                                    initial,
+                                    egui::FontId::proportional(20.0),
+                                    Color32::WHITE,
+                                );
+                            }
+
+                            ui.add_space(10.0);
+                            ui.vertical(|ui| {
+                                ui.horizontal(|ui| {
+                                    ui.label(
+                                        RichText::new(&user_name)
+                                            .size(16.0)
+                                            .strong()
+                                            .color(Color32::WHITE),
+                                    );
+                                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                        let (chev_r, _) = ui.allocate_exact_size(Vec2::splat(16.0), Sense::hover());
+                                        icons::draw_icon(ui.painter(), chev_r, icons::Icon::ChevronRight, TEXT_SECONDARY);
+                                    });
+                                });
+                                ui.label(
+                                    RichText::new(&user_handle)
+                                        .size(12.5)
+                                        .color(TEXT_SECONDARY),
+                                );
+                                ui.add_space(2.0);
+                                if ui
+                                    .add(
+                                        egui::Label::new(
+                                            RichText::new("Administra tu Cuenta de Google")
+                                                .size(12.0)
+                                                .color(Color32::from_rgb(96, 160, 255)),
+                                        )
+                                        .sense(Sense::click()),
+                                    )
+                                    .clicked()
+                                {
+                                    self.show_account_modal = false;
+                                    self.show_google_login = true;
+                                }
+                            });
+                        });
+
+                        ui.add_space(10.0);
+                        ui.separator();
+                        ui.add_space(6.0);
+
+                        // Menu Rows
+                        let menu_row = |ui: &mut egui::Ui, icon: icons::Icon, title: &str| -> egui::Response {
+                            let (rect, resp) = ui.allocate_exact_size(Vec2::new(inner_w, 42.0), Sense::click());
+                            if ui.is_rect_visible(rect) {
+                                let bg = if resp.hovered() {
+                                    Color32::from_white_alpha(18)
+                                } else {
+                                    Color32::TRANSPARENT
+                                };
+                                if bg != Color32::TRANSPARENT {
+                                    ui.painter().rect_filled(rect, CornerRadius::same(8), bg);
+                                }
+                                let icon_rect = Rect::from_center_size(
+                                    Pos2::new(rect.left() + 18.0, rect.center().y),
+                                    Vec2::splat(18.0),
+                                );
+                                icons::draw_icon(ui.painter(), icon_rect, icon, Color32::WHITE);
+                                ui.painter().text(
+                                    Pos2::new(rect.left() + 46.0, rect.center().y),
+                                    Align2::LEFT_CENTER,
+                                    title,
+                                    egui::FontId::proportional(14.5),
+                                    Color32::WHITE,
+                                );
+                            }
+                            resp
+                        };
+
+                        if menu_row(ui, icons::Icon::Channel, "Tu canal").clicked() {
+                            self.show_account_modal = false;
+                            self.active_tab = NavTab::Library;
+                            self.set_banner("Abriendo tu canal y biblioteca");
+                        }
+                        if menu_row(ui, icons::Icon::Download, "Descargas").clicked() {
+                            self.show_account_modal = false;
+                            self.active_tab = NavTab::Library;
+                            self.library_filter = LibraryFilter::Downloads;
+                        }
+                        if menu_row(ui, icons::Icon::History, "Historial").clicked() {
+                            self.show_account_modal = false;
+                            self.active_tab = NavTab::Home;
+                            self.set_banner("Historial de reproducción");
+                        }
+                        if menu_row(ui, icons::Icon::Recap, "Tu Recap").clicked() {
+                            self.show_account_modal = false;
+                            let count = self.store.data.recent_tracks.len();
+                            let liked = self.store.data.liked_tracks.len();
+                            self.set_banner(format!("Tu Recap: {} canciones escuchadas • {} favoritas", count, liked));
+                        }
+                        if menu_row(ui, icons::Icon::Badge, "Insignias").clicked() {
+                            self.show_account_modal = false;
+                            self.set_banner("Insignia: Oyente Audiófilo Hi-Fi Rust 🎵");
+                        }
+                        if menu_row(ui, icons::Icon::SwitchAccount, "Cambiar de cuenta").clicked() {
+                            self.show_account_modal = false;
+                            self.show_google_login = true;
+                        }
+                        if menu_row(ui, icons::Icon::Settings, "Configuración").clicked() {
+                            self.show_account_modal = false;
+                            self.show_settings = true;
+                            self.settings_category = SettingsCategory::Root;
+                        }
+                        if menu_row(ui, icons::Icon::Help, "Ayuda y comentarios").clicked() {
+                            self.show_account_modal = false;
+                            self.set_banner("YR Music v0.5.0 • Pure Rust");
+                        }
+
+                        ui.add_space(14.0);
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 0.0;
+                            let pad = (inner_w - 230.0).max(0.0) * 0.5;
+                            if pad > 0.0 {
+                                ui.add_space(pad);
+                            }
+                            ui.label(
+                                RichText::new("Polít. de Privacidad • Condic. del Servicio")
+                                    .size(11.0)
+                                    .color(TEXT_SECONDARY),
+                            );
+                        });
+                        #[cfg(target_os = "android")]
+                        ui.add_space(46.0);
+                        #[cfg(not(target_os = "android"))]
+                        ui.add_space(8.0);
+                    });
+            });
     }
 
     fn render_google_login_modal(&mut self, ctx: &egui::Context) {

@@ -41,6 +41,7 @@ target_sdk_version = 34
 
 [package.metadata.android.application]
 label = "YR Music"
+icon = "@mipmap/ic_launcher"
 
 [package.metadata.android.signing.release]
 path = "../../yr-release.keystore"

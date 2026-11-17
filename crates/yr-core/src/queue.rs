@@ -72,6 +72,14 @@ impl PlaybackQueue {
         self.order.get(pos).copied()
     }
 
+    /// Number of tracks remaining after the current playing track.
+    pub fn remaining(&self) -> usize {
+        match self.current_pos {
+            Some(pos) => self.order.len().saturating_sub(pos + 1),
+            None => 0,
+        }
+    }
+
     /// Replace the entire queue and start at `start_index`.
     pub fn set_queue(&mut self, tracks: Vec<Track>, start_index: usize) {
         self.tracks = tracks;

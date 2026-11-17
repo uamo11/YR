@@ -297,6 +297,31 @@ mod imp {
         }
     }
 
+    pub fn open_video(url: &str) {
+        let Some(bridge) = bridge() else {
+            return;
+        };
+        let Ok(mut env) = bridge.vm.attach_current_thread() else {
+            return;
+        };
+        let Ok(j_url) = env.new_string(url) else {
+            return;
+        };
+        let service_cls: &JClass = bridge.service_class.as_obj().into();
+        if let Err(e) = env.call_static_method(
+            service_cls,
+            "openVideo",
+            "(Landroid/content/Context;Ljava/lang/String;)V",
+            &[
+                JValue::Object(bridge.app_ctx.as_obj()),
+                JValue::Object(&j_url),
+            ],
+        ) {
+            log::warn!("android_media: openVideo failed: {e:?}");
+            let _ = env.exception_clear();
+        }
+    }
+
     #[no_mangle]
     pub extern "system" fn Java_com_yr_music_YrPlaybackService_nativeOnGoogleCookie(
         mut env: JNIEnv,
@@ -341,6 +366,7 @@ mod imp {
     }
     pub fn open_google_login() {}
     pub fn share_text(_title: &str, _text: &str) {}
+    pub fn open_video(_url: &str) {}
     pub fn update_playback(_title: &str, _artist: &str, _playing: bool, _pos_ms: u64, _dur_ms: u64) {
     }
     pub fn set_artwork_url(_url: &str) {}
@@ -353,6 +379,6 @@ mod imp {
 #[cfg(target_os = "android")]
 pub use imp::init;
 pub use imp::{
-    open_google_login, resolve_audio_url, set_action_sender, set_artwork_url, set_cookie_sender,
+    open_google_login, open_video, resolve_audio_url, set_action_sender, set_artwork_url, set_cookie_sender,
     set_egui_ctx, set_ui_at_root, share_text, stop_service, take_back_pressed, update_playback,
 };
