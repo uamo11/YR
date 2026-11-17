@@ -1865,8 +1865,13 @@ impl YrApp {
             return;
         }
         let max_w = (ctx.screen_rect().width() - 48.0).clamp(180.0, 420.0);
+        let (anchor_align, anchor_offset) = if self.now_playing_open && !self.show_settings {
+            (egui::Align2::CENTER_TOP, Vec2::new(0.0, 82.0))
+        } else {
+            (egui::Align2::CENTER_BOTTOM, Vec2::new(0.0, -148.0))
+        };
         egui::Area::new(egui::Id::new("yr_status_toast"))
-            .anchor(egui::Align2::CENTER_BOTTOM, Vec2::new(0.0, -140.0))
+            .anchor(anchor_align, anchor_offset)
             .order(egui::Order::Foreground)
             .interactable(false)
             .show(ctx, |ui| {
@@ -5653,6 +5658,18 @@ impl YrApp {
         );
         ui.allocate_new_ui(egui::UiBuilder::new().max_rect(inner_rect), |ui| {
             let _top_bar_min_y = ui.cursor().top();
+            let active_until = *self.sleep_timer_until.lock().unwrap();
+            let after_track = self
+                .sleep_after_track
+                .load(std::sync::atomic::Ordering::SeqCst);
+            let timer_text = if let Some(until) = active_until {
+                let rem = until.saturating_duration_since(Instant::now()).as_secs();
+                Some(format!("{}:{:02}", rem / 60, rem % 60))
+            } else if after_track {
+                Some("Fin".to_string())
+            } else {
+                None
+            };
 
             // Top bar: v chevron | [ Canción | Video ] switch | Cast & More ⋮
             ui.horizontal(|ui| {
@@ -5737,17 +5754,6 @@ impl YrApp {
                         });
                     });
 
-                let active_until = *self.sleep_timer_until.lock().unwrap();
-                let after_track = self.sleep_after_track.load(std::sync::atomic::Ordering::SeqCst);
-                let timer_text = if let Some(until) = active_until {
-                    let rem = until.saturating_duration_since(Instant::now()).as_secs();
-                    Some(format!("{}:{:02}", rem / 60, rem % 60))
-                } else if after_track {
-                    Some("Fin".to_string())
-                } else {
-                    None
-                };
-
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     ui.spacing_mut().item_spacing.x = 2.0;
                     if icons::icon_button(
@@ -5775,20 +5781,6 @@ impl YrApp {
                     .clicked()
                     {
                         self.set_banner("Transmitiendo a dispositivo...");
-                    }
-                    if let Some(txt) = timer_text {
-                        let timer_btn = egui::Button::new(
-                            RichText::new(format!("🌙 {txt}"))
-                                .size(11.0)
-                                .strong()
-                                .color(Color32::WHITE),
-                        )
-                        .fill(Color32::from_white_alpha(32))
-                        .corner_radius(CornerRadius::same(12))
-                        .min_size(Vec2::new(48.0, 26.0));
-                        if ui.add(timer_btn).clicked() {
-                            self.show_sleep_timer_sheet = true;
-                        }
                     }
                 });
             });
@@ -6651,33 +6643,41 @@ impl YrApp {
                         .downloads
                         .iter()
                         .any(|d| d.track.id == track.id && d.status == DownloadStatus::Completed);
-                    match &snap.status {
+                    let status_badge: Option<(String, Color32)> = match &snap.status {
                         PlaybackStatus::Buffering | PlaybackStatus::Loading => {
-                            ui.add_space(2.0);
-                            ui.label(
-                                RichText::new("Cargando audio...")
-                                    .size(12.0)
-                                    .color(Color32::from_white_alpha(210)),
-                            );
+                            Some(("Cargando audio...".to_string(), Color32::from_white_alpha(210)))
                         }
-                        PlaybackStatus::Error(err) => {
-                            ui.add_space(2.0);
-                            ui.label(RichText::new(err).size(12.0).color(ACCENT_RED));
-                        }
-                        _ => {
-                            let badge = match (is_offline, snap.codec_label.as_deref()) {
-                                (true, Some(c)) => Some((format!("Offline • {c}"), GREEN_OK)),
-                                (true, None) => Some(("Offline".to_string(), GREEN_OK)),
-                                (false, Some(c)) => {
-                                    Some((c.to_string(), Color32::from_white_alpha(155)))
-                                }
-                                (false, None) => None,
-                            };
-                            if let Some((txt, col)) = badge {
-                                ui.add_space(2.0);
+                        PlaybackStatus::Error(err) => Some((err.clone(), ACCENT_RED)),
+                        _ => match (is_offline, snap.codec_label.as_deref()) {
+                            (true, Some(c)) => Some((format!("Offline • {c}"), GREEN_OK)),
+                            (true, None) => Some(("Offline".to_string(), GREEN_OK)),
+                            (false, Some(c)) => {
+                                Some((c.to_string(), Color32::from_white_alpha(155)))
+                            }
+                            (false, None) => None,
+                        },
+                    };
+                    if status_badge.is_some() || timer_text.is_some() {
+                        ui.add_space(3.0);
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 8.0;
+                            if let Some((txt, col)) = status_badge {
                                 ui.label(RichText::new(txt).size(11.5).color(col));
                             }
-                        }
+                            if let Some(ref t_txt) = timer_text {
+                                if icons::icon_pill_button(
+                                    ui,
+                                    icons::Icon::Moon,
+                                    &format!("Apagado: {t_txt}"),
+                                    Color32::from_white_alpha(32),
+                                    Color32::WHITE,
+                                )
+                                .clicked()
+                                {
+                                    self.show_sleep_timer_sheet = true;
+                                }
+                            }
+                        });
                     }
 
                     ui.add_space(12.0);
@@ -6873,6 +6873,23 @@ impl YrApp {
                                     self.store.data.config.playback_speed = next;
                                     let _ = self.store.save();
                                     self.set_banner(format!("Velocidad: {next}x"));
+                                }
+
+                                ui.add_space(6.0);
+                                let sleep_label = timer_text
+                                    .as_deref()
+                                    .map(|t| format!("Apagado {t}"))
+                                    .unwrap_or_else(|| "Temporizador".to_string());
+                                if icons::icon_pill_button(
+                                    ui,
+                                    icons::Icon::Moon,
+                                    &sleep_label,
+                                    if timer_text.is_some() { ACCENT_RED } else { pill_bg },
+                                    Color32::WHITE,
+                                )
+                                .clicked()
+                                {
+                                    self.show_sleep_timer_sheet = true;
                                 }
                             });
                         });
@@ -7139,89 +7156,68 @@ impl YrApp {
                 }
             });
 
-            let drawer_open = self.show_queue || self.show_lyrics || self.show_related;
-            if !drawer_open {
-                ui.add_space(4.0);
-                ui.vertical_centered(|ui| {
-                    let peek_title = format!("Mix de {}", track.title);
-                    let resp = ui.add(
-                        egui::Label::new(
-                            RichText::new(peek_title)
-                                .size(13.5)
-                                .strong()
-                                .color(Color32::from_white_alpha(225)),
-                        )
-                        .truncate()
-                        .sense(Sense::click()),
-                    );
-                    if resp.clicked() {
-                        self.show_queue = true;
-                    }
-                });
-            } else {
-                ui.add_space(6.0);
-                ui.allocate_ui(Vec2::new(avail_w, 28.0), |ui| {
-                    ui.columns(3, |cols| {
-                        for (col_idx, (active, label, mode)) in [
-                            (self.show_queue, "SIGUIENTE", 0_u8),
-                            (self.show_lyrics, "LETRA", 1_u8),
-                            (self.show_related, "RELACIONADO", 2_u8),
-                        ]
-                        .into_iter()
-                        .enumerate()
-                        {
-                            cols[col_idx].vertical_centered(|ui| {
-                                let resp = ui.add(
-                                    egui::Label::new(
-                                        RichText::new(label)
-                                            .size(12.5)
-                                            .strong()
-                                            .color(if active {
-                                                Color32::WHITE
-                                            } else {
-                                                Color32::from_white_alpha(165)
-                                            }),
-                                    )
-                                    .sense(Sense::click()),
+            ui.add_space(4.0);
+            ui.allocate_ui(Vec2::new(avail_w, 28.0), |ui| {
+                ui.columns(3, |cols| {
+                    for (col_idx, (active, label, mode)) in [
+                        (self.show_queue, "SIGUIENTE", 0_u8),
+                        (self.show_lyrics, "LETRA", 1_u8),
+                        (self.show_related, "RELACIONADO", 2_u8),
+                    ]
+                    .into_iter()
+                    .enumerate()
+                    {
+                        cols[col_idx].vertical_centered(|ui| {
+                            let resp = ui.add(
+                                egui::Label::new(
+                                    RichText::new(label)
+                                        .size(12.5)
+                                        .strong()
+                                        .color(if active {
+                                            Color32::WHITE
+                                        } else {
+                                            Color32::from_white_alpha(165)
+                                        }),
+                                )
+                                .sense(Sense::click()),
+                            );
+                            if active {
+                                let underline = egui::Rect::from_min_max(
+                                    egui::pos2(resp.rect.left(), resp.rect.bottom() + 4.0),
+                                    egui::pos2(resp.rect.right(), resp.rect.bottom() + 6.0),
                                 );
+                                ui.painter().rect_filled(
+                                    underline,
+                                    CornerRadius::same(1),
+                                    Color32::WHITE,
+                                );
+                            }
+                            if resp.clicked() {
                                 if active {
-                                    let underline = egui::Rect::from_min_max(
-                                        egui::pos2(resp.rect.left(), resp.rect.bottom() + 4.0),
-                                        egui::pos2(resp.rect.right(), resp.rect.bottom() + 6.0),
-                                    );
-                                    ui.painter().rect_filled(
-                                        underline,
-                                        CornerRadius::same(1),
-                                        Color32::WHITE,
-                                    );
-                                }
-                                if resp.clicked() {
-                                    if active {
-                                        self.show_queue = false;
-                                        self.show_lyrics = false;
-                                        self.show_related = false;
-                                    } else {
-                                        self.show_queue = mode == 0;
-                                        self.show_lyrics = mode == 1;
-                                        self.show_related = mode == 2;
-                                        if self.show_lyrics {
-                                            self.lyrics_last_scrolled_idx = None;
-                                            if self.lyrics_track_id.as_deref() != Some(&track.id) {
-                                                self.load_lyrics(track.clone(), ctx);
-                                            }
-                                        }
-                                        if self.show_related
-                                            && self.related_track_id.as_deref() != Some(&track.id)
-                                        {
-                                            self.load_related(track.id.clone(), ctx);
+                                    self.show_queue = false;
+                                    self.show_lyrics = false;
+                                    self.show_related = false;
+                                } else {
+                                    self.show_queue = mode == 0;
+                                    self.show_lyrics = mode == 1;
+                                    self.show_related = mode == 2;
+                                    if self.show_lyrics {
+                                        self.lyrics_last_scrolled_idx = None;
+                                        if self.lyrics_track_id.as_deref() != Some(&track.id) {
+                                            self.load_lyrics(track.clone(), ctx);
                                         }
                                     }
+                                    if self.show_related
+                                        && self.related_track_id.as_deref() != Some(&track.id)
+                                    {
+                                        self.load_related(track.id.clone(), ctx);
+                                    }
                                 }
-                            });
-                        }
-                    });
+                            }
+                        });
+                    }
                 });
-            }
+            });
         });
     }
 
@@ -7562,7 +7558,7 @@ impl YrApp {
                     ui.label(RichText::new("Ajusta los mixes de inicio según tu historial de reproducción, canciones favoritas y artistas seguidos.").size(12.0).color(TEXT_SECONDARY));
                 }
                 SettingsCategory::About => {
-                    ui.heading("YR Music v0.6.1");
+                    ui.heading("YR Music v0.6.2");
                     ui.label("Cliente nativo de música 100% en Rust para Android y escritorio.");
                     ui.add_space(6.0);
                     ui.label(RichText::new("Motor de audio Symphonia PCM de ultra-baja latencia con ecualizador paramétrico de 5 bandas en tiempo real, prefetch predictivo en disco y compatibilidad completa con YouTube Music.").size(12.0).color(TEXT_SECONDARY));
@@ -8655,7 +8651,7 @@ impl YrApp {
                         }
                         if menu_row(ui, icons::Icon::Badge, "Insignias").clicked() {
                             self.show_account_modal = false;
-                            self.set_banner("Insignia: Oyente Audiófilo Hi-Fi Rust 🎵");
+                            self.set_banner("Insignia: Oyente Audiófilo Hi-Fi Rust");
                         }
                         if menu_row(ui, icons::Icon::SwitchAccount, "Cambiar de cuenta").clicked() {
                             self.show_account_modal = false;
@@ -8668,7 +8664,7 @@ impl YrApp {
                         }
                         if menu_row(ui, icons::Icon::Help, "Ayuda y comentarios").clicked() {
                             self.show_account_modal = false;
-                            self.set_banner("YR Music v0.6.1 • Pure Rust");
+                            self.set_banner("YR Music v0.6.2 • Pure Rust");
                         }
 
                         ui.add_space(14.0);
