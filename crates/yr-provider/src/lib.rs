@@ -165,11 +165,9 @@ impl YtMusicProvider {
     fn format_subscriber_count(c: u64) -> String {
         if c >= 1_000_000 {
             let m = c as f64 / 1_000_000.0;
-            if (m - m.round()).abs() < 0.05 {
-                format!("{:.0} M de suscriptores", m.round())
-            } else {
-                format!("{m:.2} M de suscriptores")
-            }
+            let raw = format!("{m:.2}");
+            let trimmed = raw.trim_end_matches('0').trim_end_matches('.');
+            format!("{trimmed} M de suscriptores")
         } else if c >= 1_000 {
             let k = c as f64 / 1_000.0;
             if k >= 100.0 || (k - k.round()).abs() < 0.05 {
@@ -815,6 +813,7 @@ mod tests {
     #[test]
     fn subscriber_count_formatting_handles_millions_thousands_and_units() {
         assert_eq!(YtMusicProvider::format_subscriber_count(6_910_000), "6.91 M de suscriptores");
+        assert_eq!(YtMusicProvider::format_subscriber_count(59_500_000), "59.5 M de suscriptores");
         assert_eq!(YtMusicProvider::format_subscriber_count(2_000_000), "2 M de suscriptores");
         assert_eq!(YtMusicProvider::format_subscriber_count(450_000), "450 K suscriptores");
         assert_eq!(YtMusicProvider::format_subscriber_count(12_400), "12.4 K suscriptores");

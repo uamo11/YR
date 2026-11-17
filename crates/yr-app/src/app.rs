@@ -2436,21 +2436,82 @@ impl YrApp {
                     );
                 });
                 ui.add_space(6.0);
-                ui.label(
-                    RichText::new(&pl.summary.title)
-                        .size(18.0)
-                        .strong()
-                        .color(TEXT_PRIMARY),
-                );
-                ui.add_space(6.0);
-                self.render_collection_actions(ui, ctx, &pl.tracks, true);
-                ui.add_space(8.0);
                 let detail_viewport = ui.available_rect_before_wrap();
                 self.detail_scroller.update(ui, detail_viewport, !self.detail_loading);
                 let detail_scroll = egui::ScrollArea::vertical()
                     .vertical_scroll_offset(self.detail_scroller.offset_y)
                     .drag_to_scroll(false)
                     .show(ui, |ui| {
+                        ui.vertical_centered(|ui| {
+                            let (art_rect, _) =
+                                ui.allocate_exact_size(Vec2::splat(156.0), Sense::hover());
+                            ui.painter().rect_filled(
+                                art_rect,
+                                CornerRadius::same(12),
+                                BG_ELEVATED,
+                            );
+                            let note_rect = egui::Rect::from_center_size(
+                                art_rect.center(),
+                                Vec2::splat(52.0),
+                            );
+                            icons::draw_icon(
+                                ui.painter(),
+                                note_rect,
+                                icons::Icon::MusicNote,
+                                Color32::from_white_alpha(95),
+                            );
+                            let cover_url = pl.summary.thumbnail_url.as_deref().or_else(|| {
+                                pl.tracks
+                                    .first()
+                                    .and_then(|t| t.thumbnail_url.as_deref())
+                            });
+                            if let Some(u) = cover_url {
+                                paint_progressive_image(
+                                    ui,
+                                    art_rect,
+                                    u,
+                                    544,
+                                    Vec2::splat(156.0),
+                                    CornerRadius::same(12),
+                                );
+                            }
+                            ui.add_space(10.0);
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(&pl.summary.title)
+                                        .size(19.0)
+                                        .strong()
+                                        .color(TEXT_PRIMARY),
+                                )
+                                .wrap()
+                                .selectable(false),
+                            );
+                            if let Some(author) = pl.summary.author.as_deref().filter(|s| !s.is_empty()) {
+                                ui.add_space(2.0);
+                                ui.label(
+                                    RichText::new(author)
+                                        .size(14.0)
+                                        .color(TEXT_SECONDARY),
+                                );
+                            }
+                            let count = pl.tracks.len();
+                            let total_secs: u64 =
+                                pl.tracks.iter().filter_map(|t| t.duration_secs).sum();
+                            let count_txt = if count == 1 {
+                                "1 canción".to_string()
+                            } else {
+                                format!("{count} canciones")
+                            };
+                            let meta = if total_secs > 0 {
+                                format!("{count_txt} • {}", format_seconds(total_secs))
+                            } else {
+                                count_txt
+                            };
+                            ui.label(RichText::new(meta).size(12.0).color(TEXT_SECONDARY));
+                            ui.add_space(10.0);
+                            self.render_collection_actions(ui, ctx, &pl.tracks, true);
+                        });
+                        ui.add_space(10.0);
                         for (idx, track) in pl.tracks.iter().enumerate() {
                             self.render_track_row(ui, ctx, track, &pl.tracks, idx, false);
                         }
@@ -4771,12 +4832,16 @@ impl YrApp {
         ctx: &egui::Context,
         album: &yr_core::AlbumSummary,
     ) {
+        let sub = match album.year {
+            Some(y) if y > 0 => format!("{} • {y}", album.artist),
+            _ => album.artist.clone(),
+        };
         if render_collection_row(
             ui,
             ("album_row", &album.id),
             album.thumbnail_url.as_deref(),
             &album.title,
-            Some(album.artist.as_str()),
+            Some(sub.as_str()),
         ) {
             self.open_album(album.id.clone(), ctx);
         }
@@ -4788,12 +4853,18 @@ impl YrApp {
         ctx: &egui::Context,
         pl: &PlaylistSummary,
     ) {
+        let sub = match (pl.author.as_deref(), pl.track_count) {
+            (Some(a), Some(c)) if !a.is_empty() && c > 0 => format!("{a} • {c} canciones"),
+            (Some(a), _) if !a.is_empty() => a.to_string(),
+            (_, Some(c)) if c > 0 => format!("Playlist • {c} canciones"),
+            _ => "Playlist de YouTube Music".to_string(),
+        };
         if render_collection_row(
             ui,
             ("playlist_row", &pl.id),
             pl.thumbnail_url.as_deref(),
             &pl.title,
-            pl.author.as_deref(),
+            Some(sub.as_str()),
         ) {
             self.open_playlist(pl.id.clone(), ctx);
         }
@@ -7873,7 +7944,7 @@ impl YrApp {
                     ui.label(RichText::new("Ajusta los mixes de inicio según tu historial de reproducción, canciones favoritas y artistas seguidos.").size(12.0).color(TEXT_SECONDARY));
                 }
                 SettingsCategory::About => {
-                    ui.heading("YR Music v0.6.8");
+                    ui.heading("YR Music v0.6.9");
                     ui.label("Cliente nativo de música 100% en Rust para Android y escritorio.");
                     ui.add_space(6.0);
                     ui.label(RichText::new("Motor de audio Symphonia PCM de ultra-baja latencia con ecualizador paramétrico de 5 bandas en tiempo real, prefetch predictivo en disco y compatibilidad completa con YouTube Music.").size(12.0).color(TEXT_SECONDARY));
@@ -8985,7 +9056,7 @@ impl YrApp {
                         }
                         if menu_row(ui, icons::Icon::Help, "Ayuda y comentarios").clicked() {
                             self.show_account_modal = false;
-                            self.set_banner("YR Music v0.6.8 • Pure Rust");
+                            self.set_banner("YR Music v0.6.9 • Pure Rust");
                         }
 
                         #[cfg(target_os = "android")]
