@@ -1865,10 +1865,17 @@ impl YrApp {
             return;
         }
         let max_w = (ctx.screen_rect().width() - 48.0).clamp(180.0, 420.0);
+        let has_mini = self
+            .queue
+            .lock()
+            .map(|q| q.current_track().is_some())
+            .unwrap_or(false);
         let (anchor_align, anchor_offset) = if self.now_playing_open && !self.show_settings {
-            (egui::Align2::CENTER_TOP, Vec2::new(0.0, 82.0))
+            (egui::Align2::CENTER_TOP, Vec2::new(0.0, 92.0))
+        } else if has_mini {
+            (egui::Align2::CENTER_BOTTOM, Vec2::new(0.0, -204.0))
         } else {
-            (egui::Align2::CENTER_BOTTOM, Vec2::new(0.0, -148.0))
+            (egui::Align2::CENTER_BOTTOM, Vec2::new(0.0, -138.0))
         };
         egui::Area::new(egui::Id::new("yr_status_toast"))
             .anchor(anchor_align, anchor_offset)
@@ -4261,18 +4268,20 @@ impl YrApp {
                                                 })
                                                 .response
                                                 .interact(Sense::click());
-                                            if r.clicked() {
-                                                self.search_query = q.clone();
-                                                self.trigger_search(ctx);
-                                            }
-                                            ui.add(
+                                            let lbl_resp = ui.add(
                                                 egui::Label::new(
                                                     RichText::new(q)
                                                         .size(12.0)
                                                         .color(TEXT_PRIMARY),
                                                 )
-                                                .truncate(),
+                                                .truncate()
+                                                .selectable(false)
+                                                .sense(Sense::click()),
                                             );
+                                            if r.clicked() || lbl_resp.clicked() {
+                                                self.search_query = q.clone();
+                                                self.trigger_search(ctx);
+                                            }
                                         });
                                     }
                                 });
@@ -6553,8 +6562,9 @@ impl YrApp {
                                 });
                         }
                     }
-                } else if self.is_video_mode {
-                    // Widescreen Video Surface (16:9 YouTube Music style)
+                } else {
+                    if self.is_video_mode {
+                        // Widescreen Video Surface (16:9 YouTube Music style)
                     ui.add_space(6.0);
                     let video_w = (avail_w - 24.0).min(380.0);
                     let video_h = (video_w * 9.0 / 16.0).clamp(140.0, 210.0);
@@ -6706,8 +6716,9 @@ impl YrApp {
                             }
                         }
                     });
+                    }
 
-                    ui.add_space(16.0);
+                    ui.add_space(if self.is_video_mode { 10.0 } else { 16.0 });
                     // Left-aligned Title > and Artist constrained to avail_w
                     let title_w = (avail_w - 22.0).max(140.0);
                     let mut title_clicked = false;
@@ -7695,7 +7706,7 @@ impl YrApp {
                     ui.label(RichText::new("Ajusta los mixes de inicio según tu historial de reproducción, canciones favoritas y artistas seguidos.").size(12.0).color(TEXT_SECONDARY));
                 }
                 SettingsCategory::About => {
-                    ui.heading("YR Music v0.6.5");
+                    ui.heading("YR Music v0.6.6");
                     ui.label("Cliente nativo de música 100% en Rust para Android y escritorio.");
                     ui.add_space(6.0);
                     ui.label(RichText::new("Motor de audio Symphonia PCM de ultra-baja latencia con ecualizador paramétrico de 5 bandas en tiempo real, prefetch predictivo en disco y compatibilidad completa con YouTube Music.").size(12.0).color(TEXT_SECONDARY));
@@ -8807,7 +8818,7 @@ impl YrApp {
                         }
                         if menu_row(ui, icons::Icon::Help, "Ayuda y comentarios").clicked() {
                             self.show_account_modal = false;
-                            self.set_banner("YR Music v0.6.5 • Pure Rust");
+                            self.set_banner("YR Music v0.6.6 • Pure Rust");
                         }
 
                         #[cfg(target_os = "android")]

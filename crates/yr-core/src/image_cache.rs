@@ -1,9 +1,9 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-pub const MAX_CACHED_IMAGES: usize = 48;
-pub const IDLE_SOFT_LIMIT: usize = 20;
-pub const IDLE_FORGET_AFTER: Duration = Duration::from_secs(4);
+pub const MAX_CACHED_IMAGES: usize = 64;
+pub const IDLE_SOFT_LIMIT: usize = 32;
+pub const IDLE_FORGET_AFTER: Duration = Duration::from_secs(45);
 pub const MIN_ACTIVE_AGE: Duration = Duration::from_secs(2);
 
 pub struct ImageLru {
