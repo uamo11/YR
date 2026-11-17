@@ -1699,9 +1699,9 @@ impl eframe::App for YrApp {
         }
         self.process_events(ctx);
         let snap = self.audio.snapshot();
-        let fullscreen_player = self.now_playing_open && !self.show_settings;
+        let fullscreen_overlay = self.now_playing_open || self.show_settings;
 
-        if !fullscreen_player {
+        if !fullscreen_overlay {
             // Top Header Bar
             egui::TopBottomPanel::top("yr_top_bar")
                 .frame(egui::Frame::new().fill(BG_PRIMARY).inner_margin(12.0))
@@ -1805,7 +1805,7 @@ impl eframe::App for YrApp {
         let samples_full_bleed = self.active_tab == NavTab::Samples
             && !self.show_settings
             && matches!(self.detail_view, DetailView::None);
-        let panel_frame = if fullscreen_player || samples_full_bleed {
+        let panel_frame = if (self.now_playing_open && !self.show_settings) || samples_full_bleed {
             egui::Frame::new().fill(Color32::from_rgb(12, 12, 14)).inner_margin(0.0)
         } else {
             egui::Frame::new().fill(BG_PRIMARY).inner_margin(12.0)
@@ -4194,7 +4194,7 @@ impl YrApp {
             .show(ui, |ui| {
                 let mut shown_local_ids: HashSet<String> = HashSet::new();
                 let q_trimmed = self.search_query.trim().to_string();
-                if q_trimmed.len() >= 2 {
+                if q_trimmed.len() >= 2 && self.search_filter == SearchFilter::Songs {
                     let mut local_hits = self.store.search_local(&q_trimmed);
                     let q_low = q_trimmed.to_lowercase();
                     for dl in &self.downloads {
@@ -4209,15 +4209,15 @@ impl YrApp {
                     if !local_hits.is_empty() {
                         ui.add_space(6.0);
                         ui.label(
-                            RichText::new("En tu biblioteca (instantáneo)")
+                            RichText::new("En tu biblioteca")
                                 .size(13.0)
                                 .strong()
-                                .color(GREEN_OK),
+                                .color(TEXT_SECONDARY),
                         );
                         ui.add_space(4.0);
                         for (idx, t) in local_hits.iter().take(4).enumerate() {
                             shown_local_ids.insert(t.id.clone());
-                            self.render_track_row(ui, ctx, t, &local_hits, idx, true);
+                            self.render_track_row(ui, ctx, t, &local_hits, idx, false);
                             ui.add_space(3.0);
                         }
                     }
@@ -4654,30 +4654,88 @@ impl YrApp {
                     SearchFilter::Artists => {
                         let artists = self.search_results.artists.clone();
                         for artist in artists {
+                            let mut clicked = false;
                             egui::Frame::new()
                                 .fill(BG_SURFACE)
                                 .corner_radius(CornerRadius::same(10))
                                 .inner_margin(10.0)
                                 .show(ui, |ui| {
+                                    let row_start = ui.cursor().min;
+                                    let row_w = ui.available_width();
                                     ui.horizontal(|ui| {
-                                        render_thumb(ui, artist.thumbnail_url.as_deref(), 48.0);
-                                        ui.vertical(|ui| {
-                                            ui.label(RichText::new(&artist.name).strong());
-                                            if let Some(subs) = &artist.subscribers {
-                                                ui.label(
-                                                    RichText::new(subs)
-                                                        .small()
-                                                        .color(TEXT_SECONDARY),
+                                        let (av_rect, _) =
+                                            ui.allocate_exact_size(Vec2::splat(48.0), Sense::hover());
+                                        ui.painter()
+                                            .circle_filled(av_rect.center(), 24.0, BG_ELEVATED);
+                                        icons::draw_icon(
+                                            ui.painter(),
+                                            egui::Rect::from_center_size(
+                                                av_rect.center(),
+                                                Vec2::splat(22.0),
+                                            ),
+                                            icons::Icon::Account,
+                                            TEXT_SECONDARY,
+                                        );
+                                        if let Some(u) = artist.thumbnail_url.as_deref() {
+                                            paint_ready_image(
+                                                ui,
+                                                av_rect,
+                                                tracked_thumb_uri(u, 160),
+                                                Vec2::splat(48.0),
+                                                CornerRadius::same(24),
+                                            );
+                                        }
+                                        let text_w = (row_w - 86.0).max(110.0);
+                                        ui.allocate_ui(Vec2::new(text_w, 48.0), |ui| {
+                                            ui.vertical(|ui| {
+                                                ui.spacing_mut().item_spacing.y = 2.0;
+                                                ui.set_max_width(text_w);
+                                                render_clamped_label(
+                                                    ui,
+                                                    &artist.name,
+                                                    15.0,
+                                                    TEXT_PRIMARY,
+                                                    text_w,
+                                                    1,
                                                 );
-                                            }
+                                                if let Some(subs) = &artist.subscribers {
+                                                    ui.add(
+                                                        egui::Label::new(
+                                                            RichText::new(subs)
+                                                                .size(12.5)
+                                                                .color(TEXT_SECONDARY),
+                                                        )
+                                                        .truncate()
+                                                        .selectable(false),
+                                                    );
+                                                }
+                                            });
                                         });
                                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                            if ui.button("Ver").clicked() {
-                                                self.open_artist(artist.id.clone(), ctx);
-                                            }
+                                            ui.label(
+                                                RichText::new("›").size(20.0).color(TEXT_SECONDARY),
+                                            );
                                         });
                                     });
+                                    let hit_rect = egui::Rect::from_min_size(
+                                        row_start,
+                                        Vec2::new(row_w, 48.0),
+                                    );
+                                    if ui
+                                        .interact(
+                                            hit_rect,
+                                            ui.id().with(("artist_search_row", &artist.id)),
+                                            Sense::click(),
+                                        )
+                                        .clicked()
+                                    {
+                                        clicked = true;
+                                    }
                                 });
+                            if clicked {
+                                self.open_artist(artist.id.clone(), ctx);
+                            }
+                            ui.add_space(4.0);
                         }
                     }
                     SearchFilter::Playlists => {
@@ -7477,6 +7535,8 @@ impl YrApp {
     }
 
     fn render_settings(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        #[cfg(target_os = "android")]
+        ui.add_space(28.0);
         let is_root = self.settings_category == SettingsCategory::Root;
         let title = self.settings_category.title();
 
@@ -7538,7 +7598,7 @@ impl YrApp {
             // Categorized settings menu list (matches YouTube Music settings screen: media_1794881819990_14eee889.jpg)
             let cat_row = |ui: &mut egui::Ui, cat_title: &str| -> egui::Response {
                 let w = ui.available_width();
-                let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, 46.0), Sense::click());
+                let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, 50.0), Sense::click());
                 if ui.is_rect_visible(rect) {
                     let bg = if resp.hovered() {
                         Color32::from_white_alpha(16)
@@ -7813,7 +7873,7 @@ impl YrApp {
                     ui.label(RichText::new("Ajusta los mixes de inicio según tu historial de reproducción, canciones favoritas y artistas seguidos.").size(12.0).color(TEXT_SECONDARY));
                 }
                 SettingsCategory::About => {
-                    ui.heading("YR Music v0.6.7");
+                    ui.heading("YR Music v0.6.8");
                     ui.label("Cliente nativo de música 100% en Rust para Android y escritorio.");
                     ui.add_space(6.0);
                     ui.label(RichText::new("Motor de audio Symphonia PCM de ultra-baja latencia con ecualizador paramétrico de 5 bandas en tiempo real, prefetch predictivo en disco y compatibilidad completa con YouTube Music.").size(12.0).color(TEXT_SECONDARY));
@@ -8925,7 +8985,7 @@ impl YrApp {
                         }
                         if menu_row(ui, icons::Icon::Help, "Ayuda y comentarios").clicked() {
                             self.show_account_modal = false;
-                            self.set_banner("YR Music v0.6.7 • Pure Rust");
+                            self.set_banner("YR Music v0.6.8 • Pure Rust");
                         }
 
                         #[cfg(target_os = "android")]
