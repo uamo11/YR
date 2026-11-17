@@ -12,12 +12,19 @@
 ## ✨ Características Principales
 
 - 🎛️ **Ecualizador paramétrico de 5 bandas & Bass Boost:** Motor de audio DSP puro en Rust con filtros biquad de segundo orden en tiempo real (`60 Hz`, `230 Hz`, `910 Hz`, `3.6 kHz`, `14 kHz`), saturación suave anti-clipping (`tanh`) y preajustes audiófilos (*Plano*, *Graves +*, *Rock*, *Pop*, *Electrónica*, *Vocal*, *Acústico*).
+- 🎬 **Selector interactivo Canción / Video:** Switch dinámico estilo YouTube Music `[ 🎧 | ▶ ]` en el reproductor a pantalla completa, superficie panorámica 16:9 con badge 1080p HD y apertura directa de video nativo en Android.
+- 👤 **Apartado de Perfil / Cuenta:** Hoja modal idéntica a YouTube Music con foto de perfil, identificador de usuario Google, enlace directo a gestión de cuenta Google, accesos a *Tu canal*, *Descargas*, *Historial*, *Tu Recap*, *Insignias*, *Cambiar de cuenta*, *Configuración* y enlaces legales.
+- ⚙️ **Configuración categorizada por subsistemas:**
+  - 🔋 **Ahorro de batería y datos móviles:** Streaming reducido a 64 kbps en redes móviles, suspensión de precarga en modo de batería baja y bloqueo opcional de tráfico multimedia fuera de Wi-Fi.
+  - 📥 **Descargas inteligentes (Auto-descarga):** Descarga predictiva y automática de canciones favoritas y mixes recientes para escucha 100% offline.
+  - 🔒 **Privacidad y recomendaciones:** Modo incógnito temporal y personalización algorítmica de listas según historial y likes de la cuenta Google.
 - ⚡ **Prefetch predictivo de audio en disco:** Resuelve y descarga automáticamente el audio de la siguiente canción de la cola en segundo plano, logrando saltos de pista instantáneos con latencia cero de red.
-- 🎨 **Experiencia visual estilo YouTube Music:**
+- 🎨 **Experiencia visual y táctil ultra fluida:**
   - Hoja de acciones inferior rápida con accesos directos (*Reproducir a continuación*, *Guardar en playlist*, *Compartir*, *Descartar fila*, *Temporizador de apagado* y *Ecualizador*).
   - Carrusel horizontal de búsquedas recientes con portadas cuadradas e historial táctil.
   - Tarjetas de descubrimiento rápido: *Nuevos lanzamientos*, *Rankings* y *Estados de ánimo y géneros*.
   - Vista de Biblioteca con filtros (*Descargas*, *Playlists*, *Canciones*, *Álbumes*, *Artistas*), botón flotante `+ Nueva` y tarjeta gradiente para *"Música que te gustó"*.
+  - Iconografía estandarizada Material Design y motor de scroll kinético táctil a 60 FPS sin rebotes ni bloqueos.
 - 📥 **Gestor de descargas paralelo con reanudación por bloques:** Descargas aceleradas mediante chunks concurrentes de 1 MB, verificación por hash SHA-256, rollback automático ante fallos de conexión y modo de reproducción offline con shuffle.
 - 🛡️ **SponsorBlock integrado:** Omisión automática de intros, interludios no musicales y anuncios patrocinados dentro del audio.
 - 🌙 **Temporizador de apagado:** Modo de apagado programable (15, 30, 45, 60 minutos o al finalizar la canción actual).
@@ -31,7 +38,11 @@
 |:---:|:---:|:---:|
 | <img src="docs/screenshots/01_home.png" width="240" alt="Inicio" /> | <img src="docs/screenshots/02_library.png" width="240" alt="Biblioteca" /> | <img src="docs/screenshots/03_search.png" width="240" alt="Búsqueda" /> |
 
-| Hoja de Acciones (Paridad YT Music) | Ecualizador & Bass Boost |
+| Perfil / Cuenta | Configuración Categorizada | Ahorro de Datos & Batería |
+|:---:|:---:|:---:|
+| <img src="docs/screenshots/06_account_modal.png" width="240" alt="Cuenta" /> | <img src="docs/screenshots/07_categorized_settings.png" width="240" alt="Configuración" /> | <img src="docs/screenshots/08_data_saver.png" width="240" alt="Ahorro de datos" /> |
+
+| Hoja de Acciones | Ecualizador & Bass Boost |
 |:---:|:---:|
 | <img src="docs/screenshots/04_action_sheet.png" width="240" alt="Hoja de Acciones" /> | <img src="docs/screenshots/05_equalizer.png" width="240" alt="Ecualizador" /> |
 
@@ -53,7 +64,7 @@ El proyecto está modularizado en un espacio de trabajo de Cargo limpio y desaco
 
 Puedes descargar el APK precompilado y firmado para Android en la sección de [Releases de GitHub](https://github.com/uamo11/YR/releases).
 
-1. Descarga el archivo [`yr-music-v0.5.0-android.apk`](https://github.com/uamo11/YR/releases/latest/download/yr-music-v0.5.0-android.apk).
+1. Descarga el archivo [`yr-music-v0.6.0-android.apk`](https://github.com/uamo11/YR/releases/latest/download/yr-music-v0.6.0-android.apk).
 2. Habilita la instalación desde orígenes desconocidos si tu dispositivo lo solicita.
 3. Instala y disfruta de música sin publicidad y con la máxima velocidad de respuesta.
 

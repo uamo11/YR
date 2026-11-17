@@ -5445,6 +5445,8 @@ impl YrApp {
             egui::pos2(bg_rect.right() - pad_x, bg_rect.bottom() - safe_bottom),
         );
         ui.allocate_new_ui(egui::UiBuilder::new().max_rect(inner_rect), |ui| {
+            let top_bar_min_y = ui.cursor().top();
+
             // Top bar: v chevron | optional sleep badge | more ⋮ button
             ui.horizontal(|ui| {
                 if icons::icon_button(
@@ -5523,17 +5525,21 @@ impl YrApp {
                         self.set_banner("Transmitiendo a dispositivo...");
                     }
                 });
+            });
 
-                // Center: YouTube Music Audio/Video mode segmented pill
-                let switcher_w = 96.0;
-                let center_pad = ((ui.available_width() - switcher_w) * 0.5).max(4.0);
-                ui.add_space(center_pad);
+            // Center: YouTube Music Audio/Video mode segmented pill
+            let pill_rect = Rect::from_center_size(
+                Pos2::new(inner_rect.center().x, top_bar_min_y + 19.0),
+                Vec2::new(96.0, 30.0),
+            );
+            ui.allocate_new_ui(egui::UiBuilder::new().max_rect(pill_rect), |ui| {
                 egui::Frame::new()
-                    .fill(Color32::from_white_alpha(26))
-                    .corner_radius(CornerRadius::same(16))
-                    .inner_margin(egui::Margin::symmetric(3, 2))
+                    .fill(Color32::from_white_alpha(32))
+                    .corner_radius(CornerRadius::same(15))
+                    .inner_margin(egui::Margin::symmetric(2, 2))
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 2.0;
                             let is_video = self.is_video_mode;
                             let (ar, a_resp) = ui.allocate_exact_size(Vec2::new(44.0, 26.0), Sense::click());
                             if ui.is_rect_visible(ar) {
@@ -6992,7 +6998,19 @@ impl YrApp {
                 }
             }
             ui.add_space(6.0);
-            ui.label(RichText::new(title).size(19.0).strong().color(Color32::WHITE));
+            let title_max_w = if is_root {
+                ui.available_width()
+            } else {
+                (ui.available_width() - 80.0).max(100.0)
+            };
+            ui.allocate_ui(Vec2::new(title_max_w, 28.0), |ui| {
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(title).size(18.0).strong().color(Color32::WHITE),
+                    )
+                    .truncate(),
+                );
+            });
             if !is_root {
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     if ui.button("Cerrar").clicked() {
@@ -7067,7 +7085,7 @@ impl YrApp {
             if cat_row(ui, "Recomendaciones", "Personalización de feeds con cuenta Google").clicked() {
                 self.settings_category = SettingsCategory::Recommendations;
             }
-            if cat_row(ui, "Acerca de YR Music", "Versión v0.5.0, motor 100% Rust, MIT").clicked() {
+            if cat_row(ui, "Acerca de YR Music", "Versión v0.6.0, motor 100% Rust, MIT").clicked() {
                 self.settings_category = SettingsCategory::About;
             }
         } else {
@@ -7251,7 +7269,7 @@ impl YrApp {
                     ui.label(RichText::new("Ajusta los mixes de inicio según tu historial de reproducción, canciones favoritas y artistas seguidos.").size(12.0).color(TEXT_SECONDARY));
                 }
                 SettingsCategory::About => {
-                    ui.heading("YR Music v0.5.0");
+                    ui.heading("YR Music v0.6.0");
                     ui.label("Cliente nativo de música 100% en Rust para Android y escritorio.");
                     ui.add_space(6.0);
                     ui.label(RichText::new("Motor de audio Symphonia PCM de ultra-baja latencia con ecualizador paramétrico de 5 bandas en tiempo real, prefetch predictivo en disco y compatibilidad completa con YouTube Music.").size(12.0).color(TEXT_SECONDARY));
@@ -8333,7 +8351,7 @@ impl YrApp {
                         }
                         if menu_row(ui, icons::Icon::Help, "Ayuda y comentarios").clicked() {
                             self.show_account_modal = false;
-                            self.set_banner("YR Music v0.5.0 • Pure Rust");
+                            self.set_banner("YR Music v0.6.0 • Pure Rust");
                         }
 
                         ui.add_space(14.0);
