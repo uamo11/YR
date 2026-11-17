@@ -51,23 +51,44 @@ pub fn apply_ytm_theme(ctx: &egui::Context) {
 }
 
 fn install_clean_fonts(ctx: &egui::Context) {
+    let mut fonts = egui::FontDefinitions::default();
+
+    // Official Google Material Icons font (embedded)
+    fonts.font_data.insert(
+        "material_icons".to_owned(),
+        std::sync::Arc::new(egui::FontData::from_static(include_bytes!(
+            "../assets/MaterialIcons-Regular.ttf"
+        ))),
+    );
+
     let candidates = [
         "/system/fonts/RobotoStatic-Regular.ttf",
         "/system/fonts/Roboto-Regular.ttf",
         "/system/fonts/NotoSans-Regular.ttf",
     ];
+    let mut loaded_system = false;
     for path in candidates {
         if let Ok(bytes) = std::fs::read(path) {
-            let mut fonts = egui::FontDefinitions::default();
             fonts.font_data.insert(
                 "system_sans".to_owned(),
                 std::sync::Arc::new(egui::FontData::from_owned(bytes)),
             );
-            if let Some(prop) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
-                prop.insert(0, "system_sans".to_owned());
-            }
-            ctx.set_fonts(fonts);
-            return;
+            loaded_system = true;
+            break;
         }
     }
+
+    if let Some(prop) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
+        if loaded_system {
+            prop.insert(0, "system_sans".to_owned());
+        }
+        prop.push("material_icons".to_owned());
+    }
+
+    fonts.families.insert(
+        egui::FontFamily::Name(std::sync::Arc::from("material_icons")),
+        vec!["material_icons".to_owned()],
+    );
+
+    ctx.set_fonts(fonts);
 }

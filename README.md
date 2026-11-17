@@ -11,13 +11,15 @@
 
 ## ✨ Características Principales
 
-- 🎛️ **Ecualizador paramétrico de 5 bandas & Bass Boost:** Motor de audio DSP puro en Rust con filtros biquad de segundo orden en tiempo real (`60 Hz`, `230 Hz`, `910 Hz`, `3.6 kHz`, `14 kHz`), saturación suave anti-clipping (`tanh`) y preajustes audiófilos (*Plano*, *Graves +*, *Rock*, *Pop*, *Electrónica*, *Vocal*, *Acústico*).
-- 🎬 **Selector interactivo Canción / Video:** Switch dinámico estilo YouTube Music `[ 🎧 | ▶ ]` en el reproductor a pantalla completa, superficie panorámica 16:9 con badge 1080p HD y apertura directa de video nativo en Android.
-- 👤 **Apartado de Perfil / Cuenta:** Hoja modal idéntica a YouTube Music con foto de perfil, identificador de usuario Google, enlace directo a gestión de cuenta Google, accesos a *Tu canal*, *Descargas*, *Historial*, *Tu Recap*, *Insignias*, *Cambiar de cuenta*, *Configuración* y enlaces legales.
-- ⚙️ **Configuración categorizada por subsistemas:**
+- 🎛️ **Ecualizador paramétrico de 5 bandas & Bass Boost:** Motor de audio DSP puro en Rust con filtros biquad de segundo orden en tiempo real (`60 Hz`, `230 Hz`, `910 Hz`, `3.6 kHz`, `14 kHz`), saturación suave anti-clipping (`tanh`), panel centrado sin desbordamiento y preajustes audiófilos (*Plano*, *Graves +*, *Rock*, *Pop*, *Electrónica*, *Vocal*, *Acústico*).
+- 🎬 **Selector interactivo Canción / Video:** Switch dinámico estilo YouTube Music `[ 🎧 Canción | ▶ Video ]` en el reproductor a pantalla completa, superficie panorámica 16:9 con badge 1080p HD y apertura directa de video nativo en Android.
+- 👤 **Apartado de Perfil / Cuenta:** Pantalla completa idéntica a YouTube Music con foto de perfil, identificador de usuario Google (`Antony`, `@IsAntonyVs`), enlace directo a gestión de cuenta Google, accesos a *Tu canal*, *Descargas*, *Historial*, *Tu Recap*, *Insignias*, *Cambiar de cuenta*, *Configuración* y enlaces legales.
+- ⚙️ **Configuración categorizada en 10 secciones:**
+  - 🧪 **Morphe & Centro familiar:** Experimentos de audio 3D y control familiar.
   - 🔋 **Ahorro de batería y datos móviles:** Streaming reducido a 64 kbps en redes móviles, suspensión de precarga en modo de batería baja y bloqueo opcional de tráfico multimedia fuera de Wi-Fi.
-  - 📥 **Descargas inteligentes (Auto-descarga):** Descarga predictiva y automática de canciones favoritas y mixes recientes para escucha 100% offline.
-  - 🔒 **Privacidad y recomendaciones:** Modo incógnito temporal y personalización algorítmica de listas según historial y likes de la cuenta Google.
+  - 📥 **Descargas inteligentes (Auto-descarga):** Descarga predictiva y automática de canciones favoritas y mixes recientes para escucha 100% offline con monitor de almacenamiento y borrado de caché.
+  - 🔒 **Privacidad y recomendaciones:** Modo incógnito, borrado de historiales y personalización algorítmica de listas según cuenta Google.
+- 🎨 **Iconografía oficial Google Material Design:** Todos los iconos del sistema integrados mediante fuente vectorial auténtica de Google Material Icons (58 glifos oficiales pixel-perfect).
 - ⚡ **Prefetch predictivo de audio en disco:** Resuelve y descarga automáticamente el audio de la siguiente canción de la cola en segundo plano, logrando saltos de pista instantáneos con latencia cero de red.
 - 🎨 **Experiencia visual y táctil ultra fluida:**
   - Hoja de acciones inferior rápida con accesos directos (*Reproducir a continuación*, *Guardar en playlist*, *Compartir*, *Descartar fila*, *Temporizador de apagado* y *Ecualizador*).
@@ -64,7 +66,7 @@ El proyecto está modularizado en un espacio de trabajo de Cargo limpio y desaco
 
 Puedes descargar el APK precompilado y firmado para Android en la sección de [Releases de GitHub](https://github.com/uamo11/YR/releases).
 
-1. Descarga el archivo [`yr-music-v0.6.0-android.apk`](https://github.com/uamo11/YR/releases/latest/download/yr-music-v0.6.0-android.apk).
+1. Descarga el archivo [`yr-music-v0.6.1-android.apk`](https://github.com/uamo11/YR/releases/latest/download/yr-music-v0.6.1-android.apk).
 2. Habilita la instalación desde orígenes desconocidos si tu dispositivo lo solicita.
 3. Instala y disfruta de música sin publicidad y con la máxima velocidad de respuesta.
 

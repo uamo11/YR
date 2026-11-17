@@ -4,3 +4,5 @@
 *.aab
 *.keystore
 .DS_Store
+scratch/
+dist/

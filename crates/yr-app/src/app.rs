@@ -52,6 +52,8 @@ enum LibraryFilter {
 pub enum SettingsCategory {
     #[default]
     Root,
+    Morphe,
+    FamilyCenter,
     General,
     Playback,
     DataSaver,
@@ -66,6 +68,8 @@ impl SettingsCategory {
     pub fn title(self) -> &'static str {
         match self {
             Self::Root => "Configuración",
+            Self::Morphe => "Morphe",
+            Self::FamilyCenter => "Centro familiar",
             Self::General => "General",
             Self::Playback => "Reproducción",
             Self::DataSaver => "Ahorro de datos",
@@ -2908,46 +2912,36 @@ impl YrApp {
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 12.0;
-                    for (cidx, card) in shelf.cards.iter().take(16).enumerate() {
-                        let card_start = ui.next_widget_position();
-                        ui.vertical(|ui| {
-                            ui.set_width(card_w);
-                            ui.spacing_mut().item_spacing.y = 4.0;
-                            render_thumb(ui, card.thumbnail_url.as_deref(), card_w);
-                            ui.add(
-                                egui::Label::new(
-                                    RichText::new(&card.title)
-                                        .strong()
-                                        .size(13.5)
-                                        .color(TEXT_PRIMARY),
-                                )
-                                .truncate()
-                                .selectable(false),
-                            );
-                            if !card.subtitle.is_empty() {
+                    for (_cidx, card) in shelf.cards.iter().take(16).enumerate() {
+                        let resp = ui.allocate_ui(Vec2::new(card_w, card_w + 46.0), |ui| {
+                            ui.vertical(|ui| {
+                                ui.set_width(card_w);
+                                ui.spacing_mut().item_spacing.y = 4.0;
+                                render_thumb(ui, card.thumbnail_url.as_deref(), card_w);
                                 ui.add(
                                     egui::Label::new(
-                                        RichText::new(&card.subtitle)
-                                            .size(11.5)
-                                            .color(TEXT_SECONDARY),
+                                        RichText::new(&card.title)
+                                            .strong()
+                                            .size(13.5)
+                                            .color(TEXT_PRIMARY),
                                     )
                                     .truncate()
                                     .selectable(false),
                                 );
-                            }
+                                if !card.subtitle.is_empty() {
+                                    ui.add(
+                                        egui::Label::new(
+                                            RichText::new(&card.subtitle)
+                                                .size(11.5)
+                                                .color(TEXT_SECONDARY),
+                                        )
+                                        .truncate()
+                                        .selectable(false),
+                                    );
+                                }
+                            });
                         });
-                        let card_rect = egui::Rect::from_min_size(
-                            card_start,
-                            Vec2::new(card_w, card_w + 42.0),
-                        );
-                        if ui
-                            .interact(
-                                card_rect,
-                                ui.make_persistent_id(("carousel_card", salt, cidx, &card.title)),
-                                Sense::click(),
-                            )
-                            .clicked()
-                        {
+                        if resp.response.interact(Sense::click()).clicked() {
                             self.activate_shelf_card(card, &sibling_tracks, ctx);
                         }
                     }
@@ -5660,43 +5654,59 @@ impl YrApp {
             // Center: YouTube Music Audio/Video mode segmented pill
             let pill_rect = Rect::from_center_size(
                 Pos2::new(inner_rect.center().x, top_bar_min_y + 19.0),
-                Vec2::new(96.0, 30.0),
+                Vec2::new(148.0, 32.0),
             );
             ui.allocate_new_ui(egui::UiBuilder::new().max_rect(pill_rect), |ui| {
                 egui::Frame::new()
                     .fill(Color32::from_white_alpha(32))
-                    .corner_radius(CornerRadius::same(15))
+                    .corner_radius(CornerRadius::same(16))
                     .inner_margin(egui::Margin::symmetric(2, 2))
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
                             ui.spacing_mut().item_spacing.x = 2.0;
                             let is_video = self.is_video_mode;
-                            let (ar, a_resp) = ui.allocate_exact_size(Vec2::new(44.0, 26.0), Sense::click());
+                            let (ar, a_resp) = ui.allocate_exact_size(Vec2::new(70.0, 28.0), Sense::click());
                             if ui.is_rect_visible(ar) {
                                 if !is_video {
-                                    ui.painter().rect_filled(ar, CornerRadius::same(13), Color32::from_white_alpha(55));
+                                    ui.painter().rect_filled(ar, CornerRadius::same(14), Color32::from_white_alpha(55));
                                 }
+                                let ic_r = Rect::from_center_size(Pos2::new(ar.left() + 14.0, ar.center().y), Vec2::splat(15.0));
                                 icons::draw_icon(
                                     ui.painter(),
-                                    egui::Rect::from_center_size(ar.center(), Vec2::splat(15.0)),
+                                    ic_r,
                                     icons::Icon::Headphones,
-                                    if !is_video { Color32::WHITE } else { Color32::from_white_alpha(140) },
+                                    if !is_video { Color32::WHITE } else { Color32::from_white_alpha(150) },
+                                );
+                                ui.painter().text(
+                                    Pos2::new(ar.left() + 26.0, ar.center().y),
+                                    Align2::LEFT_CENTER,
+                                    "Canción",
+                                    egui::FontId::proportional(12.0),
+                                    if !is_video { Color32::WHITE } else { Color32::from_white_alpha(150) },
                                 );
                             }
                             if a_resp.clicked() {
                                 self.is_video_mode = false;
-                                self.set_banner("Modo Canción (Solo audio • Ahorro de batería)");
+                                self.set_banner("Modo Canción activado");
                             }
-                            let (vr, v_resp) = ui.allocate_exact_size(Vec2::new(44.0, 26.0), Sense::click());
+                            let (vr, v_resp) = ui.allocate_exact_size(Vec2::new(70.0, 28.0), Sense::click());
                             if ui.is_rect_visible(vr) {
                                 if is_video {
-                                    ui.painter().rect_filled(vr, CornerRadius::same(13), ACCENT_RED);
+                                    ui.painter().rect_filled(vr, CornerRadius::same(14), ACCENT_RED);
                                 }
+                                let ic_r = Rect::from_center_size(Pos2::new(vr.left() + 16.0, vr.center().y), Vec2::splat(13.0));
                                 icons::draw_icon(
                                     ui.painter(),
-                                    egui::Rect::from_center_size(vr.center(), Vec2::splat(13.0)),
+                                    ic_r,
                                     icons::Icon::Play,
-                                    if is_video { Color32::WHITE } else { Color32::from_white_alpha(140) },
+                                    if is_video { Color32::WHITE } else { Color32::from_white_alpha(150) },
+                                );
+                                ui.painter().text(
+                                    Pos2::new(vr.left() + 28.0, vr.center().y),
+                                    Align2::LEFT_CENTER,
+                                    "Video",
+                                    egui::FontId::proportional(12.0),
+                                    if is_video { Color32::WHITE } else { Color32::from_white_alpha(150) },
                                 );
                             }
                             if v_resp.clicked() {
@@ -7189,10 +7199,10 @@ impl YrApp {
         ui.add_space(10.0);
 
         if is_root {
-            // Categorized settings menu list (matches YouTube Music settings screen)
-            let cat_row = |ui: &mut egui::Ui, cat_title: &str, subtitle: &str| -> egui::Response {
+            // Categorized settings menu list (matches YouTube Music settings screen: media_1794881819990_14eee889.jpg)
+            let cat_row = |ui: &mut egui::Ui, cat_title: &str| -> egui::Response {
                 let w = ui.available_width();
-                let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, 54.0), Sense::click());
+                let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, 46.0), Sense::click());
                 if ui.is_rect_visible(rect) {
                     let bg = if resp.hovered() {
                         Color32::from_white_alpha(16)
@@ -7200,63 +7210,75 @@ impl YrApp {
                         Color32::TRANSPARENT
                     };
                     if bg != Color32::TRANSPARENT {
-                        ui.painter().rect_filled(rect, CornerRadius::same(8), bg);
+                        ui.painter().rect_filled(rect, CornerRadius::same(6), bg);
                     }
                     ui.painter().text(
-                        Pos2::new(rect.left() + 8.0, rect.top() + 10.0),
-                        Align2::LEFT_TOP,
+                        Pos2::new(rect.left() + 14.0, rect.center().y),
+                        Align2::LEFT_CENTER,
                         cat_title,
                         egui::FontId::proportional(15.5),
                         Color32::WHITE,
-                    );
-                    ui.painter().text(
-                        Pos2::new(rect.left() + 8.0, rect.top() + 32.0),
-                        Align2::LEFT_TOP,
-                        subtitle,
-                        egui::FontId::proportional(12.0),
-                        TEXT_SECONDARY,
-                    );
-                    icons::draw_icon(
-                        ui.painter(),
-                        Rect::from_center_size(
-                            Pos2::new(rect.right() - 16.0, rect.center().y),
-                            Vec2::splat(14.0),
-                        ),
-                        icons::Icon::ChevronRight,
-                        Color32::from_white_alpha(120),
                     );
                 }
                 resp
             };
 
-            if cat_row(ui, "General", "Idioma, tema visual oscuro y volumen").clicked() {
+            if cat_row(ui, "Morphe").clicked() {
+                self.settings_category = SettingsCategory::Morphe;
+            }
+            if cat_row(ui, "Centro familiar").clicked() {
+                self.settings_category = SettingsCategory::FamilyCenter;
+            }
+            if cat_row(ui, "General").clicked() {
                 self.settings_category = SettingsCategory::General;
             }
-            if cat_row(ui, "Reproducción", "Calidad de audio, ecualizador, autoplay y SponsorBlock").clicked() {
+            if cat_row(ui, "Reproducción").clicked() {
                 self.settings_category = SettingsCategory::Playback;
             }
-            if cat_row(ui, "Ahorro de datos", "Sistemas de ahorro de batería y datos móviles").clicked() {
+            if cat_row(ui, "Ahorro de datos").clicked() {
                 self.settings_category = SettingsCategory::DataSaver;
             }
-            if cat_row(ui, "Descargas y almacenamiento", "Auto-descarga, modo Wi-Fi y gestión de espacio").clicked() {
+            if cat_row(ui, "Descargas y almacenamiento").clicked() {
                 self.settings_category = SettingsCategory::DownloadsStorage;
             }
-            if cat_row(ui, "Notificaciones", "Controles en barra de estado y alertas de lanzamientos").clicked() {
+            if cat_row(ui, "Notificaciones").clicked() {
                 self.settings_category = SettingsCategory::Notifications;
             }
-            if cat_row(ui, "Privacidad y datos", "Modo incógnito y borrado de historial").clicked() {
+            if cat_row(ui, "Privacidad y datos").clicked() {
                 self.settings_category = SettingsCategory::Privacy;
             }
-            if cat_row(ui, "Recomendaciones", "Personalización de feeds con cuenta Google").clicked() {
+            if cat_row(ui, "Recomendaciones").clicked() {
                 self.settings_category = SettingsCategory::Recommendations;
             }
-            if cat_row(ui, "Acerca de YR Music", "Versión v0.6.0, motor 100% Rust, MIT").clicked() {
+            if cat_row(ui, "Acerca de YR Music").clicked() {
                 self.settings_category = SettingsCategory::About;
             }
         } else {
             // Category detail page
             match self.settings_category {
                 SettingsCategory::Root => {}
+                SettingsCategory::Morphe => {
+                    ui.heading("Morphe & Laboratorio");
+                    ui.add_space(4.0);
+                    ui.label(RichText::new("Experimentos de audio en Rust y funciones avanzadas de próxima generación.").color(TEXT_SECONDARY));
+                    ui.add_space(10.0);
+                    ui.label("Efectos espaciales:");
+                    ui.label(RichText::new("Procesamiento binaural de baja latencia con motor nativo Symphonia.").size(12.0).color(TEXT_SECONDARY));
+                    ui.add_space(10.0);
+                    ui.label("Generación de carátulas:");
+                    ui.label(RichText::new("Paleta cromática adaptativa en tiempo real extraída de la portada del álbum.").size(12.0).color(TEXT_SECONDARY));
+                }
+                SettingsCategory::FamilyCenter => {
+                    ui.heading("Centro familiar");
+                    ui.add_space(4.0);
+                    ui.label(RichText::new("Administra la experiencia musical de los miembros de tu familia.").color(TEXT_SECONDARY));
+                    ui.add_space(10.0);
+                    ui.label("Filtro de contenido explícito:");
+                    ui.label(RichText::new("Oculta canciones con letras o temáticas explícitas en búsquedas y mixes automáticos.").size(12.0).color(TEXT_SECONDARY));
+                    ui.add_space(10.0);
+                    ui.label("Cuentas compartidas:");
+                    ui.label(RichText::new("Permite alternar perfiles familiares de Google rápidamente sin perder descargas locales.").size(12.0).color(TEXT_SECONDARY));
+                }
                 SettingsCategory::General => {
                     ui.label("Idioma de la aplicación:");
                     ui.label(RichText::new("Español (Latinoamérica)").color(TEXT_SECONDARY));
@@ -7434,7 +7456,7 @@ impl YrApp {
                     ui.label(RichText::new("Ajusta los mixes de inicio según tu historial de reproducción, canciones favoritas y artistas seguidos.").size(12.0).color(TEXT_SECONDARY));
                 }
                 SettingsCategory::About => {
-                    ui.heading("YR Music v0.6.0");
+                    ui.heading("YR Music v0.6.1");
                     ui.label("Cliente nativo de música 100% en Rust para Android y escritorio.");
                     ui.add_space(6.0);
                     ui.label(RichText::new("Motor de audio Symphonia PCM de ultra-baja latencia con ecualizador paramétrico de 5 bandas en tiempo real, prefetch predictivo en disco y compatibilidad completa con YouTube Music.").size(12.0).color(TEXT_SECONDARY));
@@ -7959,13 +7981,16 @@ impl YrApp {
         }
 
         let mut changed = false;
+        let panel_w = (screen.width() - 16.0).clamp(280.0, 400.0);
+        let inner_w = panel_w - 28.0;
+
         egui::Area::new(egui::Id::new("yr_equalizer_panel"))
-            .anchor(egui::Align2::LEFT_BOTTOM, Vec2::ZERO)
+            .anchor(egui::Align2::CENTER_BOTTOM, Vec2::ZERO)
             .order(egui::Order::Foreground)
             .interactable(true)
             .show(ctx, |ui| {
-                ui.set_width(screen.width());
-                ui.set_max_width(screen.width());
+                ui.set_width(panel_w);
+                ui.set_max_width(panel_w);
                 egui::Frame::new()
                     .fill(Color32::from_rgb(22, 22, 26))
                     .stroke(Stroke::new(0.8_f32, Color32::from_rgb(48, 48, 54)))
@@ -7977,7 +8002,6 @@ impl YrApp {
                     })
                     .inner_margin(egui::Margin::symmetric(14, 14))
                     .show(ui, |ui| {
-                        let inner_w = (screen.width() - 28.0).max(180.0);
                         ui.set_width(inner_w);
                         ui.set_max_width(inner_w);
 
@@ -8033,13 +8057,13 @@ impl YrApp {
                                 let selected = current_preset == name;
                                 let pill = egui::Button::new(
                                     RichText::new(name)
-                                        .size(12.0)
+                                        .size(11.5)
                                         .strong()
                                         .color(if selected { Color32::WHITE } else { Color32::from_white_alpha(200) }),
                                 )
                                 .fill(if selected { ACCENT_RED } else { Color32::from_white_alpha(24) })
-                                .corner_radius(CornerRadius::same(14))
-                                .min_size(Vec2::new(32.0, 26.0));
+                                .corner_radius(CornerRadius::same(12))
+                                .min_size(Vec2::new(28.0, 24.0));
                                 if ui.add(pill).clicked() {
                                     self.store.data.config.equalizer.apply_preset(name);
                                     if !self.store.data.config.equalizer.enabled {
@@ -8056,7 +8080,7 @@ impl YrApp {
                         let mut bass = self.store.data.config.equalizer.bass_boost_db;
                         ui.horizontal(|ui| {
                             ui.label(RichText::new("Bass Boost:").size(13.0).color(Color32::WHITE));
-                            let slider_w = (inner_w - 110.0).max(100.0);
+                            let slider_w = (inner_w - 110.0).clamp(90.0, 180.0);
                             let slider_resp = ui.add_sized(
                                 Vec2::new(slider_w, 20.0),
                                 egui::Slider::new(&mut bass, 0.0..=10.0)
@@ -8077,9 +8101,10 @@ impl YrApp {
                         ui.add_space(4.0);
 
                         let band_labels = EqualizerConfig::BAND_LABELS;
-                        let band_w = ((inner_w - 16.0) / 5.0).clamp(40.0, 60.0);
+                        let band_w = ((inner_w - 20.0) / 5.0).clamp(38.0, 56.0);
 
                         ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 4.0;
                             for i in 0..5 {
                                 ui.vertical_centered(|ui| {
                                     ui.set_width(band_w);
@@ -8095,14 +8120,14 @@ impl YrApp {
                                         .vertical()
                                         .show_value(false)
                                         .step_by(0.5);
-                                    let resp = ui.add_sized(Vec2::new(band_w, 100.0), v_slider);
+                                    let resp = ui.add_sized(Vec2::new(band_w, 90.0), v_slider);
                                     if resp.changed() {
                                         self.store.data.config.equalizer.bands_db[i] = gain;
                                         self.store.data.config.equalizer.preset_name = "Personalizado".to_string();
                                         changed = true;
                                     }
 
-                                    ui.label(RichText::new(band_labels[i]).size(11.0).strong().color(Color32::WHITE));
+                                    ui.label(RichText::new(band_labels[i]).size(10.5).strong().color(Color32::WHITE));
                                 });
                             }
                         });
@@ -8332,26 +8357,26 @@ impl YrApp {
         };
 
         egui::Area::new(egui::Id::new("yr_account_modal_panel"))
-            .anchor(egui::Align2::LEFT_BOTTOM, Vec2::ZERO)
+            .anchor(egui::Align2::LEFT_TOP, Vec2::ZERO)
             .order(egui::Order::Foreground)
             .interactable(true)
             .show(ctx, |ui| {
                 ui.set_width(screen.width());
                 ui.set_max_width(screen.width());
+                ui.set_height(screen.height());
+                ui.set_max_height(screen.height());
                 egui::Frame::new()
-                    .fill(Color32::from_rgb(18, 18, 20))
-                    .stroke(Stroke::new(0.8_f32, Color32::from_rgb(42, 42, 48)))
-                    .corner_radius(CornerRadius {
-                        nw: 20,
-                        ne: 20,
-                        sw: 0,
-                        se: 0,
-                    })
-                    .inner_margin(egui::Margin::symmetric(16, 14))
+                    .fill(Color32::from_rgb(0, 0, 0))
+                    .stroke(Stroke::NONE)
+                    .corner_radius(CornerRadius::ZERO)
+                    .inner_margin(egui::Margin::symmetric(16, 12))
                     .show(ui, |ui| {
                         let inner_w = (screen.width() - 32.0).max(200.0);
                         ui.set_width(inner_w);
                         ui.set_max_width(inner_w);
+
+                        #[cfg(target_os = "android")]
+                        ui.add_space(32.0);
 
                         // Top bar: ✕ close | "Cuenta"
                         ui.horizontal(|ui| {
@@ -8359,7 +8384,7 @@ impl YrApp {
                                 ui,
                                 icons::Icon::Close,
                                 32.0,
-                                16.0,
+                                18.0,
                                 Color32::TRANSPARENT,
                                 Color32::WHITE,
                                 16.0,
@@ -8371,13 +8396,13 @@ impl YrApp {
                             ui.add_space(8.0);
                             ui.label(
                                 RichText::new("Cuenta")
-                                    .size(19.0)
+                                    .size(20.0)
                                     .strong()
                                     .color(Color32::WHITE),
                             );
                         });
 
-                        ui.add_space(14.0);
+                        ui.add_space(16.0);
 
                         // Profile Header Card (matching media_1794881820029_c543419e.jpg)
                         let avatar_sz = 44.0;
@@ -8516,7 +8541,7 @@ impl YrApp {
                         }
                         if menu_row(ui, icons::Icon::Help, "Ayuda y comentarios").clicked() {
                             self.show_account_modal = false;
-                            self.set_banner("YR Music v0.6.0 • Pure Rust");
+                            self.set_banner("YR Music v0.6.1 • Pure Rust");
                         }
 
                         ui.add_space(14.0);
