@@ -3612,7 +3612,8 @@ impl YrApp {
         let total_samples = self.sample_tracks.len();
         let track = self.sample_tracks[idx].clone();
 
-        if let Some(url) = track.thumbnail_url.as_deref() {
+        let sample_thumb = track_thumb_url(track.thumbnail_url.as_deref(), &track.id);
+        if let Some(url) = sample_thumb.as_deref() {
             self.ensure_cover_color(Some(url), ctx);
         }
         self.prewarm_sample_neighbor(idx);
@@ -3620,8 +3621,7 @@ impl YrApp {
             self.prewarm_sample_neighbor(idx + 1);
         }
 
-        let ambient = track
-            .thumbnail_url
+        let ambient = sample_thumb
             .as_deref()
             .and_then(|u| self.cover_colors.get(u).copied())
             .unwrap_or(Color32::from_rgb(76, 36, 44));
@@ -3685,6 +3685,7 @@ impl YrApp {
             let body_h = (ui.available_height() - 92.0).max(160.0);
             ui.add_space(8.0);
             ui.allocate_ui(Vec2::new(inner_rect.width(), body_h), |ui| {
+                ui.set_min_height(body_h);
                 ui.horizontal(|ui| {
                     let art_zone_w = (inner_rect.width() - rail_w - 8.0).max(150.0);
                     ui.allocate_ui(Vec2::new(art_zone_w, body_h), |ui| {
@@ -3701,22 +3702,24 @@ impl YrApp {
                                 CornerRadius::same(16),
                                 Color32::from_rgb(28, 28, 32),
                             );
-                            let note_r = egui::Rect::from_center_size(
-                                visual_art_rect.center(),
-                                Vec2::splat((art_size * 0.28).clamp(32.0, 68.0)),
-                            );
-                            icons::draw_icon(
-                                ui.painter(),
-                                note_r,
-                                icons::Icon::MusicNote,
-                                Color32::from_white_alpha(120),
-                            );
-                            if let Some(url) = &track.thumbnail_url {
-                                let hi_res = tracked_thumb_uri(url, 720);
-                                paint_ready_image(
+                            if is_playing {
+                                let note_r = egui::Rect::from_center_size(
+                                    visual_art_rect.center(),
+                                    Vec2::splat((art_size * 0.28).clamp(32.0, 68.0)),
+                                );
+                                icons::draw_icon(
+                                    ui.painter(),
+                                    note_r,
+                                    icons::Icon::MusicNote,
+                                    Color32::from_white_alpha(120),
+                                );
+                            }
+                            if let Some(url) = sample_thumb.as_deref() {
+                                paint_progressive_image(
                                     ui,
                                     visual_art_rect,
-                                    hi_res,
+                                    url,
+                                    720,
                                     Vec2::splat(art_size),
                                     CornerRadius::same(16),
                                 );
@@ -4605,8 +4608,6 @@ impl YrApp {
                     .color(TEXT_PRIMARY),
             );
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                self.render_account_button(ui, 28.0);
-                ui.add_space(4.0);
                 if icons::icon_button(
                     ui,
                     icons::Icon::Search,
@@ -4746,6 +4747,7 @@ impl YrApp {
                         .corner_radius(CornerRadius::same(10))
                         .inner_margin(8.0)
                         .show(ui, |ui| {
+                            ui.set_min_width(ui.available_width());
                             ui.horizontal(|ui| {
                                 let (thumb_rect, _) =
                                     ui.allocate_exact_size(Vec2::splat(54.0), Sense::hover());
@@ -5065,27 +5067,34 @@ impl YrApp {
 
         // Floating "+ Nueva" pill button in bottom right (matches YouTube Music)
         let screen = ctx.screen_rect();
-        let fab_x = screen.right() - 116.0;
+        let fab_x = screen.right() - 120.0;
         let has_track = self.queue.lock().map(|q| q.current_track().is_some()).unwrap_or(false);
         #[cfg(target_os = "android")]
-        let clearance = if has_track { 216.0 } else { 154.0 };
+        let clearance = if has_track { 234.0 } else { 158.0 };
         #[cfg(not(target_os = "android"))]
-        let clearance = if has_track { 160.0 } else { 96.0 };
+        let clearance = if has_track { 168.0 } else { 96.0 };
         let fab_y = screen.bottom() - clearance;
         egui::Area::new(egui::Id::new("yr_lib_fab"))
             .fixed_pos(egui::pos2(fab_x, fab_y))
             .order(egui::Order::Foreground)
             .show(ctx, |ui| {
-                let plus_btn = egui::Button::new(
-                    RichText::new("+ Nueva")
-                        .size(13.5)
-                        .strong()
-                        .color(Color32::BLACK),
-                )
-                .fill(Color32::WHITE)
-                .corner_radius(CornerRadius::same(18))
-                .min_size(Vec2::new(96.0, 38.0));
-                if ui.add(plus_btn).clicked() {
+                let (rect, resp) = ui.allocate_exact_size(Vec2::new(104.0, 40.0), Sense::click());
+                if ui.is_rect_visible(rect) {
+                    let bg = if resp.hovered() {
+                        Color32::from_rgb(235, 235, 240)
+                    } else {
+                        Color32::WHITE
+                    };
+                    ui.painter().rect_filled(rect, CornerRadius::same(20), bg);
+                    ui.painter().text(
+                        rect.center(),
+                        Align2::CENTER_CENTER,
+                        "+ Nueva",
+                        egui::FontId::proportional(14.0),
+                        Color32::BLACK,
+                    );
+                }
+                if resp.clicked() {
                     self.show_new_playlist_dialog = !self.show_new_playlist_dialog;
                 }
             });
@@ -7606,7 +7615,7 @@ impl YrApp {
                     ui.label(RichText::new("Ajusta los mixes de inicio según tu historial de reproducción, canciones favoritas y artistas seguidos.").size(12.0).color(TEXT_SECONDARY));
                 }
                 SettingsCategory::About => {
-                    ui.heading("YR Music v0.6.3");
+                    ui.heading("YR Music v0.6.4");
                     ui.label("Cliente nativo de música 100% en Rust para Android y escritorio.");
                     ui.add_space(6.0);
                     ui.label(RichText::new("Motor de audio Symphonia PCM de ultra-baja latencia con ecualizador paramétrico de 5 bandas en tiempo real, prefetch predictivo en disco y compatibilidad completa con YouTube Music.").size(12.0).color(TEXT_SECONDARY));
@@ -8712,7 +8721,7 @@ impl YrApp {
                         }
                         if menu_row(ui, icons::Icon::Help, "Ayuda y comentarios").clicked() {
                             self.show_account_modal = false;
-                            self.set_banner("YR Music v0.6.3 • Pure Rust");
+                            self.set_banner("YR Music v0.6.4 • Pure Rust");
                         }
 
                         ui.add_space(14.0);
