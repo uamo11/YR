@@ -78,6 +78,28 @@ impl SettingsCategory {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum QueueTuner {
+    #[default]
+    All,
+    Familiar,
+    Discovery,
+    Popular,
+    Deep,
+}
+
+impl QueueTuner {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::All => "Todo",
+            Self::Familiar => "Familiar",
+            Self::Discovery => "Descubrimiento",
+            Self::Popular => "Populares",
+            Self::Deep => "Profundo",
+        }
+    }
+}
+
 #[derive(Clone)]
 enum DetailView {
     None,
@@ -278,6 +300,7 @@ pub struct YrApp {
 
     show_settings: bool,
     show_account_modal: bool,
+    queue_tuner: QueueTuner,
     settings_category: SettingsCategory,
     is_video_mode: bool,
     show_google_login: bool,
@@ -498,6 +521,7 @@ impl YrApp {
             sponsor_skipped_idx: None,
             show_settings: false,
             show_account_modal: false,
+            queue_tuner: QueueTuner::All,
             settings_category: SettingsCategory::Root,
             is_video_mode: false,
             show_google_login: false,
@@ -1845,6 +1869,56 @@ impl YrApp {
         if !tracks.is_empty() {
             self.store.set_last_queue(tracks, idx);
         }
+    }
+
+    fn apply_queue_tuner(&mut self, tuner: QueueTuner) {
+        let liked_ids: HashSet<String> = self
+            .store
+            .data
+            .liked_tracks
+            .iter()
+            .map(|t| t.id.clone())
+            .collect();
+        let recent_ids: HashSet<String> = self
+            .store
+            .data
+            .recent_tracks
+            .iter()
+            .map(|t| t.id.clone())
+            .collect();
+
+        let mut q = self.queue.lock().unwrap();
+        match tuner {
+            QueueTuner::All => {}
+            QueueTuner::Familiar => {
+                q.reorder_upcoming_by(|t| {
+                    if liked_ids.contains(&t.id) {
+                        0
+                    } else if recent_ids.contains(&t.id) {
+                        1
+                    } else {
+                        2
+                    }
+                });
+            }
+            QueueTuner::Discovery => {
+                q.reorder_upcoming_by(|t| {
+                    if !liked_ids.contains(&t.id) && !recent_ids.contains(&t.id) {
+                        0
+                    } else {
+                        1
+                    }
+                });
+            }
+            QueueTuner::Popular => {
+                q.reorder_upcoming_by(|t| std::cmp::Reverse(t.duration_secs.unwrap_or(0)));
+            }
+            QueueTuner::Deep => {
+                q.reorder_upcoming_by(|t| t.duration_secs.unwrap_or(0));
+            }
+        }
+        drop(q);
+        self.set_banner(format!("Cola afinada: {}", tuner.label()));
     }
 
     fn refresh_cache_stats(&mut self) {
@@ -3835,27 +3909,6 @@ impl YrApp {
                 });
             });
 
-        if !self.search_suggestions.is_empty() && !self.search_loading {
-            ui.add_space(6.0);
-            let suggestions = self.search_suggestions.clone();
-            egui::ScrollArea::horizontal()
-                .id_salt("search_suggestions")
-                .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        for s in suggestions.iter().take(8) {
-                            let btn = egui::Button::new(
-                                RichText::new(s).size(12.5).color(TEXT_PRIMARY),
-                            )
-                            .fill(BG_ELEVATED)
-                            .corner_radius(CornerRadius::same(14));
-                            if ui.add(btn).clicked() {
-                                self.search_query = s.clone();
-                                self.trigger_search(ctx);
-                            }
-                        }
-                    });
-                });
-        }
 
         let has_results = !self.search_results.songs.is_empty()
             || !self.search_results.albums.is_empty()
@@ -3934,6 +3987,66 @@ impl YrApp {
                 }
 
                 if !has_results && !self.search_loading {
+                    if !self.search_query.trim().is_empty() && !self.search_suggestions.is_empty() {
+                        ui.add_space(6.0);
+                        let suggestions = self.search_suggestions.clone();
+                        let history_set: HashSet<String> = self.store.data.search_history.iter().cloned().collect();
+                        for (idx, s) in suggestions.iter().take(12).enumerate() {
+                            ui.horizontal(|ui| {
+                                let row_start = ui.cursor().min;
+                                let is_hist = history_set.contains(s);
+                                let (icon_r, _) = ui.allocate_exact_size(Vec2::splat(32.0), Sense::hover());
+                                icons::draw_icon(
+                                    ui.painter(),
+                                    egui::Rect::from_center_size(icon_r.center(), Vec2::splat(16.0)),
+                                    if is_hist { icons::Icon::History } else { icons::Icon::Search },
+                                    TEXT_SECONDARY,
+                                );
+                                let text_w = (ui.available_width() - 44.0).max(120.0);
+                                ui.allocate_ui(Vec2::new(text_w, 38.0), |ui| {
+                                    ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                                        ui.add(
+                                            egui::Label::new(
+                                                RichText::new(s)
+                                                    .size(15.0)
+                                                    .color(TEXT_PRIMARY),
+                                            )
+                                            .truncate()
+                                            .selectable(false),
+                                        );
+                                    });
+                                });
+                                let hit = ui.interact(
+                                    egui::Rect::from_min_size(row_start, Vec2::new(text_w + 32.0, 38.0)),
+                                    ui.id().with(("sug_v_row", idx, s.as_str())),
+                                    Sense::click(),
+                                );
+                                if hit.clicked() {
+                                    self.search_query = s.clone();
+                                    self.trigger_search(ctx);
+                                }
+                                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                    if icons::icon_button(
+                                        ui,
+                                        icons::Icon::ArrowUpLeft,
+                                        32.0,
+                                        15.0,
+                                        Color32::TRANSPARENT,
+                                        TEXT_SECONDARY,
+                                        15.0,
+                                    )
+                                    .clicked()
+                                    {
+                                        self.search_query = s.clone();
+                                        self.last_search_input_at = Some(Instant::now());
+                                    }
+                                });
+                            });
+                            ui.add_space(2.0);
+                        }
+                        return;
+                    }
+
                     // Búsquedas recientes visual strip + history rows (matching YT Music)
                     let mut recent_thumbs: Vec<(String, Option<String>)> = self
                         .store
@@ -5702,6 +5815,41 @@ impl YrApp {
                                 }
                             });
                         });
+                        // Dynamic Queue Tuner Mood Pills (YouTube Music Parity)
+                        ui.add_space(4.0);
+                        egui::ScrollArea::horizontal()
+                            .id_salt("queue_tuner_chips")
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    ui.spacing_mut().item_spacing.x = 6.0;
+                                    for tuner in [
+                                        QueueTuner::All,
+                                        QueueTuner::Familiar,
+                                        QueueTuner::Discovery,
+                                        QueueTuner::Popular,
+                                        QueueTuner::Deep,
+                                    ] {
+                                        let is_sel = self.queue_tuner == tuner;
+                                        let btn = egui::Button::new(
+                                            RichText::new(tuner.label()).size(12.0).color(if is_sel {
+                                                Color32::WHITE
+                                            } else {
+                                                TEXT_PRIMARY
+                                            }),
+                                        )
+                                        .fill(if is_sel {
+                                            ACCENT_RED
+                                        } else {
+                                            Color32::from_white_alpha(24)
+                                        })
+                                        .corner_radius(CornerRadius::same(14));
+                                        if ui.add(btn).clicked() {
+                                            self.queue_tuner = tuner;
+                                            self.apply_queue_tuner(tuner);
+                                        }
+                                    }
+                                });
+                            });
                         ui.add_space(6.0);
                         let total_ordered = ordered.len();
                         egui::ScrollArea::vertical()

@@ -251,6 +251,22 @@ impl PlaybackQueue {
             .collect()
     }
 
+    /// Reorder only upcoming tracks (after the current position) using a key function.
+    pub fn reorder_upcoming_by<F, K>(&mut self, mut key_fn: F)
+    where
+        F: FnMut(&Track) -> K,
+        K: Ord,
+    {
+        let Some(pos) = self.current_pos else {
+            return;
+        };
+        if pos + 1 >= self.order.len() {
+            return;
+        }
+        let tracks = &self.tracks;
+        self.order[(pos + 1)..].sort_by_key(|&idx| key_fn(&tracks[idx]));
+    }
+
     fn rebuild_order(&mut self, keep_track_idx: Option<usize>) {
         self.order = (0..self.tracks.len()).collect();
         if self.tracks.is_empty() {
@@ -346,5 +362,28 @@ mod tests {
 
         q.enqueue_or_enrich(sample_track("2"));
         assert_eq!(q.len(), 2);
+    }
+
+    #[test]
+    fn reorder_upcoming_preserves_current_and_sorts_future() {
+        let mut q = PlaybackQueue::new();
+        let mut t1 = sample_track("curr");
+        t1.title = "Current".to_string();
+        let mut t2 = sample_track("fut2");
+        t2.title = "Zebra".to_string();
+        let mut t3 = sample_track("fut1");
+        t3.title = "Apple".to_string();
+
+        q.set_queue(vec![t1, t2, t3], 0);
+        assert_eq!(q.current_track().unwrap().id, "curr");
+
+        // Sort upcoming by title ascending
+        q.reorder_upcoming_by(|t| t.title.clone());
+
+        assert_eq!(q.current_track().unwrap().id, "curr");
+        let next = q.next_track(true).unwrap();
+        assert_eq!(next.id, "fut1"); // Apple before Zebra
+        let last = q.next_track(true).unwrap();
+        assert_eq!(last.id, "fut2"); // Zebra
     }
 }
