@@ -5890,6 +5890,7 @@ impl YrApp {
 
             ui.allocate_ui(Vec2::new(avail_w, body_h), |ui| {
                 ui.set_min_height(body_h);
+                ui.set_max_width(avail_w);
                 if self.show_queue || self.show_lyrics || self.show_related {
                     // Compact header row in drawers so current track stays visible + controllable.
                     ui.horizontal(|ui| {
@@ -6720,21 +6721,33 @@ impl YrApp {
 
                     ui.add_space(if self.is_video_mode { 10.0 } else { 16.0 });
                     // Left-aligned Title > and Artist constrained to avail_w
-                    let title_w = (avail_w - 22.0).max(140.0);
+                    let title_w = (avail_w - 24.0).max(140.0);
                     let mut title_clicked = false;
                     ui.allocate_ui(Vec2::new(avail_w, 0.0), |ui| {
+                        ui.set_max_width(avail_w);
                         ui.horizontal(|ui| {
                             ui.allocate_ui(Vec2::new(title_w, 0.0), |ui| {
-                                let job = clamped_layout_job(
-                                    &track.title,
-                                    21.0,
-                                    Color32::WHITE,
-                                    title_w,
-                                    2,
-                                );
-                                if ui.add(egui::Label::new(job).sense(Sense::click())).clicked() {
-                                    title_clicked = true;
-                                }
+                                ui.vertical(|ui| {
+                                    ui.set_max_width(title_w);
+                                    let job = clamped_layout_job(
+                                        &track.title,
+                                        21.0,
+                                        Color32::WHITE,
+                                        title_w,
+                                        2,
+                                    );
+                                    if ui
+                                        .add(
+                                            egui::Label::new(job)
+                                                .wrap()
+                                                .selectable(false)
+                                                .sense(Sense::click()),
+                                        )
+                                        .clicked()
+                                    {
+                                        title_clicked = true;
+                                    }
+                                });
                             });
                             if ui
                                 .add(
@@ -6744,6 +6757,7 @@ impl YrApp {
                                             .strong()
                                             .color(Color32::from_white_alpha(210)),
                                     )
+                                    .selectable(false)
                                     .sense(Sense::click()),
                                 )
                                 .clicked()
@@ -6772,6 +6786,8 @@ impl YrApp {
                                         .size(15.0)
                                         .color(Color32::from_white_alpha(190)),
                                 )
+                                .truncate()
+                                .selectable(false)
                                 .sense(Sense::click()),
                             )
                             .clicked()
@@ -6780,10 +6796,14 @@ impl YrApp {
                             self.open_artist(artist_id, ctx);
                         }
                     } else {
-                        ui.label(
-                            RichText::new(&track.artist)
-                                .size(15.0)
-                                .color(Color32::from_white_alpha(190)),
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(&track.artist)
+                                    .size(15.0)
+                                    .color(Color32::from_white_alpha(190)),
+                            )
+                            .truncate()
+                            .selectable(false),
                         );
                     }
 
@@ -9159,7 +9179,7 @@ fn render_clamped_label(
     max_rows: usize,
 ) {
     let job = clamped_layout_job(text, size, color, max_width, max_rows);
-    ui.add(egui::Label::new(job).selectable(false));
+    ui.add(egui::Label::new(job).wrap().selectable(false));
 }
 
 fn render_collection_row(
