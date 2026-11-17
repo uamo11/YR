@@ -42,9 +42,9 @@
 |:---:|:---:|:---:|
 | <img src="docs/screenshots/06_account_modal.png" width="240" alt="Cuenta" /> | <img src="docs/screenshots/07_categorized_settings.png" width="240" alt="Configuración" /> | <img src="docs/screenshots/08_data_saver.png" width="240" alt="Ahorro de datos" /> |
 
-| Hoja de Acciones | Ecualizador & Bass Boost |
-|:---:|:---:|
-| <img src="docs/screenshots/04_action_sheet.png" width="240" alt="Hoja de Acciones" /> | <img src="docs/screenshots/05_equalizer.png" width="240" alt="Ecualizador" /> |
+| Hoja de Acciones | Ecualizador & Bass Boost | Modo Video Panorámico 16:9 |
+|:---:|:---:|:---:|
+| <img src="docs/screenshots/04_action_sheet.png" width="240" alt="Hoja de Acciones" /> | <img src="docs/screenshots/05_equalizer.png" width="240" alt="Ecualizador" /> | <img src="docs/screenshots/09_video_mode.png" width="240" alt="Modo Video 16:9" /> |
 
 ---
 
