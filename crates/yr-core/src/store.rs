@@ -25,6 +25,8 @@ pub struct EqualizerConfig {
     pub bass_boost_db: f32,
     #[serde(default = "default_eq_bands")]
     pub bands_db: [f32; 5],
+    #[serde(default = "default_true")]
+    pub loudness_normalization: bool,
 }
 
 fn default_preset_name() -> String {
@@ -42,6 +44,7 @@ impl Default for EqualizerConfig {
             preset_name: default_preset_name(),
             bass_boost_db: 0.0,
             bands_db: default_eq_bands(),
+            loudness_normalization: true,
         }
     }
 }

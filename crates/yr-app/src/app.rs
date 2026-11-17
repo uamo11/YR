@@ -2538,76 +2538,95 @@ impl YrApp {
             .current_track()
             .map(|t| t.id == track.id)
             .unwrap_or(false);
-        let row_bg = if is_current {
-            Color32::from_rgb(26, 26, 28)
-        } else {
-            Color32::TRANSPARENT
-        };
         let is_downloaded = self
             .downloads
             .iter()
             .any(|d| d.track.id == track.id && d.status == DownloadStatus::Completed);
 
-        let row_resp = egui::Frame::new()
-            .fill(row_bg)
-            .corner_radius(CornerRadius::same(8))
-            .inner_margin(egui::Margin::symmetric(4, 4))
-            .show(ui, |ui| {
-                ui.set_width(col_width);
-                ui.horizontal(|ui| {
-                    let thumb_sz = 48.0;
-                    let row_h = 54.0;
-                    render_track_thumb(ui, track, thumb_sz);
-                    let text_w = (col_width - (thumb_sz + 48.0)).max(115.0);
-                    let title_color = if is_current { ACCENT_RED } else { TEXT_PRIMARY };
-                    ui.allocate_ui(Vec2::new(text_w, row_h), |ui| {
-                        ui.vertical(|ui| {
-                            ui.spacing_mut().item_spacing.y = 2.0;
-                            ui.set_max_width(text_w);
-                            render_clamped_label(ui, &track.title, 13.8, title_color, text_w, 2);
-                            let sub_txt = if subtitle.is_empty() {
-                                track.artist.clone()
-                            } else {
-                                subtitle.to_string()
-                            };
-                            ui.add(
-                                egui::Label::new(
-                                    RichText::new(sub_txt)
-                                        .size(12.0)
-                                        .color(if is_downloaded {
-                                            GREEN_OK
-                                        } else {
-                                            TEXT_SECONDARY
-                                        }),
-                                )
-                                .truncate()
-                                .selectable(false),
-                            );
-                        });
-                    });
+        let row_h = 54.0;
+        let more_btn_w = 34.0;
+        let body_w = (col_width - more_btn_w - 4.0).max(120.0);
 
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if icons::icon_button(
-                            ui,
-                            icons::Icon::MoreVert,
-                            34.0,
-                            17.0,
-                            Color32::TRANSPARENT,
-                            TEXT_SECONDARY,
-                            17.0,
-                        )
-                        .clicked()
-                        {
-                            self.action_sheet_track = Some(track.clone());
-                            self.action_sheet_context = Some((list.to_vec(), index));
-                        }
-                    });
-                });
-            });
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 2.0;
 
-        if row_resp.response.interact(Sense::click()).clicked() {
-            self.play_track_in_list(list.to_vec(), index, ctx);
-        }
+            // Interactive track body (Thumbnail + Title + Subtitle)
+            let (body_rect, body_resp) = ui.allocate_exact_size(Vec2::new(body_w, row_h), Sense::click());
+            if ui.is_rect_visible(body_rect) {
+                let bg = if is_current {
+                    Color32::from_rgb(32, 28, 30)
+                } else if body_resp.hovered() {
+                    Color32::from_white_alpha(18)
+                } else {
+                    Color32::TRANSPARENT
+                };
+                if bg != Color32::TRANSPARENT {
+                    ui.painter().rect_filled(body_rect, CornerRadius::same(8), bg);
+                }
+
+                let thumb_sz = 46.0;
+                let thumb_rect = Rect::from_min_size(
+                    Pos2::new(body_rect.left() + 2.0, body_rect.center().y - thumb_sz * 0.5),
+                    Vec2::splat(thumb_sz),
+                );
+                let radius = CornerRadius::same(4);
+                let resolved_thumb = track_thumb_url(track.thumbnail_url.as_deref(), &track.id);
+                let mut thumb_painted = false;
+                if let Some(url) = resolved_thumb {
+                    let thumb_uri = tracked_thumb_uri(&url, 160);
+                    let img = Image::new(thumb_uri)
+                        .fit_to_exact_size(Vec2::splat(thumb_sz))
+                        .corner_radius(radius);
+                    if let Ok(egui::load::TexturePoll::Ready { .. }) = img.load_for_size(ui.ctx(), Vec2::splat(thumb_sz)) {
+                        img.paint_at(ui, thumb_rect);
+                        thumb_painted = true;
+                    }
+                }
+                if !thumb_painted {
+                    ui.painter().rect_filled(thumb_rect, radius, Color32::from_rgb(30, 30, 34));
+                    let icon_r = Rect::from_center_size(thumb_rect.center(), Vec2::splat(20.0));
+                    icons::draw_icon(ui.painter(), icon_r, icons::Icon::Play, Color32::from_white_alpha(160));
+                }
+
+                let text_left = thumb_rect.right() + 8.0;
+                let text_w = (body_rect.right() - text_left - 4.0).max(60.0);
+                let title_color = if is_current { ACCENT_RED } else { TEXT_PRIMARY };
+
+                let title_job = clamped_layout_job(&track.title, 13.5, title_color, text_w, 2);
+                let galley_title = ui.painter().layout_job(title_job);
+                ui.painter().galley(Pos2::new(text_left, body_rect.top() + 6.0), galley_title, title_color);
+
+                let sub_txt = if subtitle.is_empty() {
+                    track.artist.clone()
+                } else {
+                    subtitle.to_string()
+                };
+                let sub_color = if is_downloaded { GREEN_OK } else { TEXT_SECONDARY };
+                let sub_job = clamped_layout_job(&sub_txt, 11.8, sub_color, text_w, 1);
+                let galley_sub = ui.painter().layout_job(sub_job);
+                ui.painter().galley(Pos2::new(text_left, body_rect.bottom() - galley_sub.size().y - 6.0), galley_sub, sub_color);
+            }
+
+            if body_resp.clicked() {
+                self.play_track_in_list(list.to_vec(), index, ctx);
+            }
+
+            // More Options (3 vertical dots)
+            if icons::icon_button(
+                ui,
+                icons::Icon::MoreVert,
+                34.0,
+                17.0,
+                Color32::TRANSPARENT,
+                TEXT_SECONDARY,
+                17.0,
+            )
+            .clicked()
+            {
+                self.action_sheet_track = Some(track.clone());
+                self.action_sheet_context = Some((list.to_vec(), index));
+            }
+        });
     }
 
     fn activate_shelf_card(
@@ -5650,8 +5669,35 @@ impl YrApp {
                         });
                     });
 
-                let pad_right = (total_w - left_w - pad_left - pill_w - right_w).max(4.0);
+                let active_until = *self.sleep_timer_until.lock().unwrap();
+                let after_track = self.sleep_after_track.load(std::sync::atomic::Ordering::SeqCst);
+                let timer_text = if let Some(until) = active_until {
+                    let rem = until.saturating_duration_since(Instant::now()).as_secs();
+                    Some(format!("{}:{:02}", rem / 60, rem % 60))
+                } else if after_track {
+                    Some("Fin".to_string())
+                } else {
+                    None
+                };
+
+                let timer_w = if timer_text.is_some() { 56.0 } else { 0.0 };
+                let pad_right = (total_w - left_w - pad_left - pill_w - right_w - timer_w).max(4.0);
                 ui.add_space(pad_right);
+
+                if let Some(txt) = timer_text {
+                    let timer_btn = egui::Button::new(
+                        RichText::new(format!("🌙 {txt}"))
+                            .size(11.0)
+                            .strong()
+                            .color(Color32::WHITE),
+                    )
+                    .fill(Color32::from_white_alpha(32))
+                    .corner_radius(CornerRadius::same(12))
+                    .min_size(Vec2::new(48.0, 26.0));
+                    if ui.add(timer_btn).clicked() {
+                        self.show_sleep_timer_sheet = true;
+                    }
+                }
 
                 if icons::icon_button(
                     ui,
@@ -7316,6 +7362,14 @@ impl YrApp {
                             });
                         });
                     ui.add_space(12.0);
+                    let mut norm = self.store.data.config.equalizer.loudness_normalization;
+                    if ui.checkbox(&mut norm, "Normalización de volumen (Loudness Normalization)").changed() {
+                        self.store.data.config.equalizer.loudness_normalization = norm;
+                        self.audio.set_equalizer(self.store.data.config.equalizer.clone());
+                        let _ = self.store.save();
+                    }
+                    ui.label(RichText::new("Ajusta suavemente el nivel de volumen para mantener un nivel uniforme en todas las pistas.").size(12.0).color(TEXT_SECONDARY));
+                    ui.add_space(8.0);
                     if ui.checkbox(&mut self.store.data.config.autoplay_radio, "Radio automática continua al terminar la cola").changed() {
                         let _ = self.store.save();
                     }
@@ -8012,6 +8066,13 @@ impl YrApp {
                                 }
                             });
                         });
+
+                        ui.add_space(4.0);
+                        let mut norm = self.store.data.config.equalizer.loudness_normalization;
+                        if ui.checkbox(&mut norm, "Normalización de volumen").changed() {
+                            self.store.data.config.equalizer.loudness_normalization = norm;
+                            changed = true;
+                        }
 
                         ui.add_space(8.0);
                         ui.label(RichText::new("Preajustes de sonido:").size(12.5).color(TEXT_SECONDARY));

@@ -794,6 +794,8 @@ pub struct EqualizerProcessor {
     channels: usize,
     coeffs: Vec<BiquadCoeffs>,
     states: Vec<Vec<FilterChannelState>>,
+    smooth_gain: f32,
+    power_ema: f32,
 }
 
 impl EqualizerProcessor {
@@ -804,6 +806,8 @@ impl EqualizerProcessor {
             channels: 2,
             coeffs: Vec::new(),
             states: Vec::new(),
+            smooth_gain: 1.0,
+            power_ema: 0.18 * 0.18,
         };
         ep.recompute();
         ep
@@ -845,7 +849,7 @@ impl EqualizerProcessor {
     }
 
     pub fn process(&mut self, samples: &mut [i16], rate: u32, channels: usize) {
-        if !self.config.enabled {
+        if !self.config.enabled && !self.config.loudness_normalization {
             return;
         }
         let safe_ch = channels.clamp(1, 8);
@@ -854,19 +858,32 @@ impl EqualizerProcessor {
             self.channels = safe_ch;
             self.recompute();
         }
-        if self.coeffs.is_empty() {
-            return;
-        }
+
+        let do_eq = self.config.enabled && !self.coeffs.is_empty();
+        let do_norm = self.config.loudness_normalization;
+
         for (i, s) in samples.iter_mut().enumerate() {
             let ch = i % safe_ch;
             let mut x = *s as f32 / 32768.0;
-            for (stage_idx, c) in self.coeffs.iter().enumerate() {
-                if let Some(ch_states) = self.states.get_mut(stage_idx) {
-                    if let Some(st) = ch_states.get_mut(ch) {
-                        x = st.process(x, c);
+
+            if do_eq {
+                for (stage_idx, c) in self.coeffs.iter().enumerate() {
+                    if let Some(ch_states) = self.states.get_mut(stage_idx) {
+                        if let Some(st) = ch_states.get_mut(ch) {
+                            x = st.process(x, c);
+                        }
                     }
                 }
             }
+
+            if do_norm {
+                self.power_ema = self.power_ema * 0.9999 + (x * x) * 0.0001;
+                let rms = self.power_ema.sqrt().max(0.008);
+                let target_gain = (0.18 / rms).clamp(0.45, 2.2);
+                self.smooth_gain = self.smooth_gain * 0.9996 + target_gain * 0.0004;
+                x *= self.smooth_gain;
+            }
+
             let clamped = x.clamp(-1.2, 1.2);
             let soft = if clamped > 1.0 {
                 1.0 - (-clamped + 1.0).exp() * 0.1
