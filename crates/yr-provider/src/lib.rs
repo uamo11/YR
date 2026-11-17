@@ -162,13 +162,33 @@ impl YtMusicProvider {
         }
     }
 
+    fn format_subscriber_count(c: u64) -> String {
+        if c >= 1_000_000 {
+            let m = c as f64 / 1_000_000.0;
+            if (m - m.round()).abs() < 0.05 {
+                format!("{:.0} M de suscriptores", m.round())
+            } else {
+                format!("{m:.2} M de suscriptores")
+            }
+        } else if c >= 1_000 {
+            let k = c as f64 / 1_000.0;
+            if k >= 100.0 || (k - k.round()).abs() < 0.05 {
+                format!("{:.0} K suscriptores", k.round())
+            } else {
+                format!("{k:.1} K suscriptores")
+            }
+        } else {
+            format!("{c} suscriptores")
+        }
+    }
+
     fn map_artist(item: ArtistItem) -> ArtistSummary {
         ArtistSummary {
             id: item.id,
             name: item.name,
             subscribers: item
                 .subscriber_count
-                .map(|c| format!("{c} suscriptores")),
+                .map(|c| Self::format_subscriber_count(c as u64)),
             thumbnail_url: item
                 .avatar
                 .last()
@@ -471,7 +491,7 @@ impl MusicProvider for YtMusicProvider {
             name: artist.name,
             subscribers: artist
                 .subscriber_count
-                .map(|c| format!("{c} suscriptores")),
+                .map(|c| Self::format_subscriber_count(c as u64)),
             thumbnail_url: artist
                 .header_image
                 .last()
@@ -791,6 +811,15 @@ impl MusicProvider for YtMusicProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn subscriber_count_formatting_handles_millions_thousands_and_units() {
+        assert_eq!(YtMusicProvider::format_subscriber_count(6_910_000), "6.91 M de suscriptores");
+        assert_eq!(YtMusicProvider::format_subscriber_count(2_000_000), "2 M de suscriptores");
+        assert_eq!(YtMusicProvider::format_subscriber_count(450_000), "450 K suscriptores");
+        assert_eq!(YtMusicProvider::format_subscriber_count(12_400), "12.4 K suscriptores");
+        assert_eq!(YtMusicProvider::format_subscriber_count(820), "820 suscriptores");
+    }
 
     #[tokio::test]
     async fn live_home_and_search_return_music() {

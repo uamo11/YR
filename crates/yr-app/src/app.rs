@@ -2470,33 +2470,82 @@ impl YrApp {
             }
             DetailView::Artist(artist) => {
                 ui.horizontal(|ui| {
-                    if icons::icon_pill_button(
-                    ui,
-                    icons::Icon::ArrowBack,
-                    "Volver",
-                    BG_ELEVATED,
-                    TEXT_PRIMARY,
-                )
-                .clicked() {
+                    if icons::icon_button(
+                        ui,
+                        icons::Icon::ArrowBack,
+                        36.0,
+                        18.0,
+                        BG_ELEVATED,
+                        TEXT_PRIMARY,
+                        18.0,
+                    )
+                    .clicked()
+                    {
                         self.detail_view = DetailView::None;
                     }
-                    ui.heading(&artist.summary.name);
+                    ui.add_space(6.0);
+                    ui.label(
+                        RichText::new("Artista")
+                            .size(15.0)
+                            .color(TEXT_SECONDARY),
+                    );
                 });
-                if let Some(subs) = &artist.summary.subscribers {
-                    ui.label(RichText::new(subs).small().color(TEXT_SECONDARY));
-                }
-                if !artist.top_tracks.is_empty() {
-                    ui.add_space(4.0);
-                    self.render_collection_actions(ui, ctx, &artist.top_tracks, false);
-                }
+                ui.add_space(6.0);
                 let detail_viewport = ui.available_rect_before_wrap();
                 self.detail_scroller.update(ui, detail_viewport, !self.detail_loading);
                 let detail_scroll = egui::ScrollArea::vertical()
                     .vertical_scroll_offset(self.detail_scroller.offset_y)
                     .drag_to_scroll(false)
                     .show(ui, |ui| {
+                    ui.vertical_centered(|ui| {
+                        let (av_rect, _) =
+                            ui.allocate_exact_size(Vec2::splat(116.0), Sense::hover());
+                        ui.painter()
+                            .circle_filled(av_rect.center(), 58.0, BG_ELEVATED);
+                        icons::draw_icon(
+                            ui.painter(),
+                            egui::Rect::from_center_size(av_rect.center(), Vec2::splat(44.0)),
+                            icons::Icon::Account,
+                            TEXT_SECONDARY,
+                        );
+                        let avatar_url = artist.summary.thumbnail_url.as_deref().or_else(|| {
+                            artist
+                                .top_tracks
+                                .first()
+                                .and_then(|t| t.thumbnail_url.as_deref())
+                        });
+                        if let Some(u) = avatar_url {
+                            paint_progressive_image(
+                                ui,
+                                av_rect,
+                                u,
+                                544,
+                                Vec2::splat(116.0),
+                                CornerRadius::same(58),
+                            );
+                        }
+                        ui.add_space(10.0);
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(&artist.summary.name)
+                                    .size(21.0)
+                                    .strong()
+                                    .color(TEXT_PRIMARY),
+                            )
+                            .wrap()
+                            .selectable(false),
+                        );
+                        if let Some(subs) = &artist.summary.subscribers {
+                            ui.add_space(2.0);
+                            ui.label(RichText::new(subs).size(13.0).color(TEXT_SECONDARY));
+                        }
+                        if !artist.top_tracks.is_empty() {
+                            ui.add_space(10.0);
+                            self.render_collection_actions(ui, ctx, &artist.top_tracks, false);
+                        }
+                    });
                     if !artist.top_tracks.is_empty() {
-                        ui.add_space(6.0);
+                        ui.add_space(12.0);
                         ui.label(RichText::new("Canciones populares").size(16.0).strong());
                         for (idx, track) in artist.top_tracks.iter().enumerate() {
                             self.render_track_row(ui, ctx, track, &artist.top_tracks, idx, false);
@@ -2525,16 +2574,20 @@ impl YrApp {
             }
             DetailView::Mood { title, playlists } => {
                 ui.horizontal(|ui| {
-                    if icons::icon_pill_button(
-                    ui,
-                    icons::Icon::ArrowBack,
-                    "Volver",
-                    BG_ELEVATED,
-                    TEXT_PRIMARY,
-                )
-                .clicked() {
+                    if icons::icon_button(
+                        ui,
+                        icons::Icon::ArrowBack,
+                        36.0,
+                        18.0,
+                        BG_ELEVATED,
+                        TEXT_PRIMARY,
+                        18.0,
+                    )
+                    .clicked()
+                    {
                         self.detail_view = DetailView::None;
                     }
+                    ui.add_space(6.0);
                     ui.heading(&title);
                 });
                 egui::ScrollArea::vertical().show(ui, |ui| {
@@ -3769,7 +3822,7 @@ impl YrApp {
             });
 
             let rail_w = 52.0;
-            let body_h = (ui.available_height() - 92.0).max(160.0);
+            let body_h = (ui.available_height() - 98.0).max(160.0);
             ui.add_space(8.0);
             ui.allocate_ui(Vec2::new(inner_rect.width(), body_h), |ui| {
                 ui.set_min_height(body_h);
@@ -5256,11 +5309,45 @@ impl YrApp {
             .drag_to_scroll(true)
             .show(ui, |ui| {
             if self.downloads.is_empty() {
-                ui.add_space(16.0);
-                ui.label(
-                    RichText::new("Aún no tienes descargas. Toca Descargar en cualquier canción.")
+                ui.vertical_centered(|ui| {
+                    ui.add_space(36.0);
+                    let (circle_r, _) = ui.allocate_exact_size(Vec2::splat(56.0), Sense::hover());
+                    ui.painter()
+                        .circle_filled(circle_r.center(), 28.0, BG_ELEVATED);
+                    icons::draw_icon(
+                        ui.painter(),
+                        egui::Rect::from_center_size(circle_r.center(), Vec2::splat(26.0)),
+                        icons::Icon::Download,
+                        TEXT_SECONDARY,
+                    );
+                    ui.add_space(10.0);
+                    ui.label(
+                        RichText::new("Sin descargas offline")
+                            .size(16.0)
+                            .strong()
+                            .color(TEXT_PRIMARY),
+                    );
+                    ui.add_space(4.0);
+                    ui.label(
+                        RichText::new(
+                            "Toca Descargar en cualquier canción o álbum para escuchar sin conexión.",
+                        )
+                        .size(12.5)
                         .color(TEXT_SECONDARY),
-                );
+                    );
+                    ui.add_space(14.0);
+                    if icons::icon_pill_button(
+                        ui,
+                        icons::Icon::Home,
+                        "Explorar música",
+                        ACCENT_RED,
+                        Color32::WHITE,
+                    )
+                    .clicked()
+                    {
+                        self.active_tab = NavTab::Home;
+                    }
+                });
                 return;
             }
 
@@ -7726,7 +7813,7 @@ impl YrApp {
                     ui.label(RichText::new("Ajusta los mixes de inicio según tu historial de reproducción, canciones favoritas y artistas seguidos.").size(12.0).color(TEXT_SECONDARY));
                 }
                 SettingsCategory::About => {
-                    ui.heading("YR Music v0.6.6");
+                    ui.heading("YR Music v0.6.7");
                     ui.label("Cliente nativo de música 100% en Rust para Android y escritorio.");
                     ui.add_space(6.0);
                     ui.label(RichText::new("Motor de audio Symphonia PCM de ultra-baja latencia con ecualizador paramétrico de 5 bandas en tiempo real, prefetch predictivo en disco y compatibilidad completa con YouTube Music.").size(12.0).color(TEXT_SECONDARY));
@@ -8838,7 +8925,7 @@ impl YrApp {
                         }
                         if menu_row(ui, icons::Icon::Help, "Ayuda y comentarios").clicked() {
                             self.show_account_modal = false;
-                            self.set_banner("YR Music v0.6.6 • Pure Rust");
+                            self.set_banner("YR Music v0.6.7 • Pure Rust");
                         }
 
                         #[cfg(target_os = "android")]
