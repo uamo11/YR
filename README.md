@@ -27,13 +27,13 @@
 
 ## 📸 Capturas de Pantalla (Android)
 
-| Biblioteca | Explorar y Búsqueda | Tendencias |
+| Inicio | Biblioteca | Búsqueda |
 |:---:|:---:|:---:|
-| <img src="docs/screenshots/01_library.png" width="240" alt="Biblioteca" /> | <img src="docs/screenshots/02_search_explore.png" width="240" alt="Búsqueda" /> | <img src="docs/screenshots/03_trending_results.png" width="240" alt="Tendencias" /> |
+| <img src="docs/screenshots/01_home.png" width="240" alt="Inicio" /> | <img src="docs/screenshots/02_library.png" width="240" alt="Biblioteca" /> | <img src="docs/screenshots/03_search.png" width="240" alt="Búsqueda" /> |
 
-| Resultados y Filtros | Ajustes y Ecualizador |
+| Hoja de Acciones (Paridad YT Music) | Ecualizador & Bass Boost |
 |:---:|:---:|
-| <img src="docs/screenshots/04_songs_filter.png" width="240" alt="Canciones" /> | <img src="docs/screenshots/05_equalizer_settings.png" width="240" alt="Ajustes y Ecualizador" /> |
+| <img src="docs/screenshots/04_action_sheet.png" width="240" alt="Hoja de Acciones" /> | <img src="docs/screenshots/05_equalizer.png" width="240" alt="Ecualizador" /> |
 
 ---
 
@@ -41,11 +41,11 @@
 
 El proyecto está modularizado en un espacio de trabajo de Cargo limpio y desacoplado:
 
-- [`crates/yr-core`](crates/yr-core): Modelos de dominio (`Track`, `AlbumDetail`, `PlaylistSummary`, `AudioQuality`), cola de reproducción inteligente (`PlaybackQueue` con shuffle determinista y modos de repetición), persistencia atómica en disco (`LibraryStore`) y configuración de ecualizador (`EqualizerConfig`).
+- [`crates/yr-core`](crates/yr-core): Modelos de dominio (`Track`, `AlbumDetail`, `PlaylistSummary`, `AudioQuality`), cola de reproducción inteligente (`PlaybackQueue` con shuffle determinista y modos de repetición), persistencia atómica en disco (`LibraryStore`), sesiones de cuenta Google y configuración de ecualizador (`EqualizerConfig`).
 - [`crates/yr-audio`](crates/yr-audio): Motor de reproducción en hilo dedicado de baja latencia (`AudioEngine`) implementado con `symphonia` + decodificadores PCM nativos (AAC/M4A, MP3, FLAC, Opus, WAV). Incluye procesador de biquads para ecualización en tiempo real y prefetch en caché local.
-- [`crates/yr-provider`](crates/yr-provider): Trait asíncrono `MusicProvider` e implementación `YtMusicProvider` sobre llamadas directas HTTPS (InnerTube API), resolviendo transmisiones de audio cifradas, feeds de inicio, exploración y letras sincronizadas (LRC).
+- [`crates/yr-provider`](crates/yr-provider): Trait asíncrono `MusicProvider` e implementación `YtMusicProvider` sobre llamadas directas HTTPS (InnerTube API con soporte de cabeceras de autorización de cuenta Google, recomendaciones personalizadas y avatares normalizados).
 - [`crates/yr-download`](crates/yr-download): Gestor de descargas concurrente multi-hilo (`DownloadManager`) con soporte para peticiones HTTP `Range`, archivos `.part` transaccionales y reanudación automática.
-- [`crates/yr-app`](crates/yr-app): Interfaz gráfica nativa construida con `egui` y `eframe` (`android-native-activity` en Android y binario nativo en Linux/macOS/Windows).
+- [`crates/yr-app`](crates/yr-app): Interfaz gráfica nativa construida con `egui` y `eframe` (`android-native-activity` en Android y binario nativo en Linux/macOS/Windows) con motor de scroll kinético táctil a 60 FPS (`SmoothTouchScroller`).
 
 ---
 
@@ -53,7 +53,7 @@ El proyecto está modularizado en un espacio de trabajo de Cargo limpio y desaco
 
 Puedes descargar el APK precompilado y firmado para Android en la sección de [Releases de GitHub](https://github.com/uamo11/YR/releases).
 
-1. Descarga el archivo `yr-music-v0.4.0-android.apk`.
+1. Descarga el archivo [`yr-music-v0.5.0-android.apk`](https://github.com/uamo11/YR/releases/latest/download/yr-music-v0.5.0-android.apk).
 2. Habilita la instalación desde orígenes desconocidos si tu dispositivo lo solicita.
 3. Instala y disfruta de música sin publicidad y con la máxima velocidad de respuesta.
 
