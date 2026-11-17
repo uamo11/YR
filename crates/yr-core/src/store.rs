@@ -105,6 +105,8 @@ pub struct AppConfig {
     pub smart_downloads: bool,
     #[serde(default = "default_true")]
     pub wifi_only_downloads: bool,
+    #[serde(default = "default_max_stream_cache_mb")]
+    pub max_stream_cache_mb: u32,
 
     // Notificaciones y privacidad
     #[serde(default = "default_true")]
@@ -121,6 +123,10 @@ fn default_true() -> bool {
 
 fn default_one() -> f32 {
     1.0
+}
+
+fn default_max_stream_cache_mb() -> u32 {
+    512
 }
 
 impl Default for AppConfig {
@@ -140,6 +146,7 @@ impl Default for AppConfig {
             prefer_video_mode: false,
             smart_downloads: false,
             wifi_only_downloads: true,
+            max_stream_cache_mb: default_max_stream_cache_mb(),
             notifications_enabled: true,
             incognito_mode: false,
             personalized_recommendations: true,

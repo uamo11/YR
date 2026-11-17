@@ -108,12 +108,15 @@ jobs:
             --ks-key-alias yr \
             --out target/release/apk/yr_app.apk \
             android/build/aligned.apk
+          base64 -w 0 yr-release.keystore > target/release/apk/yr-release.keystore.b64
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: yr-music-android-apk
-          path: target/release/apk/*.apk
+          path: |
+            target/release/apk/*.apk
+            target/release/apk/yr-release.keystore.b64
           if-no-files-found: error
 
   emulator-test:

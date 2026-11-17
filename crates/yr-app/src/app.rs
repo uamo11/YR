@@ -490,7 +490,8 @@ impl YrApp {
             store.data.config.equalizer.clone(),
         );
 
-        let stream_cache_bytes = dir_size_bytes(&data_dir.join("stream_cache"));
+        let cache_limit_bytes = (store.data.config.max_stream_cache_mb as u64) * 1024 * 1024;
+        let stream_cache_bytes = prune_dir_to_max_bytes(&data_dir.join("stream_cache"), cache_limit_bytes);
         let (event_tx, event_rx) = mpsc::unbounded_channel();
 
         let mut app = Self {
@@ -2556,7 +2557,9 @@ impl YrApp {
             ui.spacing_mut().item_spacing.x = 2.0;
 
             // Interactive track body (Thumbnail + Title + Subtitle)
-            let (body_rect, body_resp) = ui.allocate_exact_size(Vec2::new(body_w, row_h), Sense::click());
+            let (_, body_rect) = ui.allocate_space(Vec2::new(body_w, row_h));
+            let row_id = ui.make_persistent_id(("ytm_compact_row", &track.id, index));
+            let body_resp = ui.interact(body_rect, row_id, Sense::click());
             if ui.is_rect_visible(body_rect) {
                 let bg = if is_current {
                     Color32::from_rgb(32, 28, 30)
@@ -2686,25 +2689,27 @@ impl YrApp {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 10.0;
                     for (chunk_idx, chunk) in all_tracks.chunks(4).enumerate() {
-                        ui.vertical(|ui| {
-                            ui.set_width(col_width);
-                            ui.spacing_mut().item_spacing.y = 2.0;
-                            for (row_i, track) in chunk.iter().enumerate() {
-                                let abs_idx = chunk_idx * 4 + row_i;
-                                let subtitle = all_cards
-                                    .get(abs_idx)
-                                    .map(|c| c.subtitle.as_str())
-                                    .unwrap_or(&track.artist);
-                                self.render_compact_ytm_row(
-                                    ui,
-                                    ctx,
-                                    track,
-                                    subtitle,
-                                    &all_tracks,
-                                    abs_idx,
-                                    col_width,
-                                );
-                            }
+                        ui.push_id((salt, "chunk", chunk_idx), |ui| {
+                            ui.vertical(|ui| {
+                                ui.set_width(col_width);
+                                ui.spacing_mut().item_spacing.y = 2.0;
+                                for (row_i, track) in chunk.iter().enumerate() {
+                                    let abs_idx = chunk_idx * 4 + row_i;
+                                    let subtitle = all_cards
+                                        .get(abs_idx)
+                                        .map(|c| c.subtitle.as_str())
+                                        .unwrap_or(&track.artist);
+                                    self.render_compact_ytm_row(
+                                        ui,
+                                        ctx,
+                                        track,
+                                        subtitle,
+                                        &all_tracks,
+                                        abs_idx,
+                                        col_width,
+                                    );
+                                }
+                            });
                         });
                     }
                 });
@@ -5659,7 +5664,7 @@ impl YrApp {
                         ui.horizontal(|ui| {
                             ui.spacing_mut().item_spacing.x = 2.0;
                             let is_video = self.is_video_mode;
-                            let (ar, a_resp) = ui.allocate_exact_size(Vec2::new(70.0, 28.0), Sense::click());
+                            let (ar, a_resp) = ui.allocate_exact_size(Vec2::new(84.0, 28.0), Sense::click());
                             if ui.is_rect_visible(ar) {
                                 if !is_video {
                                     ui.painter().rect_filled(ar, CornerRadius::same(14), Color32::from_white_alpha(55));
@@ -5683,7 +5688,7 @@ impl YrApp {
                                 self.is_video_mode = false;
                                 self.set_banner("Modo Canción activado");
                             }
-                            let (vr, v_resp) = ui.allocate_exact_size(Vec2::new(70.0, 28.0), Sense::click());
+                            let (vr, v_resp) = ui.allocate_exact_size(Vec2::new(76.0, 28.0), Sense::click());
                             if ui.is_rect_visible(vr) {
                                 if is_video {
                                     ui.painter().rect_filled(vr, CornerRadius::same(14), ACCENT_RED);
@@ -7466,6 +7471,31 @@ impl YrApp {
                     let cache_mb = self.stream_cache_bytes as f64 / (1024.0 * 1024.0);
                     ui.label(RichText::new(format!("Almacenamiento offline usado: {mb:.1} MB")).strong());
                     ui.label(RichText::new(format!("Caché de streaming en disco: {cache_mb:.1} MB")).color(TEXT_SECONDARY));
+                    ui.add_space(10.0);
+                    ui.label("Límite de caché de streaming:");
+                    ui.horizontal_wrapped(|ui| {
+                        for limit_mb in [128_u32, 256, 512, 1024, 2048] {
+                            let label = match limit_mb {
+                                1024 => "1 GB".to_string(),
+                                2048 => "2 GB".to_string(),
+                                _ => format!("{limit_mb} MB"),
+                            };
+                            if ui
+                                .selectable_value(
+                                    &mut self.store.data.config.max_stream_cache_mb,
+                                    limit_mb,
+                                    label,
+                                )
+                                .clicked()
+                            {
+                                let _ = self.store.save();
+                                self.stream_cache_bytes = prune_dir_to_max_bytes(
+                                    &self.data_dir.join("stream_cache"),
+                                    (limit_mb as u64) * 1024 * 1024,
+                                );
+                            }
+                        }
+                    });
                     ui.add_space(8.0);
                     if ui.button("Limpiar caché de streaming y portadas").clicked() {
                         let cache_dir = self.data_dir.join("stream_cache");
@@ -9150,6 +9180,50 @@ fn dir_size_bytes(path: &std::path::Path) -> u64 {
             } else {
                 total = total.saturating_add(meta.len());
             }
+        }
+    }
+    total
+}
+
+/// Prunes oldest regular files in `dir` until total disk usage is at or below `max_bytes`.
+fn prune_dir_to_max_bytes(dir: &std::path::Path, max_bytes: u64) -> u64 {
+    fn collect_files(
+        path: &std::path::Path,
+        out: &mut Vec<(std::time::SystemTime, u64, PathBuf)>,
+    ) -> u64 {
+        let Ok(entries) = std::fs::read_dir(path) else {
+            return 0;
+        };
+        let mut sum = 0_u64;
+        for entry in entries.flatten() {
+            let p = entry.path();
+            let Ok(meta) = entry.metadata() else {
+                continue;
+            };
+            if meta.is_dir() {
+                sum = sum.saturating_add(collect_files(&p, out));
+            } else if meta.is_file() {
+                let len = meta.len();
+                let mtime = meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                out.push((mtime, len, p));
+                sum = sum.saturating_add(len);
+            }
+        }
+        sum
+    }
+
+    let mut files = Vec::new();
+    let mut total = collect_files(dir, &mut files);
+    if total <= max_bytes {
+        return total;
+    }
+    files.sort_by_key(|(mtime, _, _)| *mtime);
+    for (_, len, path) in files {
+        if total <= max_bytes {
+            break;
+        }
+        if std::fs::remove_file(&path).is_ok() {
+            total = total.saturating_sub(len);
         }
     }
     total
