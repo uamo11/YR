@@ -5,7 +5,7 @@ use crate::theme::{
     TEXT_SECONDARY,
 };
 use eframe::CreationContext;
-use egui::{Align, Color32, CornerRadius, Image, Layout, Pos2, Rect, RichText, Sense, Stroke, Vec2};
+use egui::{Align, Align2, Color32, CornerRadius, Image, Layout, Pos2, Rect, RichText, Sense, Stroke, Vec2};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -110,6 +110,89 @@ enum AppEvent {
     GoogleCookieReceived(String),
 }
 
+/// Disambiguated touch drag & 60fps kinetic fling momentum scroller for egui on mobile.
+#[derive(Clone, Debug, Default)]
+pub struct SmoothTouchScroller {
+    pub offset_y: f32,
+    pub vel_y: f32,
+    pub max_offset_y: f32,
+    pub is_dragging: bool,
+}
+
+impl SmoothTouchScroller {
+    pub fn update(
+        &mut self,
+        ui: &egui::Ui,
+        viewport_rect: egui::Rect,
+        can_pull_refresh: bool,
+    ) {
+        let dt = ui.input(|i| i.stable_dt).clamp(0.001, 0.05);
+        let pointer = ui.input(|i| i.pointer.clone());
+        let down = pointer.any_down();
+        let pressed = pointer.any_pressed();
+        let released = pointer.any_released();
+        let press_in_view = pointer.press_origin().is_some_and(|p| viewport_rect.contains(p));
+
+        if pressed && press_in_view {
+            self.vel_y = 0.0;
+            self.is_dragging = false;
+        }
+
+        if down && press_in_view {
+            let delta = pointer.delta();
+            if delta.y.abs() > 0.5 {
+                let is_vertical = delta.y.abs() >= delta.x.abs() * 0.7;
+                if is_vertical || self.is_dragging {
+                    self.is_dragging = true;
+                    self.vel_y = 0.0;
+
+                    // If pulling down at top, let pull-to-refresh handle it without scrolling
+                    if !(self.offset_y <= 0.0 && delta.y > 0.0 && can_pull_refresh) {
+                        self.offset_y = (self.offset_y - delta.y).clamp(0.0, self.max_offset_y);
+                        ui.ctx().request_repaint();
+                    }
+                }
+            }
+        }
+
+        if released && self.is_dragging {
+            self.is_dragging = false;
+            let vy = pointer.velocity().y;
+            if vy.abs() > 50.0 {
+                // Moving downward (positive vy) means scrolling up (decreasing offset_y)
+                self.vel_y = vy;
+            }
+        }
+
+        // Kinetic fling momentum (natural deceleration)
+        if !down && self.vel_y.abs() > 15.0 {
+            let friction = 1500.0 * dt;
+            if friction >= self.vel_y.abs() {
+                self.vel_y = 0.0;
+            } else {
+                self.vel_y -= friction * self.vel_y.signum();
+                self.offset_y = (self.offset_y - self.vel_y * dt).clamp(0.0, self.max_offset_y);
+                ui.ctx().request_repaint();
+            }
+        } else if !down {
+            self.vel_y = 0.0;
+        }
+
+        // Support mouse wheel / touchpad scroll
+        let wheel = ui.input(|i| i.raw_scroll_delta.y);
+        if wheel.abs() > 0.5 {
+            self.vel_y = 0.0;
+            self.offset_y = (self.offset_y - wheel).clamp(0.0, self.max_offset_y);
+            ui.ctx().request_repaint();
+        }
+    }
+
+    pub fn sync_bounds(&mut self, content_h: f32, view_h: f32) {
+        self.max_offset_y = (content_h - view_h).max(0.0);
+        self.offset_y = self.offset_y.clamp(0.0, self.max_offset_y);
+    }
+}
+
 pub struct YrApp {
     runtime: tokio::runtime::Runtime,
     provider: Arc<dyn MusicProvider>,
@@ -195,6 +278,11 @@ pub struct YrApp {
     sample_idx: usize,
     sample_drag_y: f32,
     sample_prewarmed: HashSet<String>,
+
+    home_scroller: SmoothTouchScroller,
+    search_scroller: SmoothTouchScroller,
+    library_scroller: SmoothTouchScroller,
+    detail_scroller: SmoothTouchScroller,
 }
 
 async fn play_track_bg(
@@ -402,6 +490,10 @@ impl YrApp {
             sample_idx: 0,
             sample_drag_y: 0.0,
             sample_prewarmed: HashSet::new(),
+            home_scroller: SmoothTouchScroller::default(),
+            search_scroller: SmoothTouchScroller::default(),
+            library_scroller: SmoothTouchScroller::default(),
+            detail_scroller: SmoothTouchScroller::default(),
         };
 
         let (media_tx, mut media_rx) = mpsc::unbounded_channel();
@@ -1566,59 +1658,7 @@ impl eframe::App for YrApp {
                                     self.refresh_cache_stats();
                                 }
                             }
-                            let account_info = self
-                                .home_feed
-                                .account
-                                .as_ref()
-                                .or(self.store.data.google_account.as_ref());
-                            let avatar_url = account_info.and_then(|a| a.avatar_url.as_deref());
-                            let is_logged = self.home_feed.is_logged_in || self.store.data.google_cookie.is_some();
-                            if let Some(url) = avatar_url {
-                                let thumb_uri = tracked_thumb_uri(url, 192);
-                                let av = ui.add(
-                                    Image::new(thumb_uri)
-                                        .fit_to_exact_size(Vec2::splat(28.0))
-                                        .corner_radius(CornerRadius::same(14))
-                                        .sense(Sense::click()),
-                                );
-                                if av.clicked() {
-                                    self.show_google_login = true;
-                                }
-                            } else if is_logged {
-                                let initial = account_info
-                                    .and_then(|a| a.name.chars().next())
-                                    .unwrap_or('G')
-                                    .to_uppercase()
-                                    .to_string();
-                                if ui
-                                    .add(
-                                        egui::Button::new(
-                                            RichText::new(initial)
-                                                .strong()
-                                                .size(13.0)
-                                                .color(Color32::WHITE),
-                                        )
-                                        .fill(Color32::from_rgb(40, 120, 90))
-                                        .corner_radius(CornerRadius::same(14))
-                                        .min_size(Vec2::splat(28.0)),
-                                    )
-                                    .clicked()
-                                {
-                                    self.show_google_login = true;
-                                }
-                            } else {
-                                let (av_rect, av_resp) = ui.allocate_exact_size(Vec2::splat(28.0), Sense::click());
-                                ui.painter().circle_filled(av_rect.center(), 14.0, BG_ELEVATED);
-                                icons::draw_icon(
-                                    ui.painter(),
-                                    egui::Rect::from_center_size(av_rect.center(), Vec2::splat(16.0)),
-                                    icons::Icon::Account,
-                                    TEXT_SECONDARY,
-                                );
-                                if av_resp.clicked() {
-                                    self.show_google_login = true;
-                                }
-                            }
+                            self.render_account_button(ui, 28.0);
                         });
                     });
                 });
@@ -1895,6 +1935,76 @@ impl YrApp {
         self.refresh_home(ctx);
     }
 
+    fn render_account_button(&mut self, ui: &mut egui::Ui, size: f32) {
+        let (rect, resp) = ui.allocate_exact_size(Vec2::splat(size), Sense::click());
+        if ui.is_rect_visible(rect) {
+            let account_info = self
+                .home_feed
+                .account
+                .as_ref()
+                .or(self.store.data.google_account.as_ref());
+            let avatar_url = account_info.and_then(|a| a.avatar_url.as_deref());
+            let is_logged = self.home_feed.is_logged_in || self.store.data.google_cookie.is_some();
+            let radius = CornerRadius::same((size * 0.5) as u8);
+
+            ui.painter().rect_filled(
+                rect,
+                radius,
+                if is_logged {
+                    Color32::from_rgb(38, 38, 44)
+                } else {
+                    BG_ELEVATED
+                },
+            );
+
+            let mut painted = false;
+            if let Some(url) = avatar_url {
+                let thumb_uri = tracked_thumb_uri(url, 192);
+                let img = Image::new(thumb_uri)
+                    .fit_to_exact_size(Vec2::splat(size))
+                    .corner_radius(radius);
+                match img.load_for_size(ui.ctx(), Vec2::splat(size)) {
+                    Ok(egui::load::TexturePoll::Ready { .. }) => {
+                        img.paint_at(ui, rect);
+                        painted = true;
+                    }
+                    Ok(egui::load::TexturePoll::Pending { .. }) => {
+                        ui.ctx().request_repaint();
+                    }
+                    Err(_) => {}
+                }
+            }
+
+            if !painted {
+                if is_logged {
+                    let initial = account_info
+                        .and_then(|a| a.name.chars().next())
+                        .unwrap_or('G')
+                        .to_uppercase()
+                        .to_string();
+                    let font_id = egui::FontId::proportional(size * 0.46);
+                    ui.painter().text(
+                        rect.center(),
+                        Align2::CENTER_CENTER,
+                        initial,
+                        font_id,
+                        Color32::WHITE,
+                    );
+                } else {
+                    icons::draw_icon(
+                        ui.painter(),
+                        egui::Rect::from_center_size(rect.center(), Vec2::splat(size * 0.58)),
+                        icons::Icon::Account,
+                        TEXT_SECONDARY,
+                    );
+                }
+            }
+        }
+        if resp.clicked() {
+            self.show_google_login = true;
+        }
+    }
+
     fn nav_button(&mut self, ui: &mut egui::Ui, tab: NavTab, label: &str) {
         let selected = self.active_tab == tab && !self.now_playing_open && !self.show_settings;
         let fg = if selected { ACCENT_RED } else { TEXT_SECONDARY };
@@ -2052,16 +2162,19 @@ impl YrApp {
                 });
                 ui.add_space(6.0);
                 let detail_viewport = ui.available_rect_before_wrap();
+                self.detail_scroller.update(ui, detail_viewport, !self.detail_loading);
                 let detail_scroll = egui::ScrollArea::vertical()
-                    .drag_to_scroll(true)
+                    .vertical_scroll_offset(self.detail_scroller.offset_y)
+                    .drag_to_scroll(false)
                     .show(ui, |ui| {
                         for (idx, track) in album.tracks.iter().enumerate() {
                             self.render_track_row(ui, ctx, track, &album.tracks, idx, false);
                         }
                     });
+                self.detail_scroller.sync_bounds(detail_scroll.content_size.y, detail_scroll.inner_rect.height());
                 if self.handle_pull_to_refresh(
                     ui,
-                    detail_scroll.state.offset.y,
+                    self.detail_scroller.offset_y,
                     detail_viewport,
                     self.detail_loading,
                 ) {
@@ -2088,16 +2201,19 @@ impl YrApp {
                 self.render_collection_actions(ui, ctx, &pl.tracks, true);
                 ui.add_space(6.0);
                 let detail_viewport = ui.available_rect_before_wrap();
+                self.detail_scroller.update(ui, detail_viewport, !self.detail_loading);
                 let detail_scroll = egui::ScrollArea::vertical()
-                    .drag_to_scroll(true)
+                    .vertical_scroll_offset(self.detail_scroller.offset_y)
+                    .drag_to_scroll(false)
                     .show(ui, |ui| {
                         for (idx, track) in pl.tracks.iter().enumerate() {
                             self.render_track_row(ui, ctx, track, &pl.tracks, idx, false);
                         }
                     });
+                self.detail_scroller.sync_bounds(detail_scroll.content_size.y, detail_scroll.inner_rect.height());
                 if self.handle_pull_to_refresh(
                     ui,
-                    detail_scroll.state.offset.y,
+                    self.detail_scroller.offset_y,
                     detail_viewport,
                     self.detail_loading,
                 ) {
@@ -2129,8 +2245,10 @@ impl YrApp {
                     self.render_collection_actions(ui, ctx, &artist.top_tracks, false);
                 }
                 let detail_viewport = ui.available_rect_before_wrap();
+                self.detail_scroller.update(ui, detail_viewport, !self.detail_loading);
                 let detail_scroll = egui::ScrollArea::vertical()
-                    .drag_to_scroll(true)
+                    .vertical_scroll_offset(self.detail_scroller.offset_y)
+                    .drag_to_scroll(false)
                     .show(ui, |ui| {
                     if !artist.top_tracks.is_empty() {
                         ui.add_space(6.0);
@@ -2147,9 +2265,10 @@ impl YrApp {
                         }
                     }
                 });
+                self.detail_scroller.sync_bounds(detail_scroll.content_size.y, detail_scroll.inner_rect.height());
                 if self.handle_pull_to_refresh(
                     ui,
-                    detail_scroll.state.offset.y,
+                    self.detail_scroller.offset_y,
                     detail_viewport,
                     self.detail_loading,
                 ) {
@@ -2862,9 +2981,11 @@ impl YrApp {
     fn render_home(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         let is_loading = self.home_loading;
         let home_viewport = ui.available_rect_before_wrap();
+        self.home_scroller.update(ui, home_viewport, !is_loading);
         let scroll_out = egui::ScrollArea::vertical()
             .id_salt("home_vertical_scroll")
-            .drag_to_scroll(true)
+            .vertical_scroll_offset(self.home_scroller.offset_y)
+            .drag_to_scroll(false)
             .show(ui, |ui| {
                 // Mood / Genre Chips row (YT Music style)
             if !self.home_feed.moods.is_empty() {
@@ -3118,9 +3239,10 @@ impl YrApp {
                 }
             }
         });
+        self.home_scroller.sync_bounds(scroll_out.content_size.y, scroll_out.inner_rect.height());
         if self.handle_pull_to_refresh(
             ui,
-            scroll_out.state.offset.y,
+            self.home_scroller.offset_y,
             home_viewport,
             is_loading,
         ) {
@@ -3700,9 +3822,11 @@ impl YrApp {
 
         let search_viewport = ui.available_rect_before_wrap();
         let search_loading = self.search_loading || self.explore_loading;
+        self.search_scroller.update(ui, search_viewport, !search_loading);
         let search_scroll = egui::ScrollArea::vertical()
             .id_salt("search_scroll")
-            .drag_to_scroll(true)
+            .vertical_scroll_offset(self.search_scroller.offset_y)
+            .drag_to_scroll(false)
             .show(ui, |ui| {
                 let mut shown_local_ids: HashSet<String> = HashSet::new();
                 let q_trimmed = self.search_query.trim().to_string();
@@ -4138,9 +4262,10 @@ impl YrApp {
                     }
                 }
             });
+        self.search_scroller.sync_bounds(search_scroll.content_size.y, search_scroll.inner_rect.height());
         if self.handle_pull_to_refresh(
             ui,
-            search_scroll.state.offset.y,
+            self.search_scroller.offset_y,
             search_viewport,
             search_loading,
         ) {
@@ -4199,59 +4324,7 @@ impl YrApp {
                     .color(TEXT_PRIMARY),
             );
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                let account_info = self
-                    .home_feed
-                    .account
-                    .as_ref()
-                    .or(self.store.data.google_account.as_ref());
-                let avatar_url = account_info.and_then(|a| a.avatar_url.as_deref());
-                let is_logged = self.home_feed.is_logged_in || self.store.data.google_cookie.is_some();
-                if let Some(url) = avatar_url {
-                    let thumb_uri = tracked_thumb_uri(url, 192);
-                    let av = ui.add(
-                        Image::new(thumb_uri)
-                            .fit_to_exact_size(Vec2::splat(28.0))
-                            .corner_radius(CornerRadius::same(14))
-                            .sense(Sense::click()),
-                    );
-                    if av.clicked() {
-                        self.show_google_login = true;
-                    }
-                } else if is_logged {
-                    let initial = account_info
-                        .and_then(|a| a.name.chars().next())
-                        .unwrap_or('G')
-                        .to_uppercase()
-                        .to_string();
-                    if ui
-                        .add(
-                            egui::Button::new(
-                                RichText::new(initial)
-                                    .strong()
-                                    .size(13.0)
-                                    .color(Color32::WHITE),
-                            )
-                            .fill(Color32::from_rgb(40, 120, 90))
-                            .corner_radius(CornerRadius::same(14))
-                            .min_size(Vec2::splat(28.0)),
-                        )
-                        .clicked()
-                    {
-                        self.show_google_login = true;
-                    }
-                } else {
-                    let (av_rect, av_resp) = ui.allocate_exact_size(Vec2::splat(28.0), Sense::click());
-                    ui.painter().circle_filled(av_rect.center(), 14.0, BG_ELEVATED);
-                    icons::draw_icon(
-                        ui.painter(),
-                        egui::Rect::from_center_size(av_rect.center(), Vec2::splat(16.0)),
-                        icons::Icon::Account,
-                        TEXT_SECONDARY,
-                    );
-                    if av_resp.clicked() {
-                        self.show_google_login = true;
-                    }
-                }
+                self.render_account_button(ui, 28.0);
                 ui.add_space(4.0);
                 if icons::icon_button(
                     ui,
@@ -4378,9 +4451,11 @@ impl YrApp {
 
         let lib_loading = self.home_loading;
         let lib_viewport = ui.available_rect_before_wrap();
+        self.library_scroller.update(ui, lib_viewport, !lib_loading);
         let lib_scroll = egui::ScrollArea::vertical()
             .id_salt("lib_scroll")
-            .drag_to_scroll(true)
+            .vertical_scroll_offset(self.library_scroller.offset_y)
+            .drag_to_scroll(false)
             .show(ui, |ui| {
                 // Pinned "Música que te gustó" gradient card
                 if matches!(self.library_filter, LibraryFilter::All | LibraryFilter::Playlists | LibraryFilter::Songs) {
@@ -4694,9 +4769,10 @@ impl YrApp {
                     }
                 }
             });
+        self.library_scroller.sync_bounds(lib_scroll.content_size.y, lib_scroll.inner_rect.height());
         if self.handle_pull_to_refresh(
             ui,
-            lib_scroll.state.offset.y,
+            self.library_scroller.offset_y,
             lib_viewport,
             lib_loading,
         ) {
@@ -6928,11 +7004,12 @@ impl YrApp {
         }
 
         egui::Area::new(egui::Id::new("yr_action_sheet_panel"))
-            .anchor(egui::Align2::CENTER_BOTTOM, Vec2::ZERO)
+            .anchor(egui::Align2::LEFT_BOTTOM, Vec2::ZERO)
             .order(egui::Order::Foreground)
             .interactable(true)
             .show(ctx, |ui| {
                 ui.set_width(screen.width());
+                ui.set_max_width(screen.width());
                 egui::Frame::new()
                     .fill(Color32::from_rgb(24, 24, 28))
                     .stroke(Stroke::new(0.8_f32, Color32::from_rgb(48, 48, 54)))
@@ -6944,7 +7021,9 @@ impl YrApp {
                     })
                     .inner_margin(egui::Margin::symmetric(14, 12))
                     .show(ui, |ui| {
-                        ui.set_width((screen.width() - 28.0).max(180.0));
+                        let inner_w = (screen.width() - 28.0).max(180.0);
+                        ui.set_width(inner_w);
+                        ui.set_max_width(inner_w);
                         // Header: Thumb | Title + Artist • Duration | ThumbUp | Close
                 ui.horizontal(|ui| {
                     render_track_thumb(ui, &track, 46.0);
@@ -7228,11 +7307,12 @@ impl YrApp {
             .load(std::sync::atomic::Ordering::SeqCst);
 
         egui::Area::new(egui::Id::new("yr_sleep_timer_panel"))
-            .anchor(egui::Align2::CENTER_BOTTOM, Vec2::ZERO)
+            .anchor(egui::Align2::LEFT_BOTTOM, Vec2::ZERO)
             .order(egui::Order::Foreground)
             .interactable(true)
             .show(ctx, |ui| {
                 ui.set_width(screen.width());
+                ui.set_max_width(screen.width());
                 egui::Frame::new()
                     .fill(Color32::from_rgb(24, 24, 28))
                     .stroke(Stroke::new(0.8_f32, Color32::from_rgb(48, 48, 54)))
@@ -7244,7 +7324,9 @@ impl YrApp {
                     })
                     .inner_margin(egui::Margin::symmetric(16, 14))
                     .show(ui, |ui| {
-                        ui.set_width((screen.width() - 32.0).max(180.0));
+                        let inner_w = (screen.width() - 32.0).max(180.0);
+                        ui.set_width(inner_w);
+                        ui.set_max_width(inner_w);
                         ui.horizontal(|ui| {
                             let (mr, _) =
                                 ui.allocate_exact_size(Vec2::splat(20.0), Sense::hover());
@@ -7548,11 +7630,12 @@ impl YrApp {
         let mut close_sheet = render_modal_scrim(ctx, "yr_playlist_picker_scrim");
 
         egui::Area::new(egui::Id::new("yr_playlist_picker_panel"))
-            .anchor(egui::Align2::CENTER_BOTTOM, Vec2::ZERO)
+            .anchor(egui::Align2::LEFT_BOTTOM, Vec2::ZERO)
             .order(egui::Order::Foreground)
             .interactable(true)
             .show(ctx, |ui| {
                 ui.set_width(screen.width());
+                ui.set_max_width(screen.width());
                 egui::Frame::new()
                     .fill(Color32::from_rgb(24, 24, 28))
                     .stroke(Stroke::new(0.8_f32, Color32::from_rgb(48, 48, 54)))
@@ -7566,6 +7649,7 @@ impl YrApp {
                     .show(ui, |ui| {
                         let content_w = (screen.width() - 28.0).max(180.0);
                         ui.set_width(content_w);
+                        ui.set_max_width(content_w);
                         ui.horizontal(|ui| {
                             ui.label(
                                 RichText::new("Guardar en playlist")

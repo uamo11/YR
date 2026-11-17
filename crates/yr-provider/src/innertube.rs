@@ -207,7 +207,10 @@ pub fn parse_account_info_from_value(val: &Value) -> Option<GoogleAccountInfo> {
             let name = runs_text(header.get("accountName"));
             if !name.is_empty() {
                 let handle = non_empty(runs_text(header.get("channelHandle")));
-                let avatar_url = best_thumb(header.pointer("/accountPhoto/thumbnails"));
+                let avatar_url = best_thumb(header.pointer("/accountPhoto/thumbnails"))
+                    .or_else(|| best_thumb(header.pointer("/avatar/thumbnails")))
+                    .or_else(|| best_thumb(header.pointer("/thumbnail/thumbnails")))
+                    .or_else(|| best_thumb(header.pointer("/image/thumbnails")));
                 return Some(GoogleAccountInfo {
                     name,
                     handle,
@@ -216,13 +219,21 @@ pub fn parse_account_info_from_value(val: &Value) -> Option<GoogleAccountInfo> {
             }
         }
     }
-    if let Some(thumbs) = val.pointer("/topbar/musicTopBarRenderer/accountPhoto/thumbnails") {
-        if let Some(avatar_url) = best_thumb(Some(thumbs)) {
-            return Some(GoogleAccountInfo {
-                name: "Mi Cuenta".to_string(),
-                handle: None,
-                avatar_url: Some(avatar_url),
-            });
+    let topbar_thumb_candidates = [
+        "/topbar/musicTopBarRenderer/accountButton/buttonRenderer/image/thumbnails",
+        "/topbar/musicTopBarRenderer/accountButton/buttonRenderer/avatar/thumbnails",
+        "/topbar/musicTopBarRenderer/accountButton/buttonRenderer/thumbnail/thumbnails",
+        "/topbar/musicTopBarRenderer/accountPhoto/thumbnails",
+    ];
+    for path in topbar_thumb_candidates {
+        if let Some(thumbs) = val.pointer(path) {
+            if let Some(avatar_url) = best_thumb(Some(thumbs)) {
+                return Some(GoogleAccountInfo {
+                    name: "Mi Cuenta".to_string(),
+                    handle: None,
+                    avatar_url: Some(avatar_url),
+                });
+            }
         }
     }
     None
@@ -731,11 +742,17 @@ fn parse_duration_text(text: &str) -> Option<u64> {
 
 fn best_thumb(thumbs: Option<&Value>) -> Option<String> {
     let arr = thumbs?.as_array()?;
-    arr.last()
+    let raw = arr
+        .last()
         .or_else(|| arr.first())
         .and_then(|t| t.get("url"))
-        .and_then(|u| u.as_str())
-        .map(|s| s.to_string())
+        .and_then(|u| u.as_str())?;
+    let trimmed = raw.trim();
+    if trimmed.starts_with("//") {
+        Some(format!("https:{trimmed}"))
+    } else {
+        Some(trimmed.to_string())
+    }
 }
 
 fn non_empty(s: String) -> Option<String> {
