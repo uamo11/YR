@@ -4973,7 +4973,12 @@ impl YrApp {
         // Floating "+ Nueva" pill button in bottom right (matches YouTube Music)
         let screen = ctx.screen_rect();
         let fab_x = screen.right() - 116.0;
-        let fab_y = screen.bottom() - 128.0;
+        let has_track = self.queue.lock().map(|q| q.current_track().is_some()).unwrap_or(false);
+        #[cfg(target_os = "android")]
+        let clearance = if has_track { 216.0 } else { 154.0 };
+        #[cfg(not(target_os = "android"))]
+        let clearance = if has_track { 160.0 } else { 96.0 };
+        let fab_y = screen.bottom() - clearance;
         egui::Area::new(egui::Id::new("yr_lib_fab"))
             .fixed_pos(egui::pos2(fab_x, fab_y))
             .order(egui::Order::Foreground)
@@ -8364,11 +8369,18 @@ impl YrApp {
                         ui.add_space(16.0);
 
                         // Profile Header Card (matching media_1794881820029_c543419e.jpg)
-                        let avatar_sz = 44.0;
-                        ui.horizontal(|ui| {
-                            let (r, _) = ui.allocate_exact_size(Vec2::splat(avatar_sz), Sense::hover());
+                        let (card_rect, card_resp) = ui.allocate_exact_size(Vec2::new(inner_w, 64.0), Sense::click());
+                        if ui.is_rect_visible(card_rect) {
+                            if card_resp.hovered() {
+                                ui.painter().rect_filled(card_rect, CornerRadius::same(10), Color32::from_white_alpha(15));
+                            }
+                            let avatar_sz = 44.0;
+                            let av_rect = Rect::from_min_size(
+                                Pos2::new(card_rect.left(), card_rect.center().y - avatar_sz * 0.5),
+                                Vec2::splat(avatar_sz),
+                            );
                             let radius = CornerRadius::same((avatar_sz * 0.5) as u8);
-                            ui.painter().rect_filled(r, radius, Color32::from_rgb(38, 38, 44));
+                            ui.painter().rect_filled(av_rect, radius, Color32::from_rgb(38, 38, 44));
 
                             let mut painted = false;
                             if let Some(url) = &avatar_url {
@@ -8378,7 +8390,7 @@ impl YrApp {
                                     .corner_radius(radius);
                                 match img.load_for_size(ui.ctx(), Vec2::splat(avatar_sz)) {
                                     Ok(egui::load::TexturePoll::Ready { .. }) => {
-                                        img.paint_at(ui, r);
+                                        img.paint_at(ui, av_rect);
                                         painted = true;
                                     }
                                     _ => {}
@@ -8387,7 +8399,7 @@ impl YrApp {
                             if !painted {
                                 let initial = user_name.chars().next().unwrap_or('A').to_uppercase().to_string();
                                 ui.painter().text(
-                                    r.center(),
+                                    av_rect.center(),
                                     Align2::CENTER_CENTER,
                                     initial,
                                     egui::FontId::proportional(20.0),
@@ -8395,42 +8407,43 @@ impl YrApp {
                                 );
                             }
 
-                            ui.add_space(10.0);
-                            ui.vertical(|ui| {
-                                ui.horizontal(|ui| {
-                                    ui.label(
-                                        RichText::new(&user_name)
-                                            .size(16.0)
-                                            .strong()
-                                            .color(Color32::WHITE),
-                                    );
-                                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                        let (chev_r, _) = ui.allocate_exact_size(Vec2::splat(16.0), Sense::hover());
-                                        icons::draw_icon(ui.painter(), chev_r, icons::Icon::ChevronRight, TEXT_SECONDARY);
-                                    });
-                                });
-                                ui.label(
-                                    RichText::new(&user_handle)
-                                        .size(12.5)
-                                        .color(TEXT_SECONDARY),
-                                );
-                                ui.add_space(2.0);
-                                if ui
-                                    .add(
-                                        egui::Label::new(
-                                            RichText::new("Administra tu Cuenta de Google")
-                                                .size(12.0)
-                                                .color(Color32::from_rgb(96, 160, 255)),
-                                        )
-                                        .sense(Sense::click()),
-                                    )
-                                    .clicked()
-                                {
-                                    self.show_account_modal = false;
-                                    self.show_google_login = true;
-                                }
-                            });
-                        });
+                            let text_left = av_rect.right() + 10.0;
+                            let chev_sz = 16.0;
+                            let chev_rect = Rect::from_center_size(
+                                Pos2::new(card_rect.right() - 10.0, card_rect.top() + 14.0),
+                                Vec2::splat(chev_sz),
+                            );
+                            icons::draw_icon(ui.painter(), chev_rect, icons::Icon::ChevronRight, TEXT_SECONDARY);
+
+                            ui.painter().text(
+                                Pos2::new(text_left, card_rect.top() + 14.0),
+                                Align2::LEFT_CENTER,
+                                &user_name,
+                                egui::FontId::proportional(16.0),
+                                Color32::WHITE,
+                            );
+
+                            ui.painter().text(
+                                Pos2::new(text_left, card_rect.top() + 32.0),
+                                Align2::LEFT_CENTER,
+                                &user_handle,
+                                egui::FontId::proportional(12.5),
+                                TEXT_SECONDARY,
+                            );
+
+                            ui.painter().text(
+                                Pos2::new(text_left, card_rect.top() + 48.0),
+                                Align2::LEFT_CENTER,
+                                "Administra tu Cuenta de Google",
+                                egui::FontId::proportional(12.0),
+                                Color32::from_rgb(96, 160, 255),
+                            );
+                        }
+
+                        if card_resp.clicked() {
+                            self.show_account_modal = false;
+                            self.show_google_login = true;
+                        }
 
                         ui.add_space(10.0);
                         ui.separator();
