@@ -2548,14 +2548,13 @@ impl YrApp {
             .iter()
             .any(|d| d.track.id == track.id && d.status == DownloadStatus::Completed);
 
-        egui::Frame::new()
+        let row_resp = egui::Frame::new()
             .fill(row_bg)
             .corner_radius(CornerRadius::same(8))
             .inner_margin(egui::Margin::symmetric(4, 4))
             .show(ui, |ui| {
                 ui.set_width(col_width);
                 ui.horizontal(|ui| {
-                    let row_start = ui.cursor().min;
                     let thumb_sz = 48.0;
                     let row_h = 54.0;
                     render_track_thumb(ui, track, thumb_sz);
@@ -2587,19 +2586,6 @@ impl YrApp {
                         });
                     });
 
-                    let hit_rect = egui::Rect::from_min_size(
-                        row_start,
-                        Vec2::new(thumb_sz + 8.0 + text_w, row_h),
-                    );
-                    let row_hit = ui.interact(
-                        hit_rect,
-                        ui.id().with(("ytm_row", &track.id, index)),
-                        Sense::click(),
-                    );
-                    if row_hit.clicked() {
-                        self.play_track_in_list(list.to_vec(), index, ctx);
-                    }
-
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if icons::icon_button(
                             ui,
@@ -2618,6 +2604,10 @@ impl YrApp {
                     });
                 });
             });
+
+        if row_resp.response.interact(Sense::click()).clicked() {
+            self.play_track_in_list(list.to_vec(), index, ctx);
+        }
     }
 
     fn activate_shelf_card(
@@ -5569,10 +5559,11 @@ impl YrApp {
             egui::pos2(bg_rect.right() - pad_x, bg_rect.bottom() - safe_bottom),
         );
         ui.allocate_new_ui(egui::UiBuilder::new().max_rect(inner_rect), |ui| {
-            let top_bar_min_y = ui.cursor().top();
+            let _top_bar_min_y = ui.cursor().top();
 
-            // Top bar: v chevron | optional sleep badge | more ⋮ button
+            // Top bar: v chevron | [ Canción | Video ] switch | Cast & More ⋮
             ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
                 if icons::icon_button(
                     ui,
                     icons::Icon::ChevronDown,
@@ -5587,76 +5578,14 @@ impl YrApp {
                     self.now_playing_open = false;
                 }
 
-                let active_until = *self.sleep_timer_until.lock().unwrap();
-                let timer_text = if let Some(until) = active_until {
-                    let rem = until.saturating_duration_since(Instant::now()).as_secs();
-                    Some(format!("{}:{:02}", rem / 60, rem % 60))
-                } else if self
-                    .sleep_after_track
-                    .load(std::sync::atomic::Ordering::SeqCst)
-                {
-                    Some("Al terminar".to_string())
-                } else {
-                    None
-                };
+                let total_w = inner_rect.width();
+                let pill_w = 148.0_f32;
+                let left_w = 42.0_f32;
+                let right_w = 78.0_f32;
+                let pad_left = ((total_w - pill_w) * 0.5 - left_w).max(4.0);
+                ui.add_space(pad_left);
 
-                if let Some(txt) = timer_text {
-                    ui.add_space(6.0);
-                    let timer_resp = egui::Frame::new()
-                        .fill(Color32::from_white_alpha(28))
-                        .corner_radius(CornerRadius::same(14))
-                        .inner_margin(egui::Margin::symmetric(10, 4))
-                        .show(ui, |ui| {
-                            ui.horizontal(|ui| {
-                                let (r, _) =
-                                    ui.allocate_exact_size(Vec2::splat(13.0), Sense::hover());
-                                icons::draw_icon(ui.painter(), r, icons::Icon::Moon, ACCENT_RED);
-                                ui.label(RichText::new(txt).size(12.0).color(Color32::WHITE));
-                            });
-                        })
-                        .response
-                        .interact(Sense::click());
-                    if timer_resp.clicked() {
-                        self.show_sleep_timer_sheet = true;
-                    }
-                }
-
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if icons::icon_button(
-                        ui,
-                        icons::Icon::MoreVert,
-                        38.0,
-                        19.0,
-                        Color32::TRANSPARENT,
-                        Color32::WHITE,
-                        20.0,
-                    )
-                    .clicked()
-                    {
-                        self.action_sheet_track = Some(track.clone());
-                    }
-                    if icons::icon_button(
-                        ui,
-                        icons::Icon::Cast,
-                        34.0,
-                        17.0,
-                        Color32::TRANSPARENT,
-                        Color32::from_white_alpha(200),
-                        17.0,
-                    )
-                    .clicked()
-                    {
-                        self.set_banner("Transmitiendo a dispositivo...");
-                    }
-                });
-            });
-
-            // Center: YouTube Music Audio/Video mode segmented pill
-            let pill_rect = Rect::from_center_size(
-                Pos2::new(inner_rect.center().x, top_bar_min_y + 19.0),
-                Vec2::new(148.0, 32.0),
-            );
-            ui.allocate_new_ui(egui::UiBuilder::new().max_rect(pill_rect), |ui| {
+                // Center: YouTube Music Audio/Video mode segmented pill
                 egui::Frame::new()
                     .fill(Color32::from_white_alpha(32))
                     .corner_radius(CornerRadius::same(16))
@@ -5715,6 +5644,36 @@ impl YrApp {
                             }
                         });
                     });
+
+                let pad_right = (total_w - left_w - pad_left - pill_w - right_w).max(4.0);
+                ui.add_space(pad_right);
+
+                if icons::icon_button(
+                    ui,
+                    icons::Icon::Cast,
+                    34.0,
+                    17.0,
+                    Color32::TRANSPARENT,
+                    Color32::from_white_alpha(200),
+                    17.0,
+                )
+                .clicked()
+                {
+                    self.set_banner("Transmitiendo a dispositivo...");
+                }
+                if icons::icon_button(
+                    ui,
+                    icons::Icon::MoreVert,
+                    38.0,
+                    19.0,
+                    Color32::TRANSPARENT,
+                    Color32::WHITE,
+                    20.0,
+                )
+                .clicked()
+                {
+                    self.action_sheet_track = Some(track.clone());
+                }
             });
 
             let avail_w = ui.available_width();
