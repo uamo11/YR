@@ -321,7 +321,12 @@ pub async fn fetch_home_feed(
             if let Some(vd) = &visitor_data {
                 cbody["context"]["client"]["visitorData"] = Value::String(vd.clone());
             }
-            let Ok(cresp) = post_innertube(http, "browse", cbody, session).await else {
+            let Ok(Ok(cresp)) = tokio::time::timeout(
+                std::time::Duration::from_secs(4),
+                post_innertube(http, "browse", cbody, session),
+            )
+            .await
+            else {
                 break;
             };
             if visitor_data.is_none() {

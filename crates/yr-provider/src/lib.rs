@@ -79,14 +79,20 @@ impl Default for YtMusicProvider {
 }
 
 impl YtMusicProvider {
+    fn build_http_client() -> reqwest::Client {
+        reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(12))
+            .pool_idle_timeout(Duration::from_secs(30))
+            .tcp_nodelay(true)
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new())
+    }
+
     pub fn new() -> Self {
         Self {
             client: RustyPipe::new(),
-            http: reqwest::Client::builder()
-                .connect_timeout(Duration::from_secs(10))
-                .tcp_nodelay(true)
-                .build()
-                .unwrap_or_else(|_| reqwest::Client::new()),
+            http: Self::build_http_client(),
             cache_dir: None,
             google_session: Arc::new(Mutex::new(None)),
             pending_oauth: Arc::new(Mutex::new(None)),
@@ -103,11 +109,7 @@ impl YtMusicProvider {
             .unwrap_or_else(|_| RustyPipe::new());
         Self {
             client,
-            http: reqwest::Client::builder()
-                .connect_timeout(Duration::from_secs(10))
-                .tcp_nodelay(true)
-                .build()
-                .unwrap_or_else(|_| reqwest::Client::new()),
+            http: Self::build_http_client(),
             cache_dir: Some(cache_dir),
             google_session: Arc::new(Mutex::new(session)),
             pending_oauth: Arc::new(Mutex::new(None)),
@@ -202,19 +204,26 @@ impl MusicProvider for YtMusicProvider {
     ) -> Result<HomeFeed, ProviderError> {
         let session = self.google_session.lock().await.clone();
         let has_cookie_session = session.as_ref().is_some_and(|s| s.has_auth_cookies());
-        let logged_in = has_cookie_session || self.is_logged_in().await;
+        let logged_in = has_cookie_session;
 
         let mut feed = match innertube::fetch_home_feed(&self.http, session.as_ref(), mood_params).await {
             Ok(f) => f,
             Err(_) => {
                 // Fallback to rustypipe charts + new releases
                 let q = self.client.query();
-                let (charts_res, new_videos_res, new_albums_res, genres_res) = tokio::join!(
-                    q.music_charts(Some(Country::Us)),
-                    q.music_new_videos(),
-                    q.music_new_albums(),
-                    q.music_genres()
-                );
+                let (charts_res, new_videos_res, new_albums_res, genres_res) =
+                    tokio::time::timeout(Duration::from_secs(8), async {
+                        tokio::join!(
+                            q.music_charts(Some(Country::Us)),
+                            q.music_new_videos(),
+                            q.music_new_albums(),
+                            q.music_genres()
+                        )
+                    })
+                    .await
+                    .map_err(|_| {
+                        ProviderError::Api("Tiempo de espera agotado al cargar el feed".into())
+                    })?;
 
                 let mut quick_picks: Vec<Track> = Vec::new();
                 let mut trending_tracks: Vec<Track> = Vec::new();
@@ -269,23 +278,28 @@ impl MusicProvider for YtMusicProvider {
         }
         if feed.quick_picks.is_empty() && mood_params.is_none() {
             let q = self.client.query();
-            let (charts_res, new_videos_res) =
-                tokio::join!(q.music_charts(Some(Country::Us)), q.music_new_videos());
-            if let Ok(charts) = charts_res {
-                feed.quick_picks
-                    .extend(charts.top_tracks.into_iter().map(Self::map_track));
-                if feed.trending_tracks.is_empty() {
-                    feed.trending_tracks
-                        .extend(charts.trending_tracks.into_iter().map(Self::map_track));
-                }
-            }
-            if feed.quick_picks.is_empty() && !feed.trending_tracks.is_empty() {
-                feed.quick_picks = feed.trending_tracks.clone();
-            }
-            if feed.quick_picks.is_empty() {
-                if let Ok(videos) = new_videos_res {
+            if let Ok((charts_res, new_videos_res)) =
+                tokio::time::timeout(Duration::from_secs(8), async {
+                    tokio::join!(q.music_charts(Some(Country::Us)), q.music_new_videos())
+                })
+                .await
+            {
+                if let Ok(charts) = charts_res {
                     feed.quick_picks
-                        .extend(videos.into_iter().map(Self::map_track));
+                        .extend(charts.top_tracks.into_iter().map(Self::map_track));
+                    if feed.trending_tracks.is_empty() {
+                        feed.trending_tracks
+                            .extend(charts.trending_tracks.into_iter().map(Self::map_track));
+                    }
+                }
+                if feed.quick_picks.is_empty() && !feed.trending_tracks.is_empty() {
+                    feed.quick_picks = feed.trending_tracks.clone();
+                }
+                if feed.quick_picks.is_empty() {
+                    if let Ok(videos) = new_videos_res {
+                        feed.quick_picks
+                            .extend(videos.into_iter().map(Self::map_track));
+                    }
                 }
             }
         }

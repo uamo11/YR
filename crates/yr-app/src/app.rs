@@ -894,10 +894,15 @@ impl YrApp {
         let tx = self.event_tx.clone();
         let ctx = ctx.clone();
         self.runtime.spawn(async move {
-            let res = provider
-                .get_home_feed_with_params(mood_params.as_deref())
-                .await
-                .map_err(|e| e.to_string());
+            let res = match tokio::time::timeout(
+                Duration::from_secs(16),
+                provider.get_home_feed_with_params(mood_params.as_deref()),
+            )
+            .await
+            {
+                Ok(r) => r.map_err(|e| e.to_string()),
+                Err(_) => Err("Tiempo de espera agotado al cargar inicio".to_string()),
+            };
             let _ = tx.send(AppEvent::HomeLoaded(res));
             ctx.request_repaint();
         });
@@ -3266,6 +3271,42 @@ impl YrApp {
                     ui.spinner();
                     ui.label(RichText::new("Cargando YouTube Music...").color(TEXT_SECONDARY));
                 });
+            } else if home_empty && self.home_feed.quick_picks.is_empty() {
+                ui.add_space(8.0);
+                egui::Frame::new()
+                    .fill(BG_SURFACE)
+                    .corner_radius(CornerRadius::same(14))
+                    .inner_margin(egui::Margin::symmetric(14, 14))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.vertical(|ui| {
+                                ui.label(
+                                    RichText::new("No se pudo cargar el inicio")
+                                        .size(14.5)
+                                        .strong()
+                                        .color(Color32::WHITE),
+                                );
+                                ui.label(
+                                    RichText::new("Revisa tu conexión e inténtalo de nuevo")
+                                        .size(12.0)
+                                        .color(TEXT_SECONDARY),
+                                );
+                            });
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                if icons::icon_pill_button(
+                                    ui,
+                                    icons::Icon::Refresh,
+                                    "Reintentar",
+                                    ACCENT_RED,
+                                    Color32::WHITE,
+                                )
+                                .clicked()
+                                {
+                                    self.refresh_home(ctx);
+                                }
+                            });
+                        });
+                    });
             }
 
             let mut shelves = self.home_feed.shelves.clone();
@@ -7999,11 +8040,11 @@ impl YrApp {
         }
 
         let mut changed = false;
-        let panel_w = (screen.width() - 16.0).clamp(280.0, 400.0);
-        let inner_w = panel_w - 28.0;
+        let panel_w = screen.width();
+        let inner_w = (panel_w - 28.0).max(220.0);
 
         egui::Area::new(egui::Id::new("yr_equalizer_panel"))
-            .anchor(egui::Align2::CENTER_BOTTOM, Vec2::ZERO)
+            .anchor(egui::Align2::LEFT_BOTTOM, Vec2::ZERO)
             .order(egui::Order::Foreground)
             .interactable(true)
             .show(ctx, |ui| {
@@ -8126,33 +8167,39 @@ impl YrApp {
                         ui.add_space(4.0);
 
                         let band_labels = EqualizerConfig::BAND_LABELS;
-                        let band_w = ((inner_w - 20.0) / 5.0).clamp(38.0, 56.0);
-
-                        ui.horizontal(|ui| {
-                            ui.spacing_mut().item_spacing.x = 4.0;
+                        ui.columns(5, |cols| {
                             for i in 0..5 {
-                                ui.vertical_centered(|ui| {
-                                    ui.set_width(band_w);
+                                cols[i].vertical_centered(|ui| {
                                     let mut gain = self.store.data.config.equalizer.bands_db[i];
                                     let val_str = if gain >= 0.0 {
                                         format!("+{:.1}", gain)
                                     } else {
                                         format!("{:.1}", gain)
                                     };
-                                    ui.label(RichText::new(val_str).size(11.0).monospace().color(Color32::from_white_alpha(200)));
+                                    ui.label(
+                                        RichText::new(val_str)
+                                            .size(11.0)
+                                            .monospace()
+                                            .color(Color32::from_white_alpha(200)),
+                                    );
 
                                     let v_slider = egui::Slider::new(&mut gain, -12.0..=12.0)
                                         .vertical()
                                         .show_value(false)
                                         .step_by(0.5);
-                                    let resp = ui.add_sized(Vec2::new(band_w, 90.0), v_slider);
+                                    let resp = ui.add_sized(Vec2::new(36.0, 90.0), v_slider);
                                     if resp.changed() {
                                         self.store.data.config.equalizer.bands_db[i] = gain;
                                         self.store.data.config.equalizer.preset_name = "Personalizado".to_string();
                                         changed = true;
                                     }
 
-                                    ui.label(RichText::new(band_labels[i]).size(10.5).strong().color(Color32::WHITE));
+                                    ui.label(
+                                        RichText::new(band_labels[i])
+                                            .size(10.5)
+                                            .strong()
+                                            .color(Color32::WHITE),
+                                    );
                                 });
                             }
                         });
