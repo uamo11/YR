@@ -169,6 +169,7 @@ pub struct SmoothTouchScroller {
     pub vel_y: f32,
     pub max_offset_y: f32,
     pub is_dragging: bool,
+    pub drag_slop_exceeded: bool,
 }
 
 impl SmoothTouchScroller {
@@ -183,36 +184,52 @@ impl SmoothTouchScroller {
         let down = pointer.any_down();
         let pressed = pointer.any_pressed();
         let released = pointer.any_released();
-        let press_in_view = pointer.press_origin().is_some_and(|p| viewport_rect.contains(p));
+        let origin_opt = pointer.press_origin();
+        let press_in_view = origin_opt.is_some_and(|p| viewport_rect.contains(p));
 
         if pressed && press_in_view {
             self.vel_y = 0.0;
             self.is_dragging = false;
+            self.drag_slop_exceeded = false;
         }
 
         if down && press_in_view {
-            let delta = pointer.delta();
-            if delta.y.abs() > 0.5 {
-                let is_vertical = delta.y.abs() >= delta.x.abs() * 0.7;
-                if is_vertical || self.is_dragging {
-                    self.is_dragging = true;
-                    self.vel_y = 0.0;
+            let total_dist = match (origin_opt, pointer.latest_pos()) {
+                (Some(o), Some(p)) => (p.y - o.y).abs(),
+                _ => 0.0,
+            };
 
-                    // If pulling down at top, let pull-to-refresh handle it without scrolling
-                    if !(self.offset_y <= 3.0 && delta.y > 0.0 && can_pull_refresh) {
-                        self.offset_y = (self.offset_y - delta.y).clamp(0.0, self.max_offset_y);
-                        ui.ctx().request_repaint();
+            // Touch slop threshold: don't scroll until finger moves > 8.0 pixels,
+            // preventing natural finger jitter from swallowing clicks on mobile.
+            if total_dist > 8.0 || self.drag_slop_exceeded {
+                self.drag_slop_exceeded = true;
+                let delta = pointer.delta();
+                if delta.y.abs() > 0.1 {
+                    let is_vertical = delta.y.abs() >= delta.x.abs() * 0.6;
+                    if is_vertical || self.is_dragging {
+                        self.is_dragging = true;
+                        self.vel_y = 0.0;
+
+                        // If pulling down at top, let pull-to-refresh handle it without scrolling
+                        if !(self.offset_y <= 3.0 && delta.y > 0.0 && can_pull_refresh) {
+                            self.offset_y = (self.offset_y - delta.y).clamp(0.0, self.max_offset_y);
+                            ui.ctx().request_repaint();
+                        }
                     }
                 }
             }
         }
 
-        if released && self.is_dragging {
+        if released {
+            let was_dragging = self.is_dragging;
             self.is_dragging = false;
-            let vy = pointer.velocity().y;
-            if vy.abs() > 50.0 {
-                // Moving downward (positive vy) means scrolling up (decreasing offset_y)
-                self.vel_y = vy;
+            self.drag_slop_exceeded = false;
+            if was_dragging {
+                let vy = pointer.velocity().y;
+                if vy.abs() > 60.0 {
+                    // Moving downward (positive vy) means scrolling up (decreasing offset_y)
+                    self.vel_y = vy;
+                }
             }
         }
 
