@@ -2765,16 +2765,24 @@ impl YrApp {
             }
         }
         let pages: Vec<&[HomeShelfCard]> = cards.chunks(9).collect();
-        let draw_page = |ui: &mut egui::Ui, page: &[HomeShelfCard], app: &mut Self| {
+        let draw_page = |ui: &mut egui::Ui, page_idx: usize, page: &[HomeShelfCard], app: &mut Self| {
             ui.vertical(|ui| {
                 ui.set_width(page_width);
                 ui.spacing_mut().item_spacing.y = gap;
-                for row in page.chunks(3) {
+                for (row_idx, row) in page.chunks(3).enumerate() {
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = gap;
-                        for card in row {
-                            let (rect, resp) =
-                                ui.allocate_exact_size(Vec2::splat(tile_size), Sense::click());
+                        for (col_idx, card) in row.iter().enumerate() {
+                            let (_, rect) = ui.allocate_space(Vec2::splat(tile_size));
+                            let tile_id = ui.make_persistent_id((
+                                salt,
+                                "sd_tile",
+                                page_idx,
+                                row_idx,
+                                col_idx,
+                                &card.title,
+                            ));
+                            let resp = ui.interact(rect, tile_id, Sense::click());
                             if ui.is_rect_visible(rect) {
                                 ui.painter().rect_filled(
                                     rect,
@@ -2861,7 +2869,7 @@ impl YrApp {
         let mut active_page = 0usize;
         if pages.len() <= 1 {
             if let Some(page) = pages.first() {
-                draw_page(ui, page, self);
+                draw_page(ui, 0, page, self);
             }
         } else {
             let hscroll = egui::ScrollArea::horizontal()
@@ -2869,8 +2877,8 @@ impl YrApp {
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = 12.0;
-                        for page in &pages {
-                            draw_page(ui, page, self);
+                        for (page_idx, page) in pages.iter().enumerate() {
+                            draw_page(ui, page_idx, page, self);
                         }
                     });
                 });
@@ -2931,36 +2939,51 @@ impl YrApp {
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 12.0;
-                    for (_cidx, card) in shelf.cards.iter().take(16).enumerate() {
-                        let resp = ui.allocate_ui(Vec2::new(card_w, card_w + 46.0), |ui| {
-                            ui.vertical(|ui| {
-                                ui.set_width(card_w);
-                                ui.spacing_mut().item_spacing.y = 4.0;
-                                render_thumb(ui, card.thumbnail_url.as_deref(), card_w);
-                                ui.add(
-                                    egui::Label::new(
-                                        RichText::new(&card.title)
-                                            .strong()
-                                            .size(13.5)
-                                            .color(TEXT_PRIMARY),
-                                    )
-                                    .truncate()
-                                    .selectable(false),
+                    for (cidx, card) in shelf.cards.iter().take(16).enumerate() {
+                        let card_h = card_w + 46.0;
+                        let (_, card_rect) = ui.allocate_space(Vec2::new(card_w, card_h));
+                        let card_id = ui.make_persistent_id((salt, "carousel_card", cidx, &card.title));
+                        let card_resp = ui.interact(card_rect, card_id, Sense::click());
+                        if ui.is_rect_visible(card_rect) {
+                            let thumb_rect = Rect::from_min_size(card_rect.min, Vec2::splat(card_w));
+                            ui.painter().rect_filled(thumb_rect, CornerRadius::same(8), BG_SURFACE);
+                            let note_rect = egui::Rect::from_center_size(
+                                thumb_rect.center(),
+                                Vec2::splat((card_w * 0.44).clamp(18.0, 44.0)),
+                            );
+                            icons::draw_icon(
+                                ui.painter(),
+                                note_rect,
+                                icons::Icon::MusicNote,
+                                Color32::from_white_alpha(95),
+                            );
+                            if let Some(url) = card.thumbnail_url.as_deref() {
+                                let _ = paint_ready_image(
+                                    ui,
+                                    thumb_rect,
+                                    tracked_thumb_uri(url, 224),
+                                    Vec2::splat(card_w),
+                                    CornerRadius::same(8),
                                 );
-                                if !card.subtitle.is_empty() {
-                                    ui.add(
-                                        egui::Label::new(
-                                            RichText::new(&card.subtitle)
-                                                .size(11.5)
-                                                .color(TEXT_SECONDARY),
-                                        )
-                                        .truncate()
-                                        .selectable(false),
-                                    );
-                                }
-                            });
-                        });
-                        if resp.response.interact(Sense::click()).clicked() {
+                            }
+                            let title_job = clamped_layout_job(&card.title, 13.5, TEXT_PRIMARY, card_w, 1);
+                            let g_title = ui.painter().layout_job(title_job);
+                            ui.painter().galley(
+                                Pos2::new(card_rect.left(), thumb_rect.bottom() + 4.0),
+                                g_title,
+                                TEXT_PRIMARY,
+                            );
+                            if !card.subtitle.is_empty() {
+                                let sub_job = clamped_layout_job(&card.subtitle, 11.5, TEXT_SECONDARY, card_w, 1);
+                                let g_sub = ui.painter().layout_job(sub_job);
+                                ui.painter().galley(
+                                    Pos2::new(card_rect.left(), thumb_rect.bottom() + 22.0),
+                                    g_sub,
+                                    TEXT_SECONDARY,
+                                );
+                            }
+                        }
+                        if card_resp.clicked() {
                             self.activate_shelf_card(card, &sibling_tracks, ctx);
                         }
                     }
@@ -5649,9 +5672,8 @@ impl YrApp {
                 }
 
                 let total_w = inner_rect.width();
-                let pill_w = 148.0_f32;
+                let pill_w = 166.0_f32;
                 let left_w = 42.0_f32;
-                let right_w = 78.0_f32;
                 let pad_left = ((total_w - pill_w) * 0.5 - left_w).max(4.0);
                 ui.add_space(pad_left);
 
@@ -5726,54 +5748,52 @@ impl YrApp {
                     None
                 };
 
-                let timer_w = if timer_text.is_some() { 56.0 } else { 0.0 };
-                let pad_right = (total_w - left_w - pad_left - pill_w - right_w - timer_w).max(4.0);
-                ui.add_space(pad_right);
-
-                if let Some(txt) = timer_text {
-                    let timer_btn = egui::Button::new(
-                        RichText::new(format!("🌙 {txt}"))
-                            .size(11.0)
-                            .strong()
-                            .color(Color32::WHITE),
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    ui.spacing_mut().item_spacing.x = 2.0;
+                    if icons::icon_button(
+                        ui,
+                        icons::Icon::MoreVert,
+                        38.0,
+                        19.0,
+                        Color32::TRANSPARENT,
+                        Color32::WHITE,
+                        20.0,
                     )
-                    .fill(Color32::from_white_alpha(32))
-                    .corner_radius(CornerRadius::same(12))
-                    .min_size(Vec2::new(48.0, 26.0));
-                    if ui.add(timer_btn).clicked() {
-                        self.show_sleep_timer_sheet = true;
+                    .clicked()
+                    {
+                        self.action_sheet_track = Some(track.clone());
                     }
-                }
-
-                if icons::icon_button(
-                    ui,
-                    icons::Icon::Cast,
-                    34.0,
-                    17.0,
-                    Color32::TRANSPARENT,
-                    Color32::from_white_alpha(200),
-                    17.0,
-                )
-                .clicked()
-                {
-                    self.set_banner("Transmitiendo a dispositivo...");
-                }
-                if icons::icon_button(
-                    ui,
-                    icons::Icon::MoreVert,
-                    38.0,
-                    19.0,
-                    Color32::TRANSPARENT,
-                    Color32::WHITE,
-                    20.0,
-                )
-                .clicked()
-                {
-                    self.action_sheet_track = Some(track.clone());
-                }
+                    if icons::icon_button(
+                        ui,
+                        icons::Icon::Cast,
+                        34.0,
+                        17.0,
+                        Color32::TRANSPARENT,
+                        Color32::from_white_alpha(200),
+                        17.0,
+                    )
+                    .clicked()
+                    {
+                        self.set_banner("Transmitiendo a dispositivo...");
+                    }
+                    if let Some(txt) = timer_text {
+                        let timer_btn = egui::Button::new(
+                            RichText::new(format!("🌙 {txt}"))
+                                .size(11.0)
+                                .strong()
+                                .color(Color32::WHITE),
+                        )
+                        .fill(Color32::from_white_alpha(32))
+                        .corner_radius(CornerRadius::same(12))
+                        .min_size(Vec2::new(48.0, 26.0));
+                        if ui.add(timer_btn).clicked() {
+                            self.show_sleep_timer_sheet = true;
+                        }
+                    }
+                });
             });
 
-            let avail_w = ui.available_width();
+            let avail_w = inner_rect.width();
             let bottom_tabs_h = 52.0;
             let body_h = (ui.available_height() - bottom_tabs_h).max(200.0);
 
@@ -6417,8 +6437,7 @@ impl YrApp {
 
                         // High resolution video frame thumbnail
                         if let Some(u) = resolved_cover.as_deref() {
-                            let video_uri = tracked_thumb_uri(u, 720);
-                            paint_ready_image(ui, video_rect, video_uri, video_size, CornerRadius::same(12));
+                            paint_progressive_image(ui, video_rect, u, 720, video_size, CornerRadius::same(12));
                         }
 
                         // Play circle overlay
@@ -6507,11 +6526,11 @@ impl YrApp {
                             Color32::from_white_alpha(110),
                         );
                         if let Some(u) = resolved_cover.as_deref() {
-                            let art_uri = tracked_thumb_uri(u, 544);
-                            paint_ready_image(
+                            paint_progressive_image(
                                 ui,
                                 art_rect,
-                                art_uri,
+                                u,
+                                544,
                                 Vec2::splat(art_size),
                                 CornerRadius::same(14),
                             );
@@ -7232,7 +7251,7 @@ impl YrApp {
             let title_max_w = if is_root {
                 ui.available_width()
             } else {
-                (ui.available_width() - 80.0).max(100.0)
+                (ui.available_width() - 42.0).max(100.0)
             };
             ui.allocate_ui(Vec2::new(title_max_w, 28.0), |ui| {
                 ui.add(
@@ -7244,7 +7263,17 @@ impl YrApp {
             });
             if !is_root {
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if ui.button("Cerrar").clicked() {
+                    if icons::icon_button(
+                        ui,
+                        icons::Icon::Close,
+                        34.0,
+                        17.0,
+                        Color32::TRANSPARENT,
+                        Color32::WHITE,
+                        17.0,
+                    )
+                    .clicked()
+                    {
                         self.show_settings = false;
                         self.settings_category = SettingsCategory::Root;
                     }
@@ -7325,8 +7354,6 @@ impl YrApp {
                     ui.label(RichText::new("Paleta cromática adaptativa en tiempo real extraída de la portada del álbum.").size(12.0).color(TEXT_SECONDARY));
                 }
                 SettingsCategory::FamilyCenter => {
-                    ui.heading("Centro familiar");
-                    ui.add_space(4.0);
                     ui.label(RichText::new("Administra la experiencia musical de los miembros de tu familia.").color(TEXT_SECONDARY));
                     ui.add_space(10.0);
                     ui.label("Filtro de contenido explícito:");
@@ -7424,8 +7451,6 @@ impl YrApp {
                     }
                 }
                 SettingsCategory::DataSaver => {
-                    ui.heading("Ahorro de batería y datos móviles");
-                    ui.add_space(4.0);
                     if ui.checkbox(&mut self.store.data.config.mobile_data_saver, "Ahorro de datos móviles").changed() {
                         let _ = self.store.save();
                     }
@@ -7447,8 +7472,6 @@ impl YrApp {
                     ui.label(RichText::new("Fuerza reproducción de solo audio en el reproductor para máxima autonomía.").size(12.0).color(TEXT_SECONDARY));
                 }
                 SettingsCategory::DownloadsStorage => {
-                    ui.heading("Descargas y almacenamiento");
-                    ui.add_space(4.0);
                     if ui.checkbox(&mut self.store.data.config.smart_downloads, "Descargas inteligentes (Auto-descarga)").changed() {
                         let _ = self.store.save();
                     }
@@ -7509,16 +7532,12 @@ impl YrApp {
                     }
                 }
                 SettingsCategory::Notifications => {
-                    ui.heading("Notificaciones y barra de estado");
-                    ui.add_space(4.0);
                     if ui.checkbox(&mut self.store.data.config.notifications_enabled, "Notificación multimedia en segundo plano").changed() {
                         let _ = self.store.save();
                     }
                     ui.label(RichText::new("Muestra la carátula, título y controles de pausa/saltar en la barra de notificaciones del sistema.").size(12.0).color(TEXT_SECONDARY));
                 }
                 SettingsCategory::Privacy => {
-                    ui.heading("Privacidad y datos");
-                    ui.add_space(4.0);
                     if ui.checkbox(&mut self.store.data.config.incognito_mode, "Modo incógnito (Pausar historial)").changed() {
                         let _ = self.store.save();
                     }
@@ -7537,8 +7556,6 @@ impl YrApp {
                     }
                 }
                 SettingsCategory::Recommendations => {
-                    ui.heading("Recomendaciones de música");
-                    ui.add_space(4.0);
                     if ui.checkbox(&mut self.store.data.config.personalized_recommendations, "Recomendaciones personalizadas con cuenta Google").changed() {
                         let _ = self.store.save();
                     }
@@ -9044,18 +9061,36 @@ fn paint_ready_image(
     uri: String,
     size: Vec2,
     corner_radius: CornerRadius,
-) {
+) -> bool {
     let img = Image::new(uri)
         .fit_to_exact_size(size)
         .corner_radius(corner_radius);
     match img.load_for_size(ui.ctx(), size) {
         Ok(egui::load::TexturePoll::Ready { .. }) => {
             img.paint_at(ui, rect);
+            true
         }
         Ok(egui::load::TexturePoll::Pending { .. }) => {
             ui.ctx().request_repaint();
+            false
         }
-        Err(_) => {}
+        Err(_) => false,
+    }
+}
+
+/// Paints a high-res remote image if ready, otherwise falling back to an already-cached 160px thumbnail.
+fn paint_progressive_image(
+    ui: &mut egui::Ui,
+    rect: egui::Rect,
+    url: &str,
+    preferred_max_px: u32,
+    size: Vec2,
+    corner_radius: CornerRadius,
+) {
+    let hi_uri = tracked_thumb_uri(url, preferred_max_px);
+    if !paint_ready_image(ui, rect, hi_uri, size, corner_radius) {
+        let fallback_uri = tracked_thumb_uri(url, 160);
+        paint_ready_image(ui, rect, fallback_uri, size, corner_radius);
     }
 }
 
