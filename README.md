@@ -48,6 +48,10 @@
 |:---:|:---:|:---:|
 | <img src="docs/screenshots/04_action_sheet.png" width="240" alt="Hoja de Acciones" /> | <img src="docs/screenshots/05_equalizer.png" width="240" alt="Ecualizador" /> | <img src="docs/screenshots/09_video_mode.png" width="240" alt="Modo Video 16:9" /> |
 
+| Reproductor & Temporizador | Letras Sincronizadas | Cola Dinámica |
+|:---:|:---:|:---:|
+| <img src="docs/screenshots/10_full_player.png" width="240" alt="Reproductor" /> | <img src="docs/screenshots/11_lyrics_drawer.png" width="240" alt="Letras" /> | <img src="docs/screenshots/12_queue_drawer.png" width="240" alt="Cola" /> |
+
 ---
 
 ## 🏗️ Arquitectura (Cargo Workspace)
@@ -66,7 +70,7 @@ El proyecto está modularizado en un espacio de trabajo de Cargo limpio y desaco
 
 Puedes descargar el APK precompilado y firmado para Android en la sección de [Releases de GitHub](https://github.com/uamo11/YR/releases).
 
-1. Descarga el archivo [`yr-music-v0.6.2-android.apk`](https://github.com/uamo11/YR/releases/latest/download/yr-music-v0.6.2-android.apk).
+1. Descarga el archivo [`yr-music-v0.6.3-android.apk`](https://github.com/uamo11/YR/releases/latest/download/yr-music-v0.6.3-android.apk).
 2. Habilita la instalación desde orígenes desconocidos si tu dispositivo lo solicita.
 3. Instala y disfruta de música sin publicidad y con la máxima velocidad de respuesta.
 

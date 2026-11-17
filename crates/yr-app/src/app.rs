@@ -5696,7 +5696,8 @@ impl YrApp {
 
                 // Center: YouTube Music Audio/Video mode segmented pill
                 egui::Frame::new()
-                    .fill(Color32::from_white_alpha(32))
+                    .fill(Color32::from_rgba_unmultiplied(18, 18, 22, 195))
+                    .stroke(Stroke::new(0.8_f32, Color32::from_white_alpha(34)))
                     .corner_radius(CornerRadius::same(16))
                     .inner_margin(egui::Margin::symmetric(2, 2))
                     .show(ui, |ui| {
@@ -5706,7 +5707,7 @@ impl YrApp {
                             let (ar, a_resp) = ui.allocate_exact_size(Vec2::new(84.0, 28.0), Sense::click());
                             if ui.is_rect_visible(ar) {
                                 if !is_video {
-                                    ui.painter().rect_filled(ar, CornerRadius::same(14), Color32::from_white_alpha(55));
+                                    ui.painter().rect_filled(ar, CornerRadius::same(14), Color32::from_rgb(62, 62, 74));
                                 }
                                 let ic_r = Rect::from_center_size(Pos2::new(ar.left() + 14.0, ar.center().y), Vec2::splat(15.0));
                                 icons::draw_icon(
@@ -5795,7 +5796,7 @@ impl YrApp {
                     // Compact header row in drawers so current track stays visible + controllable.
                     ui.horizontal(|ui| {
                         render_track_thumb(ui, &track, 42.0);
-                        let tw = (ui.available_width() - 96.0).max(80.0);
+                        let tw = (ui.available_width() - 136.0).max(80.0);
                         ui.allocate_ui(Vec2::new(tw, 42.0), |ui| {
                             ui.vertical(|ui| {
                                 ui.set_max_width(tw);
@@ -5819,6 +5820,21 @@ impl YrApp {
                             });
                         });
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            if icons::icon_button(
+                                ui,
+                                icons::Icon::SkipNext,
+                                34.0,
+                                17.0,
+                                Color32::from_white_alpha(20),
+                                Color32::WHITE,
+                                17.0,
+                            )
+                            .clicked()
+                                && self.queue.lock().unwrap().next_track(true).is_some()
+                            {
+                                self.play_current_queue_track(ctx);
+                            }
+                            ui.add_space(6.0);
                             let play_icon = if snap.status == PlaybackStatus::Playing {
                                 icons::Icon::Pause
                             } else {
@@ -5843,7 +5859,30 @@ impl YrApp {
                             }
                         });
                     });
-                    ui.add_space(10.0);
+                    ui.add_space(6.0);
+                    let total_dur = snap
+                        .duration_secs
+                        .or(track.duration_secs.map(|d| d as f64))
+                        .unwrap_or(1.0)
+                        .max(1.0);
+                    let frac = (snap.position_secs / total_dur).clamp(0.0, 1.0) as f32;
+                    let (pb_rect, _) =
+                        ui.allocate_exact_size(Vec2::new(avail_w, 2.5), Sense::hover());
+                    ui.painter().rect_filled(
+                        pb_rect,
+                        CornerRadius::same(1),
+                        Color32::from_white_alpha(28),
+                    );
+                    if frac > 0.0 {
+                        let fill_w = (pb_rect.width() * frac).max(2.0);
+                        let fill_rect = egui::Rect::from_min_size(
+                            pb_rect.min,
+                            Vec2::new(fill_w, pb_rect.height()),
+                        );
+                        ui.painter()
+                            .rect_filled(fill_rect, CornerRadius::same(1), ACCENT_RED);
+                    }
+                    ui.add_space(8.0);
 
                     if self.show_queue {
                         let (queue_len, ordered, current_idx) = {
@@ -5856,7 +5895,7 @@ impl YrApp {
                             (q.len(), ordered, q.current_index())
                         };
                         ui.horizontal(|ui| {
-                            let hdr_w = (ui.available_width() - 168.0).max(120.0);
+                            let hdr_w = (ui.available_width() - 196.0).max(100.0);
                             ui.allocate_ui(Vec2::new(hdr_w, 30.0), |ui| {
                                 ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
                                     ui.add(
@@ -6360,12 +6399,21 @@ impl YrApp {
                         }
                     } else if self.show_related {
                         ui.horizontal(|ui| {
-                            ui.label(
-                                RichText::new("Similares y relacionados")
-                                    .size(16.0)
-                                    .strong()
-                                    .color(Color32::WHITE),
-                            );
+                            let hdr_w = (ui.available_width() - 96.0).max(120.0);
+                            ui.allocate_ui(Vec2::new(hdr_w, 30.0), |ui| {
+                                ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                                    ui.add(
+                                        egui::Label::new(
+                                            RichText::new("Similares y relacionados")
+                                                .size(16.0)
+                                                .strong()
+                                                .color(Color32::WHITE),
+                                        )
+                                        .truncate()
+                                        .selectable(false),
+                                    );
+                                });
+                            });
                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                                 if icons::icon_pill_button(
                                     ui,
@@ -7558,7 +7606,7 @@ impl YrApp {
                     ui.label(RichText::new("Ajusta los mixes de inicio según tu historial de reproducción, canciones favoritas y artistas seguidos.").size(12.0).color(TEXT_SECONDARY));
                 }
                 SettingsCategory::About => {
-                    ui.heading("YR Music v0.6.2");
+                    ui.heading("YR Music v0.6.3");
                     ui.label("Cliente nativo de música 100% en Rust para Android y escritorio.");
                     ui.add_space(6.0);
                     ui.label(RichText::new("Motor de audio Symphonia PCM de ultra-baja latencia con ecualizador paramétrico de 5 bandas en tiempo real, prefetch predictivo en disco y compatibilidad completa con YouTube Music.").size(12.0).color(TEXT_SECONDARY));
@@ -8664,7 +8712,7 @@ impl YrApp {
                         }
                         if menu_row(ui, icons::Icon::Help, "Ayuda y comentarios").clicked() {
                             self.show_account_modal = false;
-                            self.set_banner("YR Music v0.6.2 • Pure Rust");
+                            self.set_banner("YR Music v0.6.3 • Pure Rust");
                         }
 
                         ui.add_space(14.0);
