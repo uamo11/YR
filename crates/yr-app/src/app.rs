@@ -1269,38 +1269,43 @@ impl YrApp {
         });
     }
 
-    fn enqueue_download(&mut self, track: Track, ctx: &egui::Context) {
+    fn enqueue_tracks(&mut self, tracks: Vec<Track>, banner: String, ctx: &egui::Context) {
         let dl = Arc::clone(&self.downloader);
         let quality = self.store.data.config.download_quality;
-        let title = track.title.clone();
-        let tx = self.event_tx.clone();
-        let ctx = ctx.clone();
-        self.runtime.spawn(async move {
-            dl.enqueue(track, quality).await;
-            let tasks = dl.list_tasks().await;
-            let total_bytes = dl.total_downloaded_bytes().await;
-            let _ = tx.send(AppEvent::DownloadsRefreshed { tasks, total_bytes });
-            ctx.request_repaint();
-        });
-        self.set_banner(format!("Descargando: {title}"));
-    }
-
-    fn enqueue_download_all(&mut self, tracks: Vec<Track>, ctx: &egui::Context) {
-        let dl = Arc::clone(&self.downloader);
-        let quality = self.store.data.config.download_quality;
-        let count = tracks.len();
         let tx = self.event_tx.clone();
         let ctx = ctx.clone();
         self.runtime.spawn(async move {
             for track in tracks {
                 dl.enqueue(track, quality).await;
             }
-            let tasks = dl.list_tasks().await;
-            let total_bytes = dl.total_downloaded_bytes().await;
-            let _ = tx.send(AppEvent::DownloadsRefreshed { tasks, total_bytes });
-            ctx.request_repaint();
+            loop {
+                let tasks = dl.list_tasks().await;
+                let total_bytes = dl.total_downloaded_bytes().await;
+                let has_active = tasks.iter().any(|d| {
+                    matches!(
+                        d.status,
+                        DownloadStatus::Queued | DownloadStatus::Downloading
+                    )
+                });
+                let _ = tx.send(AppEvent::DownloadsRefreshed { tasks, total_bytes });
+                ctx.request_repaint();
+                if !has_active {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
         });
-        self.set_banner(format!("Descargando {count} canciones..."));
+        self.set_banner(banner);
+    }
+
+    fn enqueue_download(&mut self, track: Track, ctx: &egui::Context) {
+        let title = track.title.clone();
+        self.enqueue_tracks(vec![track], format!("Descargando: {title}"), ctx);
+    }
+
+    fn enqueue_download_all(&mut self, tracks: Vec<Track>, ctx: &egui::Context) {
+        let count = tracks.len();
+        self.enqueue_tracks(tracks, format!("Descargando {count} canciones..."), ctx);
     }
 
     fn process_events(&mut self, ctx: &egui::Context) {
@@ -1603,13 +1608,19 @@ impl YrApp {
                 DownloadStatus::Queued | DownloadStatus::Downloading
             )
         });
-        let poll_interval = if has_active_dl || self.active_tab == NavTab::Downloads {
+        let in_downloads_view = self.active_tab == NavTab::Downloads
+            || (self.active_tab == NavTab::Library
+                && self.library_filter == LibraryFilter::Downloads);
+        let poll_interval = if has_active_dl || in_downloads_view {
             Duration::from_millis(250)
         } else {
             Duration::from_secs(4)
         };
         if self.last_download_poll.elapsed() >= poll_interval {
             self.refresh_downloads(ctx);
+        }
+        if has_active_dl {
+            ctx.request_repaint_after(Duration::from_millis(200));
         }
 
         let snap = self.audio.snapshot();
@@ -1861,9 +1872,12 @@ impl YrApp {
         let Some((msg, at)) = &self.status_banner else {
             return;
         };
-        if at.elapsed() >= Duration::from_secs(3) {
+        let elapsed = at.elapsed();
+        let lifetime = Duration::from_secs(3);
+        if elapsed >= lifetime {
             return;
         }
+        ctx.request_repaint_after(lifetime.saturating_sub(elapsed) + Duration::from_millis(30));
         let max_w = (ctx.screen_rect().width() - 48.0).clamp(180.0, 420.0);
         let has_mini = self
             .queue
@@ -5480,70 +5494,170 @@ impl YrApp {
                 return;
             }
 
+            #[derive(Copy, Clone)]
+            enum DlAction {
+                Cancel,
+                Pause,
+                Resume,
+                Delete,
+            }
+
             let items = self.downloads.clone();
             for task in items {
+                let mut pending_op: Option<DlAction> = None;
+                let mut play_completed = false;
                 egui::Frame::new()
                     .fill(BG_SURFACE)
                     .corner_radius(CornerRadius::same(10))
                     .inner_margin(10.0)
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
-                            render_thumb(ui, task.track.thumbnail_url.as_deref(), 44.0);
-                            ui.vertical(|ui| {
-                                ui.label(RichText::new(&task.track.title).strong());
-                                ui.label(
-                                    RichText::new(&task.track.artist)
-                                        .small()
-                                        .color(TEXT_SECONDARY),
-                                );
-                                match &task.status {
-                                    DownloadStatus::Queued => {
-                                        ui.label(RichText::new("En cola...").small());
-                                    }
-                                    DownloadStatus::Downloading => {
-                                        let pct = (task.progress() * 100.0) as u32;
-                                        let mb_done =
-                                            task.downloaded_bytes as f64 / (1024.0 * 1024.0);
-                                        let speed_kb = task.speed_bps as f64 / 1024.0;
-                                        let eta = task
-                                            .eta_secs()
-                                            .map(|s| format!(" • {s}s"))
-                                            .unwrap_or_default();
-                                        ui.add(
-                                            egui::ProgressBar::new(task.progress()).text(format!(
-                                                "{pct}% • {mb_done:.1} MB • {speed_kb:.0} KB/s{eta}"
-                                            )),
-                                        );
-                                    }
-                                    DownloadStatus::Paused => {
-                                        ui.label(
-                                            RichText::new("Pausada").small().color(TEXT_SECONDARY),
-                                        );
-                                    }
-                                    DownloadStatus::Completed => {
-                                        let mb = task.downloaded_bytes as f64 / (1024.0 * 1024.0);
-                                        ui.label(
-                                            RichText::new(format!("Offline • {mb:.1} MB"))
-                                                .small()
-                                                .color(GREEN_OK),
-                                        );
-                                    }
-                                    DownloadStatus::Failed(err) => {
-                                        ui.label(
-                                            RichText::new(format!("Error: {err}"))
-                                                .small()
-                                                .color(ACCENT_RED),
-                                        );
-                                    }
-                                    DownloadStatus::Cancelled => {
-                                        ui.label(
-                                            RichText::new("Cancelada")
+                            let row_start = ui.cursor().min;
+                            render_track_thumb(ui, &task.track, 48.0);
+                            let text_w = (ui.available_width() - 88.0).max(110.0);
+                            ui.allocate_ui(Vec2::new(text_w, 54.0), |ui| {
+                                ui.vertical(|ui| {
+                                    ui.spacing_mut().item_spacing.y = 2.0;
+                                    ui.set_max_width(text_w);
+                                    ui.add(
+                                        egui::Label::new(
+                                            RichText::new(&task.track.title).strong(),
+                                        )
+                                        .truncate()
+                                        .selectable(false),
+                                    );
+                                    ui.add(
+                                        egui::Label::new(
+                                            RichText::new(&task.track.artist)
                                                 .small()
                                                 .color(TEXT_SECONDARY),
-                                        );
+                                        )
+                                        .truncate()
+                                        .selectable(false),
+                                    );
+                                    match &task.status {
+                                        DownloadStatus::Queued => {
+                                            ui.add(
+                                                egui::Label::new(
+                                                    RichText::new("En cola...")
+                                                        .small()
+                                                        .color(TEXT_SECONDARY),
+                                                )
+                                                .truncate()
+                                                .selectable(false),
+                                            );
+                                        }
+                                        DownloadStatus::Downloading => {
+                                            let frac = task.progress().clamp(0.0, 1.0);
+                                            let (bar_rect, _) = ui.allocate_exact_size(
+                                                Vec2::new(text_w, 4.0),
+                                                Sense::hover(),
+                                            );
+                                            ui.painter().rect_filled(
+                                                bar_rect,
+                                                CornerRadius::same(2),
+                                                Color32::from_white_alpha(28),
+                                            );
+                                            if frac > 0.0 {
+                                                let fill_rect = egui::Rect::from_min_size(
+                                                    bar_rect.min,
+                                                    Vec2::new(
+                                                        bar_rect.width() * frac,
+                                                        bar_rect.height(),
+                                                    ),
+                                                );
+                                                ui.painter().rect_filled(
+                                                    fill_rect,
+                                                    CornerRadius::same(2),
+                                                    ACCENT_RED,
+                                                );
+                                            }
+                                            let pct = (frac * 100.0) as u32;
+                                            let mb_done =
+                                                task.downloaded_bytes as f64 / (1024.0 * 1024.0);
+                                            let speed_kb = task.speed_bps as f64 / 1024.0;
+                                            let eta = task
+                                                .eta_secs()
+                                                .map(|s| format!(" • {s}s"))
+                                                .unwrap_or_default();
+                                            ui.add(
+                                                egui::Label::new(
+                                                    RichText::new(format!(
+                                                        "{pct}% • {mb_done:.1} MB • {speed_kb:.0} KB/s{eta}"
+                                                    ))
+                                                    .small()
+                                                    .color(TEXT_SECONDARY),
+                                                )
+                                                .truncate()
+                                                .selectable(false),
+                                            );
+                                        }
+                                        DownloadStatus::Paused => {
+                                            ui.add(
+                                                egui::Label::new(
+                                                    RichText::new("Pausada")
+                                                        .small()
+                                                        .color(TEXT_SECONDARY),
+                                                )
+                                                .truncate()
+                                                .selectable(false),
+                                            );
+                                        }
+                                        DownloadStatus::Completed => {
+                                            let mb =
+                                                task.downloaded_bytes as f64 / (1024.0 * 1024.0);
+                                            ui.add(
+                                                egui::Label::new(
+                                                    RichText::new(format!("Offline • {mb:.1} MB"))
+                                                        .small()
+                                                        .color(GREEN_OK),
+                                                )
+                                                .truncate()
+                                                .selectable(false),
+                                            );
+                                        }
+                                        DownloadStatus::Failed(err) => {
+                                            ui.add(
+                                                egui::Label::new(
+                                                    RichText::new(format!("Error: {err}"))
+                                                        .small()
+                                                        .color(ACCENT_RED),
+                                                )
+                                                .truncate()
+                                                .selectable(false),
+                                            );
+                                        }
+                                        DownloadStatus::Cancelled => {
+                                            ui.add(
+                                                egui::Label::new(
+                                                    RichText::new("Cancelada")
+                                                        .small()
+                                                        .color(TEXT_SECONDARY),
+                                                )
+                                                .truncate()
+                                                .selectable(false),
+                                            );
+                                        }
                                     }
-                                }
+                                });
                             });
+
+                            if task.status == DownloadStatus::Completed {
+                                let hit_rect = egui::Rect::from_min_size(
+                                    row_start,
+                                    Vec2::new(48.0 + 8.0 + text_w, 54.0),
+                                );
+                                if ui
+                                    .interact(
+                                        hit_rect,
+                                        ui.id().with(("dl_row", &task.track.id)),
+                                        Sense::click(),
+                                    )
+                                    .clicked()
+                                {
+                                    play_completed = true;
+                                }
+                            }
 
                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                                 match &task.status {
@@ -5559,9 +5673,7 @@ impl YrApp {
                                         )
                                         .clicked()
                                         {
-                                            let dl = Arc::clone(&self.downloader);
-                                            let id = task.track.id.clone();
-                                            self.runtime.spawn(async move { dl.cancel(&id).await });
+                                            pending_op = Some(DlAction::Cancel);
                                         }
                                         if icons::icon_button(
                                             ui,
@@ -5574,9 +5686,7 @@ impl YrApp {
                                         )
                                         .clicked()
                                         {
-                                            let dl = Arc::clone(&self.downloader);
-                                            let id = task.track.id.clone();
-                                            self.runtime.spawn(async move { dl.pause(&id).await });
+                                            pending_op = Some(DlAction::Pause);
                                         }
                                     }
                                     DownloadStatus::Paused | DownloadStatus::Failed(_) => {
@@ -5591,9 +5701,7 @@ impl YrApp {
                                         )
                                         .clicked()
                                         {
-                                            let dl = Arc::clone(&self.downloader);
-                                            let id = task.track.id.clone();
-                                            self.runtime.spawn(async move { dl.cancel(&id).await });
+                                            pending_op = Some(DlAction::Cancel);
                                         }
                                         if icons::icon_button(
                                             ui,
@@ -5606,9 +5714,7 @@ impl YrApp {
                                         )
                                         .clicked()
                                         {
-                                            let dl = Arc::clone(&self.downloader);
-                                            let id = task.track.id.clone();
-                                            self.runtime.spawn(async move { dl.resume(&id).await });
+                                            pending_op = Some(DlAction::Resume);
                                         }
                                     }
                                     DownloadStatus::Completed => {
@@ -5623,11 +5729,7 @@ impl YrApp {
                                         )
                                         .clicked()
                                         {
-                                            let dl = Arc::clone(&self.downloader);
-                                            let id = task.track.id.clone();
-                                            self.runtime.spawn(async move {
-                                                dl.delete_downloaded(&id).await;
-                                            });
+                                            pending_op = Some(DlAction::Delete);
                                         }
                                         if icons::icon_button(
                                             ui,
@@ -5640,16 +5742,7 @@ impl YrApp {
                                         )
                                         .clicked()
                                         {
-                                            if let Some(pos) = completed
-                                                .iter()
-                                                .position(|t| t.id == task.track.id)
-                                            {
-                                                self.play_track_in_list(
-                                                    completed.clone(),
-                                                    pos,
-                                                    ctx,
-                                                );
-                                            }
+                                            play_completed = true;
                                         }
                                     }
                                     DownloadStatus::Cancelled => {}
@@ -5657,6 +5750,30 @@ impl YrApp {
                             });
                         });
                     });
+
+                if play_completed {
+                    if let Some(pos) = completed.iter().position(|t| t.id == task.track.id) {
+                        self.play_track_in_list(completed.clone(), pos, ctx);
+                    }
+                }
+                if let Some(op) = pending_op {
+                    let dl = Arc::clone(&self.downloader);
+                    let id = task.track.id.clone();
+                    let tx = self.event_tx.clone();
+                    let ctx = ctx.clone();
+                    self.runtime.spawn(async move {
+                        match op {
+                            DlAction::Cancel => dl.cancel(&id).await,
+                            DlAction::Pause => dl.pause(&id).await,
+                            DlAction::Resume => dl.resume(&id).await,
+                            DlAction::Delete => dl.delete_downloaded(&id).await,
+                        }
+                        let tasks = dl.list_tasks().await;
+                        let total_bytes = dl.total_downloaded_bytes().await;
+                        let _ = tx.send(AppEvent::DownloadsRefreshed { tasks, total_bytes });
+                        ctx.request_repaint();
+                    });
+                }
             }
         });
         if self.handle_pull_to_refresh(ui, dl_scroll.state.offset.y, dl_viewport, false) {
@@ -7944,7 +8061,7 @@ impl YrApp {
                     ui.label(RichText::new("Ajusta los mixes de inicio según tu historial de reproducción, canciones favoritas y artistas seguidos.").size(12.0).color(TEXT_SECONDARY));
                 }
                 SettingsCategory::About => {
-                    ui.heading("YR Music v0.6.9");
+                    ui.heading("YR Music v0.7.0");
                     ui.label("Cliente nativo de música 100% en Rust para Android y escritorio.");
                     ui.add_space(6.0);
                     ui.label(RichText::new("Motor de audio Symphonia PCM de ultra-baja latencia con ecualizador paramétrico de 5 bandas en tiempo real, prefetch predictivo en disco y compatibilidad completa con YouTube Music.").size(12.0).color(TEXT_SECONDARY));
@@ -9056,7 +9173,7 @@ impl YrApp {
                         }
                         if menu_row(ui, icons::Icon::Help, "Ayuda y comentarios").clicked() {
                             self.show_account_modal = false;
-                            self.set_banner("YR Music v0.6.9 • Pure Rust");
+                            self.set_banner("YR Music v0.7.0 • Pure Rust");
                         }
 
                         #[cfg(target_os = "android")]
