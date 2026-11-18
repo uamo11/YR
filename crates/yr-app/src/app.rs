@@ -5177,11 +5177,12 @@ impl YrApp {
                         ui.horizontal(|ui| {
                             ui.label(
                                 RichText::new(format!("Descargas offline ({})", completed.len()))
-                                    .size(16.0)
+                                    .size(14.5)
                                     .strong()
                                     .color(GREEN_OK),
                             );
                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                ui.spacing_mut().item_spacing.x = 4.0;
                                 if icons::icon_pill_button(
                                     ui,
                                     icons::Icon::Shuffle,
@@ -5193,7 +5194,6 @@ impl YrApp {
                                 {
                                     self.play_tracks_shuffled(completed.clone(), ctx);
                                 }
-                                ui.add_space(6.0);
                                 if icons::icon_pill_button(
                                     ui,
                                     icons::Icon::Play,
@@ -5406,6 +5406,7 @@ impl YrApp {
                         ui.add_space(4.0);
                     }
                 }
+                ui.add_space(72.0);
             });
         self.library_scroller.sync_bounds(lib_scroll.content_size.y, lib_scroll.inner_rect.height());
         if self.handle_pull_to_refresh(
@@ -5420,39 +5421,49 @@ impl YrApp {
         }
         self.render_pull_refresh_overlay(ctx, lib_viewport, lib_loading);
 
-        // Floating "+ Nueva" pill button in bottom right (matches YouTube Music)
-        let screen = ctx.screen_rect();
-        let fab_x = screen.right() - 120.0;
-        let has_track = self.queue.lock().map(|q| q.current_track().is_some()).unwrap_or(false);
-        #[cfg(target_os = "android")]
-        let clearance = if has_track { 234.0 } else { 158.0 };
-        #[cfg(not(target_os = "android"))]
-        let clearance = if has_track { 168.0 } else { 96.0 };
-        let fab_y = screen.bottom() - clearance;
-        egui::Area::new(egui::Id::new("yr_lib_fab"))
-            .fixed_pos(egui::pos2(fab_x, fab_y))
-            .order(egui::Order::Foreground)
-            .show(ctx, |ui| {
-                let (rect, resp) = ui.allocate_exact_size(Vec2::new(104.0, 40.0), Sense::click());
-                if ui.is_rect_visible(rect) {
-                    let bg = if resp.hovered() {
-                        Color32::from_rgb(235, 235, 240)
-                    } else {
-                        Color32::WHITE
-                    };
-                    ui.painter().rect_filled(rect, CornerRadius::same(20), bg);
-                    ui.painter().text(
-                        rect.center(),
-                        Align2::CENTER_CENTER,
-                        "+ Nueva",
-                        egui::FontId::proportional(14.0),
-                        Color32::BLACK,
-                    );
-                }
-                if resp.clicked() {
-                    self.show_new_playlist_dialog = !self.show_new_playlist_dialog;
-                }
-            });
+        // Floating "+ Nueva" pill button in bottom right on playlist-capable tabs
+        if matches!(
+            self.library_filter,
+            LibraryFilter::All | LibraryFilter::Playlists
+        ) {
+            let screen = ctx.screen_rect();
+            let fab_x = screen.right() - 120.0;
+            let has_track = self
+                .queue
+                .lock()
+                .map(|q| q.current_track().is_some())
+                .unwrap_or(false);
+            #[cfg(target_os = "android")]
+            let clearance = if has_track { 234.0 } else { 158.0 };
+            #[cfg(not(target_os = "android"))]
+            let clearance = if has_track { 168.0 } else { 96.0 };
+            let fab_y = screen.bottom() - clearance;
+            egui::Area::new(egui::Id::new("yr_lib_fab"))
+                .fixed_pos(egui::pos2(fab_x, fab_y))
+                .order(egui::Order::Foreground)
+                .show(ctx, |ui| {
+                    let (rect, resp) =
+                        ui.allocate_exact_size(Vec2::new(104.0, 40.0), Sense::click());
+                    if ui.is_rect_visible(rect) {
+                        let bg = if resp.hovered() {
+                            Color32::from_rgb(235, 235, 240)
+                        } else {
+                            Color32::WHITE
+                        };
+                        ui.painter().rect_filled(rect, CornerRadius::same(20), bg);
+                        ui.painter().text(
+                            rect.center(),
+                            Align2::CENTER_CENTER,
+                            "+ Nueva",
+                            egui::FontId::proportional(14.0),
+                            Color32::BLACK,
+                        );
+                    }
+                    if resp.clicked() {
+                        self.show_new_playlist_dialog = !self.show_new_playlist_dialog;
+                    }
+                });
+        }
     }
 
     fn render_downloads(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
@@ -7952,9 +7963,13 @@ impl YrApp {
                 }
                 SettingsCategory::Playback => {
                     ui.label("Calidad de streaming de audio:");
+                    ui.add_space(4.0);
                     ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing = Vec2::new(8.0, 8.0);
                         for q in [AudioQuality::Low, AudioQuality::Medium, AudioQuality::High, AudioQuality::Best] {
-                            if ui.selectable_value(&mut self.store.data.config.stream_quality, q, q.label()).clicked() {
+                            let selected = self.store.data.config.stream_quality == q;
+                            if settings_choice_pill(ui, selected, q.label()) {
+                                self.store.data.config.stream_quality = q;
                                 let _ = self.store.save();
                             }
                         }
@@ -7963,8 +7978,8 @@ impl YrApp {
                     let eq_active = self.store.data.config.equalizer.enabled;
                     let eq_preset = self.store.data.config.equalizer.preset_name.clone();
                     egui::Frame::new()
-                        .fill(Color32::from_white_alpha(14))
-                        .stroke(Stroke::new(0.8_f32, Color32::from_white_alpha(28)))
+                        .fill(BG_SURFACE)
+                        .stroke(Stroke::new(0.8_f32, Color32::from_rgb(52, 52, 60)))
                         .corner_radius(CornerRadius::same(12))
                         .inner_margin(egui::Margin::symmetric(14, 10))
                         .show(ui, |ui| {
@@ -7993,7 +8008,7 @@ impl YrApp {
                                         ui,
                                         icons::Icon::Equalizer,
                                         "Ajustar",
-                                        Color32::from_white_alpha(24),
+                                        if eq_active { ACCENT_RED } else { BG_ELEVATED },
                                         Color32::WHITE,
                                     )
                                     .clicked()
@@ -8051,9 +8066,13 @@ impl YrApp {
                     }
                     ui.add_space(10.0);
                     ui.label("Calidad de descargas offline:");
+                    ui.add_space(4.0);
                     ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing = Vec2::new(8.0, 8.0);
                         for q in [AudioQuality::Low, AudioQuality::Medium, AudioQuality::High, AudioQuality::Best] {
-                            if ui.selectable_value(&mut self.store.data.config.download_quality, q, q.label()).clicked() {
+                            let selected = self.store.data.config.download_quality == q;
+                            if settings_choice_pill(ui, selected, q.label()) {
+                                self.store.data.config.download_quality = q;
                                 let _ = self.store.save();
                             }
                         }
@@ -8065,21 +8084,18 @@ impl YrApp {
                     ui.label(RichText::new(format!("Caché de streaming en disco: {cache_mb:.1} MB")).color(TEXT_SECONDARY));
                     ui.add_space(10.0);
                     ui.label("Límite de caché de streaming:");
+                    ui.add_space(4.0);
                     ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing = Vec2::new(8.0, 8.0);
                         for limit_mb in [128_u32, 256, 512, 1024, 2048] {
                             let label = match limit_mb {
                                 1024 => "1 GB".to_string(),
                                 2048 => "2 GB".to_string(),
                                 _ => format!("{limit_mb} MB"),
                             };
-                            if ui
-                                .selectable_value(
-                                    &mut self.store.data.config.max_stream_cache_mb,
-                                    limit_mb,
-                                    label,
-                                )
-                                .clicked()
-                            {
+                            let selected = self.store.data.config.max_stream_cache_mb == limit_mb;
+                            if settings_choice_pill(ui, selected, &label) {
+                                self.store.data.config.max_stream_cache_mb = limit_mb;
                                 let _ = self.store.save();
                                 self.stream_cache_bytes = prune_dir_to_max_bytes(
                                     &self.data_dir.join("stream_cache"),
@@ -8088,8 +8104,8 @@ impl YrApp {
                             }
                         }
                     });
-                    ui.add_space(8.0);
-                    if ui.button("Limpiar caché de streaming y portadas").clicked() {
+                    ui.add_space(12.0);
+                    if settings_action_button(ui, "Limpiar caché de streaming y portadas") {
                         let cache_dir = self.data_dir.join("stream_cache");
                         let _ = std::fs::remove_dir_all(&cache_dir);
                         let _ = std::fs::create_dir_all(&cache_dir);
@@ -8112,12 +8128,13 @@ impl YrApp {
                     }
                     ui.label(RichText::new("Las canciones que escuches no se guardarán en tu historial ni alterarán tus recomendaciones.").size(12.0).color(TEXT_SECONDARY));
                     ui.add_space(12.0);
-                    if ui.button("Borrar historial de reproducciones").clicked() {
+                    if settings_action_button(ui, "Borrar historial de reproducciones") {
                         self.store.data.recent_tracks.clear();
                         let _ = self.store.save();
                         self.set_banner("Historial de reproducciones borrado");
                     }
-                    if ui.button("Borrar historial de búsquedas").clicked() {
+                    ui.add_space(8.0);
+                    if settings_action_button(ui, "Borrar historial de búsquedas") {
                         self.store.data.search_history.clear();
                         self.store.data.search_history_items.clear();
                         let _ = self.store.save();
@@ -8131,7 +8148,7 @@ impl YrApp {
                     ui.label(RichText::new("Ajusta los mixes de inicio según tu historial de reproducción, canciones favoritas y artistas seguidos.").size(12.0).color(TEXT_SECONDARY));
                 }
                 SettingsCategory::About => {
-                    ui.heading("YR Music v0.7.1");
+                    ui.heading("YR Music v0.7.2");
                     ui.label("Cliente nativo de música 100% en Rust para Android y escritorio.");
                     ui.add_space(6.0);
                     ui.label(RichText::new("Motor de audio Symphonia PCM de ultra-baja latencia con ecualizador paramétrico de 5 bandas en tiempo real, prefetch predictivo en disco y compatibilidad completa con YouTube Music.").size(12.0).color(TEXT_SECONDARY));
@@ -8961,12 +8978,19 @@ impl YrApp {
                         ui.separator();
                         ui.add_space(8.0);
                         ui.horizontal(|ui| {
-                            let input_w = (content_w - 134.0).max(120.0);
-                            ui.add(
-                                egui::TextEdit::singleline(&mut self.new_playlist_name)
-                                    .hint_text("Nueva playlist...")
-                                    .desired_width(input_w),
-                            );
+                            let input_w = (content_w - 156.0).max(110.0);
+                            egui::Frame::new()
+                                .fill(BG_ELEVATED)
+                                .corner_radius(CornerRadius::same(18))
+                                .inner_margin(egui::Margin::symmetric(12, 6))
+                                .show(ui, |ui| {
+                                    ui.add(
+                                        egui::TextEdit::singleline(&mut self.new_playlist_name)
+                                            .hint_text("Nueva playlist...")
+                                            .frame(false)
+                                            .desired_width(input_w),
+                                    );
+                                });
                             let can_create = !self.new_playlist_name.trim().is_empty();
                             if ui
                                 .add(
@@ -8996,7 +9020,7 @@ impl YrApp {
                             }
                         });
                         #[cfg(target_os = "android")]
-                        ui.add_space(46.0);
+                        ui.add_space(62.0);
                     });
             });
 
@@ -9243,7 +9267,7 @@ impl YrApp {
                         }
                         if menu_row(ui, icons::Icon::Help, "Ayuda y comentarios").clicked() {
                             self.show_account_modal = false;
-                            self.set_banner("YR Music v0.7.1 • Pure Rust");
+                            self.set_banner("YR Music v0.7.2 • Pure Rust");
                         }
 
                         #[cfg(target_os = "android")]
@@ -9701,6 +9725,33 @@ fn render_artist_card_row(
             }
         });
     clicked
+}
+
+fn settings_choice_pill(ui: &mut egui::Ui, selected: bool, label: &str) -> bool {
+    let btn = egui::Button::new(
+        RichText::new(label)
+            .size(13.0)
+            .strong()
+            .color(Color32::WHITE),
+    )
+    .fill(if selected { ACCENT_RED } else { BG_ELEVATED })
+    .stroke(if selected {
+        Stroke::NONE
+    } else {
+        Stroke::new(0.8_f32, Color32::from_rgb(56, 56, 66))
+    })
+    .corner_radius(CornerRadius::same(16))
+    .min_size(Vec2::new(32.0, 32.0));
+    ui.add(btn).clicked()
+}
+
+fn settings_action_button(ui: &mut egui::Ui, label: &str) -> bool {
+    let btn = egui::Button::new(RichText::new(label).size(13.5).color(Color32::WHITE))
+        .fill(BG_ELEVATED)
+        .stroke(Stroke::new(0.8_f32, Color32::from_rgb(56, 56, 66)))
+        .corner_radius(CornerRadius::same(16))
+        .min_size(Vec2::new(140.0, 34.0));
+    ui.add(btn).clicked()
 }
 
 /// Paints a remote image only once ready so failed loads preserve the clean vector placeholder.
