@@ -4896,21 +4896,61 @@ impl YrApp {
             ui.add_space(6.0);
             egui::Frame::new()
                 .fill(BG_SURFACE)
-                .corner_radius(CornerRadius::same(10))
-                .inner_margin(8.0)
+                .stroke(Stroke::new(0.8_f32, Color32::from_rgb(48, 48, 56)))
+                .corner_radius(CornerRadius::same(12))
+                .inner_margin(10.0)
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
-                        let input_w = (ui.available_width() - 88.0).max(120.0);
-                        ui.add(
-                            egui::TextEdit::singleline(&mut self.new_playlist_name)
-                                .desired_width(input_w)
-                                .hint_text("Nombre de la playlist..."),
-                        );
-                        if ui.button("Crear").clicked() && !self.new_playlist_name.trim().is_empty()
+                        let input_w = (ui.available_width() - 134.0).max(110.0);
+                        egui::Frame::new()
+                            .fill(BG_ELEVATED)
+                            .corner_radius(CornerRadius::same(18))
+                            .inner_margin(egui::Margin::symmetric(12, 6))
+                            .show(ui, |ui| {
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut self.new_playlist_name)
+                                        .desired_width(input_w)
+                                        .frame(false)
+                                        .hint_text("Nombre de la playlist..."),
+                                );
+                            });
+                        let can_create = !self.new_playlist_name.trim().is_empty();
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    RichText::new("Crear")
+                                        .size(13.0)
+                                        .strong()
+                                        .color(Color32::WHITE),
+                                )
+                                .fill(if can_create {
+                                    ACCENT_RED
+                                } else {
+                                    BG_ELEVATED
+                                })
+                                .corner_radius(CornerRadius::same(16))
+                                .min_size(Vec2::new(64.0, 32.0)),
+                            )
+                            .clicked()
+                            && can_create
                         {
                             let name = self.new_playlist_name.trim().to_string();
-                            self.store.create_playlist(name);
+                            self.store.create_playlist(name.clone());
                             self.new_playlist_name.clear();
+                            self.show_new_playlist_dialog = false;
+                            self.set_banner(format!("Playlist creada: {name}"));
+                        }
+                        if icons::icon_button(
+                            ui,
+                            icons::Icon::Close,
+                            28.0,
+                            14.0,
+                            BG_ELEVATED,
+                            TEXT_SECONDARY,
+                            14.0,
+                        )
+                        .clicked()
+                        {
                             self.show_new_playlist_dialog = false;
                         }
                     });
@@ -8148,7 +8188,7 @@ impl YrApp {
                     ui.label(RichText::new("Ajusta los mixes de inicio según tu historial de reproducción, canciones favoritas y artistas seguidos.").size(12.0).color(TEXT_SECONDARY));
                 }
                 SettingsCategory::About => {
-                    ui.heading("YR Music v0.7.2");
+                    ui.heading("YR Music v0.7.3");
                     ui.label("Cliente nativo de música 100% en Rust para Android y escritorio.");
                     ui.add_space(6.0);
                     ui.label(RichText::new("Motor de audio Symphonia PCM de ultra-baja latencia con ecualizador paramétrico de 5 bandas en tiempo real, prefetch predictivo en disco y compatibilidad completa con YouTube Music.").size(12.0).color(TEXT_SECONDARY));
@@ -8590,12 +8630,19 @@ impl YrApp {
                         let timer_row = |ui: &mut egui::Ui,
                                          label: &str,
                                          bg: Color32,
-                                         fg: Color32|
+                                         fg: Color32,
+                                         border: Stroke|
                          -> bool {
                             let (r, resp) =
                                 ui.allocate_exact_size(Vec2::new(row_w, 42.0), Sense::click());
                             if ui.is_rect_visible(r) {
-                                ui.painter().rect_filled(r, CornerRadius::same(10), bg);
+                                ui.painter().rect(
+                                    r,
+                                    CornerRadius::same(10),
+                                    bg,
+                                    border,
+                                    egui::StrokeKind::Inside,
+                                );
                                 ui.painter().text(
                                     egui::pos2(r.left() + 14.0, r.center().y),
                                     egui::Align2::LEFT_CENTER,
@@ -8608,14 +8655,15 @@ impl YrApp {
                             resp.clicked()
                         };
 
-                        let default_bg = Color32::from_white_alpha(12);
+                        let default_bg = BG_ELEVATED;
+                        let default_border = Stroke::new(0.8_f32, Color32::from_rgb(56, 56, 66));
                         for (mins, label) in [
                             (15_u64, "15 minutos"),
                             (30_u64, "30 minutos"),
                             (45_u64, "45 minutos"),
                             (60_u64, "60 minutos"),
                         ] {
-                            if timer_row(ui, label, default_bg, Color32::WHITE) {
+                            if timer_row(ui, label, default_bg, Color32::WHITE, default_border) {
                                 *self.sleep_timer_until.lock().unwrap() =
                                     Some(Instant::now() + Duration::from_secs(mins * 60));
                                 self.sleep_after_track
@@ -8629,11 +8677,20 @@ impl YrApp {
                             ui,
                             "Al terminar la canción actual",
                             if after_track {
-                                Color32::from_white_alpha(28)
+                                Color32::from_rgb(56, 22, 26)
                             } else {
                                 default_bg
                             },
-                            Color32::WHITE,
+                            if after_track {
+                                ACCENT_RED
+                            } else {
+                                Color32::WHITE
+                            },
+                            if after_track {
+                                Stroke::new(1.0_f32, ACCENT_RED)
+                            } else {
+                                default_border
+                            },
                         ) {
                             *self.sleep_timer_until.lock().unwrap() = None;
                             self.sleep_after_track
@@ -8648,6 +8705,7 @@ impl YrApp {
                                 "Apagar temporizador",
                                 Color32::from_rgb(56, 22, 26),
                                 ACCENT_RED,
+                                Stroke::new(1.0_f32, ACCENT_RED),
                             )
                         {
                             *self.sleep_timer_until.lock().unwrap() = None;
@@ -8658,7 +8716,7 @@ impl YrApp {
                         }
 
                         #[cfg(target_os = "android")]
-                        ui.add_space(46.0);
+                        ui.add_space(58.0);
                     });
             });
     }
@@ -8750,20 +8808,13 @@ impl YrApp {
 
                         ui.add_space(8.0);
                         ui.label(RichText::new("Preajustes de sonido:").size(12.5).color(TEXT_SECONDARY));
+                        ui.add_space(4.0);
                         ui.horizontal_wrapped(|ui| {
+                            ui.spacing_mut().item_spacing = Vec2::new(6.0, 6.0);
                             let current_preset = self.store.data.config.equalizer.preset_name.clone();
                             for &(name, _, _) in EqualizerConfig::presets() {
                                 let selected = current_preset == name;
-                                let pill = egui::Button::new(
-                                    RichText::new(name)
-                                        .size(11.5)
-                                        .strong()
-                                        .color(if selected { Color32::WHITE } else { Color32::from_white_alpha(200) }),
-                                )
-                                .fill(if selected { ACCENT_RED } else { Color32::from_white_alpha(24) })
-                                .corner_radius(CornerRadius::same(12))
-                                .min_size(Vec2::new(28.0, 24.0));
-                                if ui.add(pill).clicked() {
+                                if settings_choice_pill(ui, selected, name) {
                                     self.store.data.config.equalizer.apply_preset(name);
                                     if !self.store.data.config.equalizer.enabled {
                                         self.store.data.config.equalizer.enabled = true;
@@ -8838,7 +8889,7 @@ impl YrApp {
                         });
 
                         #[cfg(target_os = "android")]
-                        ui.add_space(46.0);
+                        ui.add_space(58.0);
                     });
             });
 
@@ -9267,7 +9318,7 @@ impl YrApp {
                         }
                         if menu_row(ui, icons::Icon::Help, "Ayuda y comentarios").clicked() {
                             self.show_account_modal = false;
-                            self.set_banner("YR Music v0.7.2 • Pure Rust");
+                            self.set_banner("YR Music v0.7.3 • Pure Rust");
                         }
 
                         #[cfg(target_os = "android")]
