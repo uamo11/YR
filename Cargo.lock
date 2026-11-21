@@ -4779,7 +4779,7 @@ dependencies = [
 
 [[package]]
 name = "yr-app"
-version = "0.7.9"
+version = "0.8.0"
 dependencies = [
  "android_logger",
  "eframe",
@@ -4799,7 +4799,7 @@ dependencies = [
 
 [[package]]
 name = "yr-audio"
-version = "0.7.9"
+version = "0.8.0"
 dependencies = [
  "futures-util",
  "reqwest",
@@ -4813,7 +4813,7 @@ dependencies = [
 
 [[package]]
 name = "yr-core"
-version = "0.7.9"
+version = "0.8.0"
 dependencies = [
  "chrono",
  "serde",
@@ -4824,7 +4824,7 @@ dependencies = [
 
 [[package]]
 name = "yr-download"
-version = "0.7.9"
+version = "0.8.0"
 dependencies = [
  "chrono",
  "futures-util",
@@ -4840,7 +4840,7 @@ dependencies = [
 
 [[package]]
 name = "yr-provider"
-version = "0.7.9"
+version = "0.8.0"
 dependencies = [
  "async-trait",
  "chrono",

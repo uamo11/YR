@@ -2139,45 +2139,29 @@ impl YrApp {
 
             let mut painted = false;
             if let Some(url) = avatar_url {
-                let thumb_uri = tracked_thumb_uri(url, 192);
-                let img = Image::new(thumb_uri)
-                    .fit_to_exact_size(Vec2::splat(size))
-                    .corner_radius(radius);
-                match img.load_for_size(ui.ctx(), Vec2::splat(size)) {
-                    Ok(egui::load::TexturePoll::Ready { .. }) => {
-                        img.paint_at(ui, rect);
-                        painted = true;
-                    }
-                    Ok(egui::load::TexturePoll::Pending { .. }) => {
-                        ui.ctx().request_repaint();
-                    }
-                    Err(_) => {}
-                }
+                painted = paint_ready_image(
+                    ui,
+                    rect,
+                    tracked_thumb_uri(url, 192),
+                    Vec2::splat(size),
+                    radius,
+                );
             }
 
             if !painted {
-                if is_logged {
-                    let initial = account_info
-                        .and_then(|a| a.name.chars().next())
-                        .unwrap_or('G')
-                        .to_uppercase()
-                        .to_string();
-                    let font_id = egui::FontId::proportional(size * 0.46);
-                    ui.painter().text(
-                        rect.center(),
-                        Align2::CENTER_CENTER,
-                        initial,
-                        font_id,
-                        Color32::WHITE,
-                    );
-                } else {
-                    icons::draw_icon(
-                        ui.painter(),
-                        egui::Rect::from_center_size(rect.center(), Vec2::splat(size * 0.58)),
-                        icons::Icon::Account,
-                        TEXT_SECONDARY,
-                    );
-                }
+                let initial = account_info
+                    .and_then(|a| a.name.chars().next())
+                    .unwrap_or('A')
+                    .to_uppercase()
+                    .to_string();
+                let font_id = egui::FontId::proportional(size * 0.46);
+                ui.painter().text(
+                    rect.center(),
+                    Align2::CENTER_CENTER,
+                    initial,
+                    font_id,
+                    Color32::WHITE,
+                );
             }
         }
         if resp.clicked() {
@@ -8318,7 +8302,7 @@ impl YrApp {
                     ui.label(RichText::new("Ajusta los mixes de inicio según tu historial de reproducción, canciones favoritas y artistas seguidos.").size(12.0).color(TEXT_SECONDARY));
                 }
                 SettingsCategory::About => {
-                    ui.heading("YR Music v0.7.9");
+                    ui.heading("YR Music v0.8.0");
                     ui.label("Cliente nativo de música 100% en Rust para Android y escritorio.");
                     ui.add_space(6.0);
                     ui.label(RichText::new("Motor de audio Symphonia PCM de ultra-baja latencia, reproductor integrado de video musical en la app, prefetch predictivo en disco y compatibilidad completa con YouTube Music.").size(12.0).color(TEXT_SECONDARY));
@@ -9223,26 +9207,16 @@ impl YrApp {
                 .account
                 .as_ref()
                 .or(self.store.data.google_account.as_ref());
-            let is_logged = self.home_feed.is_logged_in || self.store.data.google_cookie.is_some();
+            let is_logged = self.home_feed.is_logged_in
+                || self.store.data.google_cookie.is_some()
+                || self.store.data.google_account.is_some();
             let av = account_info.and_then(|a| a.avatar_url.clone());
             let name = account_info
                 .map(|a| a.name.clone())
-                .unwrap_or_else(|| {
-                    if is_logged {
-                        "Usuario de Google".to_string()
-                    } else {
-                        "Iniciar sesión con Google".to_string()
-                    }
-                });
+                .unwrap_or_else(|| "Antony".to_string());
             let handle = account_info
                 .and_then(|a| a.handle.clone())
-                .unwrap_or_else(|| {
-                    if is_logged {
-                        "Cuenta sincronizada".to_string()
-                    } else {
-                        "Toca para sincronizar tus listas y foto".to_string()
-                    }
-                });
+                .unwrap_or_else(|| "@IsAntonyVs".to_string());
             (av, name, handle, is_logged)
         };
 
@@ -9311,17 +9285,13 @@ impl YrApp {
 
                             let mut painted = false;
                             if let Some(url) = &avatar_url {
-                                let thumb_uri = tracked_thumb_uri(url, 192);
-                                let img = Image::new(thumb_uri)
-                                    .fit_to_exact_size(Vec2::splat(avatar_sz))
-                                    .corner_radius(radius);
-                                match img.load_for_size(ui.ctx(), Vec2::splat(avatar_sz)) {
-                                    Ok(egui::load::TexturePoll::Ready { .. }) => {
-                                        img.paint_at(ui, av_rect);
-                                        painted = true;
-                                    }
-                                    _ => {}
-                                }
+                                painted = paint_ready_image(
+                                    ui,
+                                    av_rect,
+                                    tracked_thumb_uri(url, 192),
+                                    Vec2::splat(avatar_sz),
+                                    radius,
+                                );
                             }
                             if !painted {
                                 let initial = user_name.chars().next().unwrap_or('A').to_uppercase().to_string();
@@ -9470,7 +9440,7 @@ impl YrApp {
                         }
                         if menu_row(ui, icons::Icon::Help, "Ayuda y comentarios").clicked() {
                             self.show_account_modal = false;
-                            self.set_banner("YR Music v0.7.8 • Pure Rust");
+                            self.set_banner("YR Music v0.8.0 • Pure Rust");
                         }
 
                         #[cfg(target_os = "android")]
