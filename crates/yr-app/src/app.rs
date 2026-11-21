@@ -6704,6 +6704,14 @@ impl YrApp {
 
                                                 let row_start = ui.next_widget_position();
                                                 render_track_thumb(ui, &t, 44.0);
+                                                if self.downloads.iter().any(|d| d.track.id == t.id && d.status == DownloadStatus::Completed) {
+                                                    let badge_r = Rect::from_center_size(
+                                                        Pos2::new(row_start.x + 36.0, row_start.y + 36.0),
+                                                        Vec2::splat(14.0),
+                                                    );
+                                                    ui.painter().circle_filled(badge_r.center(), 7.0, Color32::from_rgb(18, 18, 22));
+                                                    icons::draw_icon(ui.painter(), Rect::from_center_size(badge_r.center(), Vec2::splat(10.0)), icons::Icon::Check, GREEN_OK);
+                                                }
                                                 ui.add_space(6.0);
                                                 let right_reserve = if is_curr { 66.0 } else { 98.0 };
                                                 let tw = (ui.available_width() - right_reserve - 6.0).max(70.0);
@@ -7712,6 +7720,32 @@ impl YrApp {
                         }
                         let radius = if bar_resp.dragged() { 8.5 } else { 6.0 };
                         painter.circle_filled(egui::pos2(thumb_x, cy), radius, Color32::WHITE);
+                        if bar_resp.dragged() {
+                            let bubble_pos = egui::pos2(
+                                thumb_x.clamp(bar_rect.left() + 30.0, bar_rect.right() - 30.0),
+                                cy - 26.0,
+                            );
+                            let bubble_rect =
+                                egui::Rect::from_center_size(bubble_pos, Vec2::new(56.0, 22.0));
+                            painter.rect_filled(
+                                bubble_rect,
+                                CornerRadius::same(11),
+                                Color32::from_rgb(26, 26, 32),
+                            );
+                            painter.rect_stroke(
+                                bubble_rect,
+                                CornerRadius::same(11),
+                                Stroke::new(1.0_f32, Color32::from_white_alpha(90)),
+                                egui::StrokeKind::Outside,
+                            );
+                            painter.text(
+                                bubble_pos,
+                                Align2::CENTER_CENTER,
+                                format_seconds(display_pos as u64),
+                                egui::FontId::proportional(12.0),
+                                Color32::WHITE,
+                            );
+                        }
                     }
                     let pos = display_pos;
 
@@ -8302,7 +8336,7 @@ impl YrApp {
                     ui.label(RichText::new("Ajusta los mixes de inicio según tu historial de reproducción, canciones favoritas y artistas seguidos.").size(12.0).color(TEXT_SECONDARY));
                 }
                 SettingsCategory::About => {
-                    ui.heading("YR Music v0.8.0");
+                    ui.heading("YR Music v0.8.1");
                     ui.label("Cliente nativo de música 100% en Rust para Android y escritorio.");
                     ui.add_space(6.0);
                     ui.label(RichText::new("Motor de audio Symphonia PCM de ultra-baja latencia, reproductor integrado de video musical en la app, prefetch predictivo en disco y compatibilidad completa con YouTube Music.").size(12.0).color(TEXT_SECONDARY));
@@ -9440,7 +9474,7 @@ impl YrApp {
                         }
                         if menu_row(ui, icons::Icon::Help, "Ayuda y comentarios").clicked() {
                             self.show_account_modal = false;
-                            self.set_banner("YR Music v0.8.0 • Pure Rust");
+                            self.set_banner("YR Music v0.8.1 • Pure Rust");
                         }
 
                         #[cfg(target_os = "android")]
