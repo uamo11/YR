@@ -11,6 +11,7 @@ import android.content.Intent;
 import android.content.pm.ServiceInfo;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
+import android.graphics.Typeface;
 import android.media.MediaMetadata;
 import android.media.session.MediaSession;
 import android.media.session.PlaybackState;
@@ -20,13 +21,18 @@ import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
 import android.os.PowerManager;
+import android.text.TextUtils;
 import android.util.Log;
+import android.view.Gravity;
+import android.view.KeyEvent;
 import android.webkit.CookieManager;
+import android.webkit.WebChromeClient;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import android.widget.Button;
+import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 import java.io.InputStream;
@@ -373,13 +379,192 @@ public class YrPlaybackService extends Service {
     }
 
     public static void openVideo(final Context ctx, final String videoUrl) {
-        if (ctx == null || videoUrl == null) return;
+        openVideo(ctx, videoUrl, "", "");
+    }
+
+    public static void openVideo(final Context ctx, final String videoUrlOrId, final String title, final String artist) {
+        if (ctx == null || videoUrlOrId == null) return;
         new Handler(Looper.getMainLooper()).post(() -> {
             try {
-                Intent intent = new Intent(Intent.ACTION_VIEW, Uri.parse(videoUrl));
-                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-                ctx.startActivity(intent);
-            } catch (Throwable ignored) {
+                // Pause background audio so it doesn't double-play with the music video
+                try {
+                    nativeOnMediaAction(NATIVE_PAUSE, 0);
+                } catch (Throwable ignored) {
+                }
+
+                String videoId = videoUrlOrId.trim();
+                if (videoId.contains("v=")) {
+                    videoId = videoId.substring(videoId.indexOf("v=") + 2);
+                    int amp = videoId.indexOf("&");
+                    if (amp != -1) videoId = videoId.substring(0, amp);
+                } else if (videoId.contains("youtu.be/")) {
+                    videoId = videoId.substring(videoId.indexOf("youtu.be/") + 9);
+                    int q = videoId.indexOf("?");
+                    if (q != -1) videoId = videoId.substring(0, q);
+                } else if (videoId.contains("embed/")) {
+                    videoId = videoId.substring(videoId.indexOf("embed/") + 6);
+                    int q = videoId.indexOf("?");
+                    if (q != -1) videoId = videoId.substring(0, q);
+                }
+
+                final Dialog dialog = new Dialog(ctx, android.R.style.Theme_Black_NoTitleBar_Fullscreen);
+                dialog.setCancelable(true);
+
+                LinearLayout root = new LinearLayout(ctx);
+                root.setOrientation(LinearLayout.VERTICAL);
+                root.setBackgroundColor(0xFF000000);
+
+                // Top Bar
+                LinearLayout topBar = new LinearLayout(ctx);
+                topBar.setOrientation(LinearLayout.HORIZONTAL);
+                topBar.setBackgroundColor(0xFF101014);
+                topBar.setPadding(24, 20, 24, 20);
+                topBar.setGravity(Gravity.CENTER_VERTICAL);
+
+                // Close button "✕"
+                TextView closeBtn = new TextView(ctx);
+                closeBtn.setText("✕");
+                closeBtn.setTextColor(0xFFFFFFFF);
+                closeBtn.setTextSize(20);
+                closeBtn.setPadding(12, 8, 20, 8);
+                topBar.addView(closeBtn);
+
+                // Title & Artist container
+                LinearLayout infoCol = new LinearLayout(ctx);
+                infoCol.setOrientation(LinearLayout.VERTICAL);
+                infoCol.setPadding(8, 0, 8, 0);
+
+                TextView tvTitle = new TextView(ctx);
+                String displayTitle = (title != null && !title.trim().isEmpty()) ? title : "Video Musical";
+                tvTitle.setText(displayTitle);
+                tvTitle.setTextColor(0xFFFFFFFF);
+                tvTitle.setTextSize(15);
+                tvTitle.setTypeface(Typeface.DEFAULT_BOLD);
+                tvTitle.setSingleLine(true);
+                tvTitle.setEllipsize(TextUtils.TruncateAt.END);
+                infoCol.addView(tvTitle);
+
+                TextView tvArtist = new TextView(ctx);
+                String displayArtist = (artist != null && !artist.trim().isEmpty()) ? artist : "YR Music • Reproductor Integrado";
+                tvArtist.setText(displayArtist);
+                tvArtist.setTextColor(0xFFAAAAAA);
+                tvArtist.setTextSize(12);
+                tvArtist.setSingleLine(true);
+                tvArtist.setEllipsize(TextUtils.TruncateAt.END);
+                infoCol.addView(tvArtist);
+
+                LinearLayout.LayoutParams infoParams = new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.0f);
+                topBar.addView(infoCol, infoParams);
+
+                // Button to close and return to audio
+                Button returnBtn = new Button(ctx);
+                returnBtn.setText("Música");
+                returnBtn.setTextColor(0xFFFFFFFF);
+                returnBtn.setTextSize(12);
+                returnBtn.setBackgroundColor(0xFF24242A);
+                topBar.addView(returnBtn, new LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.WRAP_CONTENT,
+                        LinearLayout.LayoutParams.WRAP_CONTENT
+                ));
+
+                root.addView(topBar, new LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.MATCH_PARENT,
+                        LinearLayout.LayoutParams.WRAP_CONTENT
+                ));
+
+                // WebView Video Frame
+                FrameLayout container = new FrameLayout(ctx);
+                container.setBackgroundColor(0xFF000000);
+
+                final WebView wv = new WebView(ctx);
+                wv.setBackgroundColor(0xFF000000);
+                WebSettings ws = wv.getSettings();
+                ws.setJavaScriptEnabled(true);
+                ws.setDomStorageEnabled(true);
+                ws.setMediaPlaybackRequiresUserGesture(false);
+                ws.setSupportMultipleWindows(false);
+                ws.setAllowFileAccess(false);
+                ws.setAllowContentAccess(false);
+
+                String defaultUa = WebSettings.getDefaultUserAgent(ctx);
+                String cleanUa = defaultUa != null
+                        ? defaultUa.replace("; wv)", ")").replace(" wv)", ")")
+                        : "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36";
+                ws.setUserAgentString(cleanUa);
+
+                wv.setWebChromeClient(new WebChromeClient());
+                wv.setWebViewClient(new WebViewClient() {
+                    @Override
+                    public boolean shouldOverrideUrlLoading(WebView view, String url) {
+                        return false;
+                    }
+
+                    @Override
+                    public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
+                        return false;
+                    }
+                });
+
+                String html = "<!DOCTYPE html><html><head>"
+                        + "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no\">"
+                        + "<style>"
+                        + "* { margin:0; padding:0; box-sizing:border-box; background:#000000; }"
+                        + "html, body { width:100%; height:100%; overflow:hidden; display:flex; align-items:center; justify-content:center; }"
+                        + ".video-container { width:100vw; height:56.25vw; max-height:100vh; max-width:177.78vh; position:relative; }"
+                        + "iframe { position:absolute; top:0; left:0; width:100%; height:100%; border:0; }"
+                        + "</style></head><body>"
+                        + "<div class=\"video-container\">"
+                        + "<iframe src=\"https://www.youtube-nocookie.com/embed/" + videoId
+                        + "?autoplay=1&playsinline=1&modestbranding=1&rel=0&iv_load_policy=3&showinfo=0&controls=1\""
+                        + " allow=\"accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture\""
+                        + " allowfullscreen></iframe>"
+                        + "</div></body></html>";
+
+                wv.loadDataWithBaseURL("https://www.youtube.com", html, "text/html", "UTF-8", null);
+
+                container.addView(wv, new FrameLayout.LayoutParams(
+                        FrameLayout.LayoutParams.MATCH_PARENT,
+                        FrameLayout.LayoutParams.MATCH_PARENT
+                ));
+
+                root.addView(container, new LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.MATCH_PARENT,
+                        0,
+                        1.0f
+                ));
+
+                final Runnable cleanup = () -> {
+                    try {
+                        wv.stopLoading();
+                        wv.loadUrl("about:blank");
+                        wv.onPause();
+                        wv.pauseTimers();
+                        wv.destroy();
+                    } catch (Throwable ignored) {
+                    }
+                    try {
+                        dialog.dismiss();
+                    } catch (Throwable ignored) {
+                    }
+                };
+
+                closeBtn.setOnClickListener(v -> cleanup.run());
+                returnBtn.setOnClickListener(v -> cleanup.run());
+                dialog.setOnCancelListener(d -> cleanup.run());
+
+                dialog.setOnKeyListener((d, keyCode, event) -> {
+                    if (keyCode == KeyEvent.KEYCODE_BACK && event.getAction() == KeyEvent.ACTION_UP) {
+                        cleanup.run();
+                        return true;
+                    }
+                    return false;
+                });
+
+                dialog.setContentView(root);
+                dialog.show();
+
+            } catch (Throwable t) {
+                Log.w("YrPlaybackService", "openVideo in-app failed: " + t);
             }
         });
     }

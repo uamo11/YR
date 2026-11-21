@@ -6302,7 +6302,9 @@ impl YrApp {
                             }
                             if v_resp.clicked() {
                                 self.is_video_mode = true;
-                                self.set_banner("Modo Video activado");
+                                self.audio.pause();
+                                crate::android_media::open_video(&track.id, &track.title, &track.artist);
+                                self.set_banner("Reproduciendo video musical...");
                             }
                         });
                     });
@@ -7059,10 +7061,10 @@ impl YrApp {
                             Color32::WHITE,
                         );
 
-                        let v_url = format!("https://www.youtube.com/watch?v={}", track.id);
                         if video_resp.clicked() {
-                            crate::android_media::open_video(&v_url);
-                            ctx.open_url(egui::OpenUrl::new_tab(&v_url));
+                            self.audio.pause();
+                            crate::android_media::open_video(&track.id, &track.title, &track.artist);
+                            self.set_banner("Reproduciendo video musical...");
                         }
 
                         ui.add_space(8.0);
@@ -7074,14 +7076,15 @@ impl YrApp {
                             if icons::icon_pill_button(
                                 ui,
                                 icons::Icon::Video,
-                                "Abrir Video",
+                                "Reproducir Video",
                                 ACCENT_RED,
                                 Color32::WHITE,
                             )
                             .clicked()
                             {
-                                crate::android_media::open_video(&v_url);
-                                ctx.open_url(egui::OpenUrl::new_tab(&v_url));
+                                self.audio.pause();
+                                crate::android_media::open_video(&track.id, &track.title, &track.artist);
+                                self.set_banner("Reproduciendo video musical...");
                             }
                             ui.add_space(6.0);
                             if icons::icon_pill_button(
@@ -8188,7 +8191,7 @@ impl YrApp {
                     ui.label(RichText::new("Ajusta los mixes de inicio según tu historial de reproducción, canciones favoritas y artistas seguidos.").size(12.0).color(TEXT_SECONDARY));
                 }
                 SettingsCategory::About => {
-                    ui.heading("YR Music v0.7.3");
+                    ui.heading("YR Music v0.7.4");
                     ui.label("Cliente nativo de música 100% en Rust para Android y escritorio.");
                     ui.add_space(6.0);
                     ui.label(RichText::new("Motor de audio Symphonia PCM de ultra-baja latencia con ecualizador paramétrico de 5 bandas en tiempo real, prefetch predictivo en disco y compatibilidad completa con YouTube Music.").size(12.0).color(TEXT_SECONDARY));
@@ -8479,6 +8482,12 @@ impl YrApp {
                         self.open_artist(arid, ctx);
                         self.action_sheet_track = None;
                     }
+                }
+                if sheet_row(ui, icons::Icon::Video, "Ver video musical") {
+                    self.audio.pause();
+                    crate::android_media::open_video(&track.id, &track.title, &track.artist);
+                    self.set_banner("Reproduciendo video musical...");
+                    self.action_sheet_track = None;
                 }
                 if sheet_row(
                     ui,
@@ -9090,7 +9099,7 @@ impl YrApp {
             self.show_account_modal = false;
         }
 
-        let (avatar_url, user_name, user_handle) = {
+        let (avatar_url, user_name, user_handle, is_logged) = {
             let account_info = self
                 .home_feed
                 .account
@@ -9104,7 +9113,7 @@ impl YrApp {
                     if is_logged {
                         "Usuario de Google".to_string()
                     } else {
-                        "Antony".to_string()
+                        "Iniciar sesión con Google".to_string()
                     }
                 });
             let handle = account_info
@@ -9113,10 +9122,10 @@ impl YrApp {
                     if is_logged {
                         "Cuenta sincronizada".to_string()
                     } else {
-                        "@IsAntonyVs".to_string()
+                        "Toca para sincronizar tus listas y foto".to_string()
                     }
                 });
-            (av, name, handle)
+            (av, name, handle, is_logged)
         };
 
         egui::Area::new(egui::Id::new("yr_account_modal_panel"))
@@ -9231,18 +9240,33 @@ impl YrApp {
                                 TEXT_SECONDARY,
                             );
 
+                            let action_label = if is_logged {
+                                "Administra tu Cuenta de Google"
+                            } else {
+                                "Acceder con tu Cuenta de Google"
+                            };
+                            let action_color = if is_logged {
+                                Color32::from_rgb(108, 168, 255)
+                            } else {
+                                ACCENT_RED
+                            };
                             ui.painter().text(
                                 Pos2::new(text_left, card_rect.top() + 62.0),
                                 Align2::LEFT_CENTER,
-                                "Administra tu Cuenta de Google",
+                                action_label,
                                 egui::FontId::proportional(13.0),
-                                Color32::from_rgb(108, 168, 255),
+                                action_color,
                             );
                         }
 
                         if card_resp.clicked() {
                             self.show_account_modal = false;
-                            self.show_google_login = true;
+                            #[cfg(target_os = "android")]
+                            crate::android_media::open_google_login();
+                            #[cfg(not(target_os = "android"))]
+                            {
+                                self.show_google_login = true;
+                            }
                         }
 
                         ui.add_space(12.0);
@@ -9309,7 +9333,17 @@ impl YrApp {
                         }
                         if menu_row(ui, icons::Icon::SwitchAccount, "Cambiar de cuenta").clicked() {
                             self.show_account_modal = false;
-                            self.show_google_login = true;
+                            #[cfg(target_os = "android")]
+                            crate::android_media::open_google_login();
+                            #[cfg(not(target_os = "android"))]
+                            {
+                                self.show_google_login = true;
+                            }
+                        }
+                        if is_logged && menu_row(ui, icons::Icon::Close, "Cerrar sesión de Google").clicked() {
+                            self.show_account_modal = false;
+                            self.logout_google(ctx);
+                            self.set_banner("Sesión de Google cerrada");
                         }
                         if menu_row(ui, icons::Icon::Settings, "Configuración").clicked() {
                             self.show_account_modal = false;
@@ -9318,7 +9352,7 @@ impl YrApp {
                         }
                         if menu_row(ui, icons::Icon::Help, "Ayuda y comentarios").clicked() {
                             self.show_account_modal = false;
-                            self.set_banner("YR Music v0.7.3 • Pure Rust");
+                            self.set_banner("YR Music v0.7.4 • Pure Rust");
                         }
 
                         #[cfg(target_os = "android")]

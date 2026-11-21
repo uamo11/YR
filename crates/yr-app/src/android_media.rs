@@ -297,24 +297,32 @@ mod imp {
         }
     }
 
-    pub fn open_video(url: &str) {
+    pub fn open_video(video_id: &str, title: &str, artist: &str) {
         let Some(bridge) = bridge() else {
             return;
         };
         let Ok(mut env) = bridge.vm.attach_current_thread() else {
             return;
         };
-        let Ok(j_url) = env.new_string(url) else {
+        let Ok(j_vid) = env.new_string(video_id) else {
+            return;
+        };
+        let Ok(j_title) = env.new_string(title) else {
+            return;
+        };
+        let Ok(j_artist) = env.new_string(artist) else {
             return;
         };
         let service_cls: &JClass = bridge.service_class.as_obj().into();
         if let Err(e) = env.call_static_method(
             service_cls,
             "openVideo",
-            "(Landroid/content/Context;Ljava/lang/String;)V",
+            "(Landroid/content/Context;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V",
             &[
                 JValue::Object(bridge.app_ctx.as_obj()),
-                JValue::Object(&j_url),
+                JValue::Object(&j_vid),
+                JValue::Object(&j_title),
+                JValue::Object(&j_artist),
             ],
         ) {
             log::warn!("android_media: openVideo failed: {e:?}");
@@ -366,7 +374,7 @@ mod imp {
     }
     pub fn open_google_login() {}
     pub fn share_text(_title: &str, _text: &str) {}
-    pub fn open_video(_url: &str) {}
+    pub fn open_video(_video_id: &str, _title: &str, _artist: &str) {}
     pub fn update_playback(_title: &str, _artist: &str, _playing: bool, _pos_ms: u64, _dur_ms: u64) {
     }
     pub fn set_artwork_url(_url: &str) {}
