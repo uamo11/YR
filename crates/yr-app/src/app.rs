@@ -4459,6 +4459,31 @@ impl YrApp {
                     let history = self.store.data.search_history.clone();
                     if !history.is_empty() {
                         ui.add_space(8.0);
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new("Búsquedas recientes")
+                                    .size(13.5)
+                                    .color(TEXT_SECONDARY),
+                            );
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                if icons::icon_pill_button(
+                                    ui,
+                                    icons::Icon::Trash,
+                                    "Borrar todo",
+                                    Color32::from_white_alpha(18),
+                                    TEXT_SECONDARY,
+                                )
+                                .clicked()
+                                {
+                                    self.store.data.search_history.clear();
+                                    self.store.data.search_history_items.clear();
+                                    let _ = self.store.save();
+                                    self.set_banner("Historial de búsqueda borrado");
+                                }
+                            });
+                        });
+                        ui.add_space(4.0);
+                        let mut delete_query: Option<String> = None;
                         for item in history.iter().take(6) {
                             ui.horizontal(|ui| {
                                 let row_start = ui.cursor().min;
@@ -4470,7 +4495,7 @@ impl YrApp {
                                     icons::Icon::History,
                                     TEXT_SECONDARY,
                                 );
-                                let text_w = (ui.available_width() - 44.0).max(120.0);
+                                let text_w = (ui.available_width() - 72.0).max(100.0);
                                 ui.allocate_ui(Vec2::new(text_w, 34.0), |ui| {
                                     ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
                                         ui.add(
@@ -4496,12 +4521,26 @@ impl YrApp {
                                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                                     if icons::icon_button(
                                         ui,
-                                        icons::Icon::ArrowUpLeft,
-                                        32.0,
-                                        15.0,
+                                        icons::Icon::Close,
+                                        28.0,
+                                        13.0,
                                         Color32::TRANSPARENT,
                                         TEXT_SECONDARY,
-                                        15.0,
+                                        13.0,
+                                    )
+                                    .clicked()
+                                    {
+                                        delete_query = Some(item.clone());
+                                    }
+                                    ui.add_space(2.0);
+                                    if icons::icon_button(
+                                        ui,
+                                        icons::Icon::ArrowUpLeft,
+                                        28.0,
+                                        14.0,
+                                        Color32::TRANSPARENT,
+                                        TEXT_SECONDARY,
+                                        14.0,
                                     )
                                     .clicked()
                                     {
@@ -4509,6 +4548,11 @@ impl YrApp {
                                     }
                                 });
                             });
+                        }
+                        if let Some(dq) = delete_query {
+                            self.store.data.search_history.retain(|s| s != &dq);
+                            self.store.data.search_history_items.retain(|s| s.query != dq);
+                            let _ = self.store.save();
                         }
                     }
 
@@ -8271,7 +8315,7 @@ impl YrApp {
                     ui.label(RichText::new("Ajusta los mixes de inicio según tu historial de reproducción, canciones favoritas y artistas seguidos.").size(12.0).color(TEXT_SECONDARY));
                 }
                 SettingsCategory::About => {
-                    ui.heading("YR Music v0.7.7");
+                    ui.heading("YR Music v0.7.8");
                     ui.label("Cliente nativo de música 100% en Rust para Android y escritorio.");
                     ui.add_space(6.0);
                     ui.label(RichText::new("Motor de audio Symphonia PCM de ultra-baja latencia con ecualizador paramétrico de 5 bandas en tiempo real, prefetch predictivo en disco y compatibilidad completa con YouTube Music.").size(12.0).color(TEXT_SECONDARY));
@@ -9423,7 +9467,7 @@ impl YrApp {
                         }
                         if menu_row(ui, icons::Icon::Help, "Ayuda y comentarios").clicked() {
                             self.show_account_modal = false;
-                            self.set_banner("YR Music v0.7.7 • Pure Rust");
+                            self.set_banner("YR Music v0.7.8 • Pure Rust");
                         }
 
                         #[cfg(target_os = "android")]
