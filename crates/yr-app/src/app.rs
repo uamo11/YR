@@ -6387,8 +6387,9 @@ impl YrApp {
                             if v_resp.clicked() {
                                 self.is_video_mode = true;
                                 self.audio.pause();
-                                crate::android_media::open_video(&track.id, &track.title, &track.artist);
-                                self.set_banner("Reproduciendo video musical en la app");
+                                let start_sec = snap.position_secs.max(0.0) as u64;
+                                crate::android_media::open_video(&track.id, &track.title, &track.artist, start_sec);
+                                self.set_banner(format!("Video sincronizado en {}:{:02}", start_sec / 60, start_sec % 60));
                             }
                         });
                     });
@@ -7241,8 +7242,9 @@ impl YrApp {
 
                         if video_resp.clicked() {
                             self.audio.pause();
-                            crate::android_media::open_video(&track.id, &track.title, &track.artist);
-                            self.set_banner("Reproduciendo video musical en la app");
+                            let start_sec = snap.position_secs.max(0.0) as u64;
+                            crate::android_media::open_video(&track.id, &track.title, &track.artist, start_sec);
+                            self.set_banner(format!("Video sincronizado en {}:{:02}", start_sec / 60, start_sec % 60));
                         }
 
                         ui.add_space(8.0);
@@ -7261,8 +7263,9 @@ impl YrApp {
                             .clicked()
                             {
                                 self.audio.pause();
-                                crate::android_media::open_video(&track.id, &track.title, &track.artist);
-                                self.set_banner("Reproduciendo video musical en la app");
+                                let start_sec = snap.position_secs.max(0.0) as u64;
+                                crate::android_media::open_video(&track.id, &track.title, &track.artist, start_sec);
+                                self.set_banner(format!("Video sincronizado en {}:{:02}", start_sec / 60, start_sec % 60));
                             }
                             ui.add_space(6.0);
                             if icons::icon_pill_button(
@@ -8348,6 +8351,28 @@ impl YrApp {
                     }
                 }
                 SettingsCategory::DataSaver => {
+                    let is_wifi = crate::android_media::is_wifi_connected();
+                    let is_metered = crate::android_media::is_metered_network();
+                    egui::Frame::new()
+                        .fill(BG_SURFACE)
+                        .stroke(Stroke::new(0.8_f32, Color32::from_rgb(48, 48, 54)))
+                        .corner_radius(CornerRadius::same(10))
+                        .inner_margin(egui::Margin::symmetric(12, 8))
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                let (ic, col, net_label) = if is_wifi {
+                                    (icons::Icon::Radio, GREEN_OK, "Conexión Wi-Fi activa (Ilimitada)")
+                                } else if is_metered {
+                                    (icons::Icon::DataSaver, ACCENT_RED, "Datos móviles activos (Red con límite)")
+                                } else {
+                                    (icons::Icon::DataSaver, Color32::WHITE, "Conexión de red activa")
+                                };
+                                let (r, _) = ui.allocate_exact_size(Vec2::splat(18.0), Sense::hover());
+                                icons::draw_icon(ui.painter(), r, ic, col);
+                                ui.label(RichText::new(net_label).size(13.0).strong().color(Color32::WHITE));
+                            });
+                        });
+                    ui.add_space(10.0);
                     if ui.checkbox(&mut self.store.data.config.mobile_data_saver, "Ahorro de datos móviles").changed() {
                         let _ = self.store.save();
                     }
@@ -8395,6 +8420,16 @@ impl YrApp {
                     let cache_mb = self.stream_cache_bytes as f64 / (1024.0 * 1024.0);
                     ui.label(RichText::new(format!("Almacenamiento offline usado: {mb:.1} MB")).strong());
                     ui.label(RichText::new(format!("Caché de streaming en disco: {cache_mb:.1} MB")).color(TEXT_SECONDARY));
+                    ui.add_space(6.0);
+                    let limit_bytes = (self.store.data.config.max_stream_cache_mb as f32) * 1024.0 * 1024.0;
+                    let cache_ratio = (self.stream_cache_bytes as f32 / limit_bytes).clamp(0.0, 1.0);
+                    let (bar_rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 6.0), Sense::hover());
+                    ui.painter().rect_filled(bar_rect, CornerRadius::same(3), Color32::from_rgb(38, 38, 44));
+                    let filled_rect = Rect::from_min_max(
+                        bar_rect.left_top(),
+                        Pos2::new(bar_rect.left() + bar_rect.width() * cache_ratio, bar_rect.bottom()),
+                    );
+                    ui.painter().rect_filled(filled_rect, CornerRadius::same(3), if cache_ratio > 0.85 { ACCENT_RED } else { Color32::from_rgb(108, 168, 255) });
                     ui.add_space(10.0);
                     ui.label("Límite de caché de streaming:");
                     ui.add_space(4.0);
@@ -8461,7 +8496,7 @@ impl YrApp {
                     ui.label(RichText::new("Ajusta los mixes de inicio según tu historial de reproducción, canciones favoritas y artistas seguidos.").size(12.0).color(TEXT_SECONDARY));
                 }
                 SettingsCategory::About => {
-                    ui.heading("YR Music v0.8.6");
+                    ui.heading("YR Music v0.8.7");
                     ui.label("Cliente nativo de música 100% en Rust para Android y escritorio.");
                     ui.add_space(6.0);
                     ui.label(RichText::new("Motor de audio Symphonia PCM con DSP Morphe 3D binaural, reproductor integrado de video en la app, auto-scroll inteligente de cola, prefetch predictivo en disco y compatibilidad completa con YouTube Music.").size(12.0).color(TEXT_SECONDARY));
@@ -8755,8 +8790,9 @@ impl YrApp {
                 }
                 if sheet_row(ui, icons::Icon::Video, "Ver video musical") {
                     self.audio.pause();
-                    crate::android_media::open_video(&track.id, &track.title, &track.artist);
-                    self.set_banner("Reproduciendo video musical en la app");
+                    let start_sec = self.audio.snapshot().position_secs.max(0.0) as u64;
+                    crate::android_media::open_video(&track.id, &track.title, &track.artist, start_sec);
+                    self.set_banner(format!("Video sincronizado en {}:{:02}", start_sec / 60, start_sec % 60));
                     self.action_sheet_track = None;
                 }
                 if sheet_row(
@@ -9609,7 +9645,7 @@ impl YrApp {
                         }
                         if menu_row(ui, icons::Icon::Help, "Ayuda y comentarios").clicked() {
                             self.show_account_modal = false;
-                            self.set_banner("YR Music v0.8.6 • Pure Rust");
+                            self.set_banner("YR Music v0.8.7 • Pure Rust");
                         }
 
                         #[cfg(target_os = "android")]

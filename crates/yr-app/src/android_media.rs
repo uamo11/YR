@@ -297,7 +297,7 @@ mod imp {
         }
     }
 
-    pub fn open_video(video_id: &str, title: &str, artist: &str) {
+    pub fn open_video(video_id: &str, title: &str, artist: &str, start_secs: u64) {
         let Some(bridge) = bridge() else {
             return;
         };
@@ -317,17 +317,56 @@ mod imp {
         if let Err(e) = env.call_static_method(
             service_cls,
             "openVideo",
-            "(Landroid/content/Context;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V",
+            "(Landroid/content/Context;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;J)V",
             &[
                 JValue::Object(bridge.app_ctx.as_obj()),
                 JValue::Object(&j_vid),
                 JValue::Object(&j_title),
                 JValue::Object(&j_artist),
+                JValue::Long(start_secs as i64),
             ],
         ) {
             log::warn!("android_media: openVideo failed: {e:?}");
             let _ = env.exception_clear();
         }
+    }
+
+    pub fn is_wifi_connected() -> bool {
+        let Some(bridge) = bridge() else {
+            return true;
+        };
+        let Ok(mut env) = bridge.vm.attach_current_thread() else {
+            return true;
+        };
+        let service_cls: &JClass = bridge.service_class.as_obj().into();
+        let Ok(val) = env.call_static_method(
+            service_cls,
+            "isWifiConnected",
+            "(Landroid/content/Context;)Z",
+            &[JValue::Object(bridge.app_ctx.as_obj())],
+        ) else {
+            return true;
+        };
+        val.z().unwrap_or(true)
+    }
+
+    pub fn is_metered_network() -> bool {
+        let Some(bridge) = bridge() else {
+            return false;
+        };
+        let Ok(mut env) = bridge.vm.attach_current_thread() else {
+            return false;
+        };
+        let service_cls: &JClass = bridge.service_class.as_obj().into();
+        let Ok(val) = env.call_static_method(
+            service_cls,
+            "isMeteredNetwork",
+            "(Landroid/content/Context;)Z",
+            &[JValue::Object(bridge.app_ctx.as_obj())],
+        ) else {
+            return false;
+        };
+        val.z().unwrap_or(false)
     }
 
     #[no_mangle]
@@ -374,7 +413,13 @@ mod imp {
     }
     pub fn open_google_login() {}
     pub fn share_text(_title: &str, _text: &str) {}
-    pub fn open_video(_video_id: &str, _title: &str, _artist: &str) {}
+    pub fn open_video(_video_id: &str, _title: &str, _artist: &str, _start_secs: u64) {}
+    pub fn is_wifi_connected() -> bool {
+        true
+    }
+    pub fn is_metered_network() -> bool {
+        false
+    }
     pub fn update_playback(_title: &str, _artist: &str, _playing: bool, _pos_ms: u64, _dur_ms: u64) {
     }
     pub fn set_artwork_url(_url: &str) {}
@@ -387,6 +432,7 @@ mod imp {
 #[cfg(target_os = "android")]
 pub use imp::init;
 pub use imp::{
-    open_google_login, open_video, resolve_audio_url, set_action_sender, set_artwork_url, set_cookie_sender,
-    set_egui_ctx, set_ui_at_root, share_text, stop_service, take_back_pressed, update_playback,
+    is_metered_network, is_wifi_connected, open_google_login, open_video, resolve_audio_url,
+    set_action_sender, set_artwork_url, set_cookie_sender, set_egui_ctx, set_ui_at_root, share_text,
+    stop_service, take_back_pressed, update_playback,
 };

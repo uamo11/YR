@@ -15,6 +15,9 @@ import android.graphics.Typeface;
 import android.media.MediaMetadata;
 import android.media.session.MediaSession;
 import android.media.session.PlaybackState;
+import android.net.ConnectivityManager;
+import android.net.Network;
+import android.net.NetworkCapabilities;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Handler;
@@ -380,11 +383,42 @@ public class YrPlaybackService extends Service {
         });
     }
 
+    public static boolean isWifiConnected(final Context ctx) {
+        if (ctx == null) return false;
+        try {
+            ConnectivityManager cm = (ConnectivityManager) ctx.getSystemService(Context.CONNECTIVITY_SERVICE);
+            if (cm == null) return false;
+            Network network = cm.getActiveNetwork();
+            if (network == null) return false;
+            NetworkCapabilities caps = cm.getNetworkCapabilities(network);
+            if (caps == null) return false;
+            return caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
+                    || caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET);
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    public static boolean isMeteredNetwork(final Context ctx) {
+        if (ctx == null) return false;
+        try {
+            ConnectivityManager cm = (ConnectivityManager) ctx.getSystemService(Context.CONNECTIVITY_SERVICE);
+            if (cm == null) return false;
+            return cm.isActiveNetworkMetered();
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
     public static void openVideo(final Context ctx, final String videoUrl) {
-        openVideo(ctx, videoUrl, "", "");
+        openVideo(ctx, videoUrl, "", "", 0);
     }
 
     public static void openVideo(final Context ctx, final String videoUrlOrId, final String title, final String artist) {
+        openVideo(ctx, videoUrlOrId, title, artist, 0);
+    }
+
+    public static void openVideo(final Context ctx, final String videoUrlOrId, final String title, final String artist, final long startSecs) {
         if (ctx == null || videoUrlOrId == null) return;
         new Handler(Looper.getMainLooper()).post(() -> {
             try {
@@ -555,6 +589,7 @@ public class YrPlaybackService extends Service {
                     }
                 });
 
+                String startParam = (startSecs > 0) ? "&start=" + startSecs : "";
                 String embedHtml = "<!DOCTYPE html><html><head>"
                         + "<meta name='viewport' content='width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no'>"
                         + "<style>"
@@ -564,7 +599,7 @@ public class YrPlaybackService extends Service {
                         + "</style>"
                         + "</head><body>"
                         + "<iframe id='player' type='text/html' width='100%' height='100%' "
-                        + "src='https://www.youtube-nocookie.com/embed/" + videoId + "?autoplay=1&playsinline=1&controls=1&rel=0&modestbranding=1&enablejsapi=1&origin=https://music.youtube.com' "
+                        + "src='https://www.youtube-nocookie.com/embed/" + videoId + "?autoplay=1&playsinline=1&controls=1&rel=0&modestbranding=1&enablejsapi=1&origin=https://music.youtube.com" + startParam + "' "
                         + "frameborder='0' allow='accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture' allowfullscreen></iframe>"
                         + "</body></html>";
 
