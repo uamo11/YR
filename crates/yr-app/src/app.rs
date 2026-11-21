@@ -2253,6 +2253,7 @@ impl YrApp {
         ctx: &egui::Context,
         tracks: &[Track],
         show_download: bool,
+        pin_card: Option<HomeShelfCard>,
     ) {
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = Vec2::new(6.0, 6.0);
@@ -2292,6 +2293,25 @@ impl YrApp {
                 && !tracks.is_empty()
             {
                 self.enqueue_download_all(tracks.to_vec(), ctx);
+            }
+            if let Some(card) = pin_card {
+                let is_pinned = self.store.is_pinned_speed_dial(&card.title);
+                if icons::icon_pill_button(
+                    ui,
+                    icons::Icon::Pin,
+                    if is_pinned { "Fijado" } else { "Fijar" },
+                    if is_pinned { Color32::from_rgb(60, 20, 24) } else { BG_ELEVATED },
+                    if is_pinned { ACCENT_RED } else { TEXT_PRIMARY },
+                )
+                .clicked()
+                {
+                    let pinned = self.store.toggle_pin_speed_dial(card);
+                    self.set_banner(if pinned {
+                        "Fijado en Accesos directos"
+                    } else {
+                        "Quitado de Accesos directos"
+                    });
+                }
             }
         });
     }
@@ -2408,7 +2428,13 @@ impl YrApp {
                             };
                             ui.label(RichText::new(meta).size(12.0).color(TEXT_SECONDARY));
                             ui.add_space(10.0);
-                            self.render_collection_actions(ui, ctx, &album.tracks, true);
+                            let card = HomeShelfCard {
+                                title: album.summary.title.clone(),
+                                subtitle: album.summary.artist.clone(),
+                                thumbnail_url: album.summary.thumbnail_url.clone(),
+                                kind: ShelfCardKind::Album(album.summary.clone()),
+                            };
+                            self.render_collection_actions(ui, ctx, &album.tracks, true, Some(card));
                         });
                         ui.add_space(10.0);
                         for (idx, track) in album.tracks.iter().enumerate() {
@@ -2524,7 +2550,15 @@ impl YrApp {
                             };
                             ui.label(RichText::new(meta).size(12.0).color(TEXT_SECONDARY));
                             ui.add_space(10.0);
-                            self.render_collection_actions(ui, ctx, &pl.tracks, true);
+                            let card = HomeShelfCard {
+                                title: pl.summary.title.clone(),
+                                subtitle: pl.summary.author.clone().unwrap_or_else(|| "Playlist".to_string()),
+                                thumbnail_url: pl.summary.thumbnail_url.clone().or_else(|| {
+                                    pl.tracks.first().and_then(|t| t.thumbnail_url.clone())
+                                }),
+                                kind: ShelfCardKind::Playlist(pl.summary.clone()),
+                            };
+                            self.render_collection_actions(ui, ctx, &pl.tracks, true, Some(card));
                         });
                         ui.add_space(10.0);
                         for (idx, track) in pl.tracks.iter().enumerate() {
@@ -2617,7 +2651,7 @@ impl YrApp {
                         }
                         if !artist.top_tracks.is_empty() {
                             ui.add_space(10.0);
-                            self.render_collection_actions(ui, ctx, &artist.top_tracks, false);
+                            self.render_collection_actions(ui, ctx, &artist.top_tracks, false, None);
                         }
                     });
                     if !artist.top_tracks.is_empty() {
@@ -8237,7 +8271,7 @@ impl YrApp {
                     ui.label(RichText::new("Ajusta los mixes de inicio según tu historial de reproducción, canciones favoritas y artistas seguidos.").size(12.0).color(TEXT_SECONDARY));
                 }
                 SettingsCategory::About => {
-                    ui.heading("YR Music v0.7.6");
+                    ui.heading("YR Music v0.7.7");
                     ui.label("Cliente nativo de música 100% en Rust para Android y escritorio.");
                     ui.add_space(6.0);
                     ui.label(RichText::new("Motor de audio Symphonia PCM de ultra-baja latencia con ecualizador paramétrico de 5 bandas en tiempo real, prefetch predictivo en disco y compatibilidad completa con YouTube Music.").size(12.0).color(TEXT_SECONDARY));
@@ -8702,6 +8736,8 @@ impl YrApp {
                         let default_bg = BG_ELEVATED;
                         let default_border = Stroke::new(0.8_f32, Color32::from_rgb(56, 56, 66));
                         for (mins, label) in [
+                            (5_u64, "5 minutos"),
+                            (10_u64, "10 minutos"),
                             (15_u64, "15 minutos"),
                             (30_u64, "30 minutos"),
                             (45_u64, "45 minutos"),
@@ -9387,7 +9423,7 @@ impl YrApp {
                         }
                         if menu_row(ui, icons::Icon::Help, "Ayuda y comentarios").clicked() {
                             self.show_account_modal = false;
-                            self.set_banner("YR Music v0.7.6 • Pure Rust");
+                            self.set_banner("YR Music v0.7.7 • Pure Rust");
                         }
 
                         #[cfg(target_os = "android")]

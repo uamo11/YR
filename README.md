@@ -70,7 +70,7 @@ El proyecto está modularizado en un espacio de trabajo de Cargo limpio y desaco
 
 Puedes descargar el APK precompilado y firmado para Android en la sección de [Releases de GitHub](https://github.com/uamo11/YR/releases).
 
-1. Descarga el archivo [`yr-music-v0.7.6-android.apk`](https://github.com/uamo11/YR/releases/latest/download/yr-music-v0.7.6-android.apk).
+1. Descarga el archivo [`yr-music-v0.7.7-android.apk`](https://github.com/uamo11/YR/releases/latest/download/yr-music-v0.7.7-android.apk).
 2. Habilita la instalación desde orígenes desconocidos si tu dispositivo lo solicita.
 3. Instala y disfruta de música sin publicidad y con la máxima velocidad de respuesta.
 
