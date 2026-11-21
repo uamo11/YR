@@ -503,24 +503,24 @@ public class YrPlaybackService extends Service {
                     public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
                         return false;
                     }
+
+                    @Override
+                    public void onPageFinished(WebView view, String url) {
+                        super.onPageFinished(view, url);
+                        // Hide banners, recommendations and comments to present a pure video player
+                        String js = "(function() {"
+                                + "  var style = document.createElement('style');"
+                                + "  style.type = 'text/css';"
+                                + "  style.innerHTML = 'header, ytm-mobile-topbar-renderer, #masthead, ytm-pivot-bar-renderer, .slim-video-metadata-actions, ytm-item-section-renderer, #related, #comments { display: none !important; } html, body { background: #000000 !important; color: #ffffff !important; }';"
+                                + "  document.head.appendChild(style);"
+                                + "  var v = document.querySelector('video');"
+                                + "  if (v) { v.play(); }"
+                                + "})();";
+                        view.evaluateJavascript(js, null);
+                    }
                 });
 
-                String html = "<!DOCTYPE html><html><head>"
-                        + "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no\">"
-                        + "<style>"
-                        + "* { margin:0; padding:0; box-sizing:border-box; background:#000000; }"
-                        + "html, body { width:100%; height:100%; overflow:hidden; display:flex; align-items:center; justify-content:center; }"
-                        + ".video-container { width:100vw; height:56.25vw; max-height:100vh; max-width:177.78vh; position:relative; }"
-                        + "iframe { position:absolute; top:0; left:0; width:100%; height:100%; border:0; }"
-                        + "</style></head><body>"
-                        + "<div class=\"video-container\">"
-                        + "<iframe src=\"https://www.youtube-nocookie.com/embed/" + videoId
-                        + "?autoplay=1&playsinline=1&modestbranding=1&rel=0&iv_load_policy=3&showinfo=0&controls=1\""
-                        + " allow=\"accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture\""
-                        + " allowfullscreen></iframe>"
-                        + "</div></body></html>";
-
-                wv.loadDataWithBaseURL("https://www.youtube.com", html, "text/html", "UTF-8", null);
+                wv.loadUrl("https://m.youtube.com/watch?v=" + videoId);
 
                 container.addView(wv, new FrameLayout.LayoutParams(
                         FrameLayout.LayoutParams.MATCH_PARENT,
