@@ -339,6 +339,8 @@ pub struct YrApp {
     sleep_after_track: Arc<std::sync::atomic::AtomicBool>,
     show_sleep_timer_sheet: bool,
     show_equalizer_modal: bool,
+    show_recap_modal: bool,
+    prewarmed_next_track_id: Option<String>,
     stream_cache_bytes: u64,
     playlist_picker_track: Option<Track>,
     action_sheet_track: Option<Track>,
@@ -561,6 +563,8 @@ impl YrApp {
             sleep_after_track: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             show_sleep_timer_sheet: false,
             show_equalizer_modal: false,
+            show_recap_modal: false,
+            prewarmed_next_track_id: None,
             stream_cache_bytes,
             playlist_picker_track: None,
             action_sheet_track: None,
@@ -1179,6 +1183,7 @@ impl YrApp {
         self.store.record_play(track.clone());
         self.sync_last_queue_snapshot();
         self.seeking_secs = None;
+        self.prewarmed_next_track_id = None;
         self.audio.stop();
         self.lyrics_data = None;
         self.lyrics_track_id = None;
@@ -1646,6 +1651,33 @@ impl YrApp {
                 self.set_banner(format!("SponsorBlock: saltado segmento ({cat})"));
             }
         }
+        // Gapless Next Track Pre-Buffering: when < 25s left in current track, prewarm next track in queue
+        if snap.status == PlaybackStatus::Playing {
+            if let Some(dur) = snap.duration_secs {
+                let rem = dur - snap.position_secs;
+                if rem > 0.0 && rem < 25.0 {
+                    let next_opt = {
+                        let q = self.queue.lock().unwrap();
+                        let curr = q.current_track();
+                        let ordered = q.ordered_tracks();
+                        let curr_pos = curr.as_ref().and_then(|c| ordered.iter().position(|(_, t)| t.id == c.id));
+                        curr_pos.and_then(|p| ordered.get(p + 1)).map(|(_, t)| t.id.clone())
+                    };
+                    if let Some(nid) = next_opt {
+                        if self.prewarmed_next_track_id.as_deref() != Some(&nid) {
+                            self.prewarmed_next_track_id = Some(nid.clone());
+                            let dl = Arc::clone(&self.downloader);
+                            let provider = Arc::clone(&self.provider);
+                            let quality = self.store.data.config.stream_quality;
+                            let audio = self.audio.clone();
+                            self.runtime.spawn(async move {
+                                prefetch_next_track_audio(&dl, &provider, &audio, &nid, quality).await;
+                            });
+                        }
+                    }
+                }
+            }
+        }
         if snap.finished_counter > self.last_finished_counter.load(std::sync::atomic::Ordering::SeqCst) {
             self.last_finished_counter
                 .store(snap.finished_counter, std::sync::atomic::Ordering::SeqCst);
@@ -1860,6 +1892,7 @@ impl eframe::App for YrApp {
         self.render_equalizer_modal(ctx);
         self.render_playlist_picker_modal(ctx);
         self.render_account_modal(ctx);
+        self.render_recap_modal(ctx);
         self.render_google_login_modal(ctx);
         self.render_status_toast(ctx);
         crate::android_media::set_ui_at_root(self.is_at_root());
@@ -8496,7 +8529,7 @@ impl YrApp {
                     ui.label(RichText::new("Ajusta los mixes de inicio según tu historial de reproducción, canciones favoritas y artistas seguidos.").size(12.0).color(TEXT_SECONDARY));
                 }
                 SettingsCategory::About => {
-                    ui.heading("YR Music v0.8.7");
+                    ui.heading("YR Music v0.8.8");
                     ui.label("Cliente nativo de música 100% en Rust para Android y escritorio.");
                     ui.add_space(6.0);
                     ui.label(RichText::new("Motor de audio Symphonia PCM con DSP Morphe 3D binaural, reproductor integrado de video en la app, auto-scroll inteligente de cola, prefetch predictivo en disco y compatibilidad completa con YouTube Music.").size(12.0).color(TEXT_SECONDARY));
@@ -8818,6 +8851,22 @@ impl YrApp {
                     });
                     self.action_sheet_track = None;
                 }
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 6.0;
+                    let (ic_r, _) = ui.allocate_exact_size(Vec2::splat(18.0), Sense::hover());
+                    icons::draw_icon(ui.painter(), ic_r, icons::Icon::Play, Color32::WHITE);
+                    ui.label(RichText::new("Velocidad:").size(13.5).color(Color32::WHITE));
+                    let cur_speed = self.audio.snapshot().speed;
+                    for &(spd, lbl) in &[(0.75_f32, "0.75x"), (1.0, "1.0x"), (1.25, "1.25x"), (1.5, "1.5x")] {
+                        let selected = (cur_speed - spd).abs() < 0.05;
+                        if settings_choice_pill(ui, selected, lbl) {
+                            self.audio.set_speed(spd);
+                            self.set_banner(format!("Velocidad ajustada a {lbl}"));
+                        }
+                    }
+                });
+                ui.add_space(6.0);
                 let timer_active = self.sleep_timer_until.lock().unwrap().is_some()
                     || self
                         .sleep_after_track
@@ -9616,9 +9665,7 @@ impl YrApp {
                         }
                         if menu_row(ui, icons::Icon::Recap, "Tu Recap").clicked() {
                             self.show_account_modal = false;
-                            let count = self.store.data.recent_tracks.len();
-                            let liked = self.store.data.liked_tracks.len();
-                            self.set_banner(format!("Tu Recap: {} canciones escuchadas • {} favoritas", count, liked));
+                            self.show_recap_modal = true;
                         }
                         if menu_row(ui, icons::Icon::Badge, "Insignias").clicked() {
                             self.show_account_modal = false;
@@ -9645,7 +9692,7 @@ impl YrApp {
                         }
                         if menu_row(ui, icons::Icon::Help, "Ayuda y comentarios").clicked() {
                             self.show_account_modal = false;
-                            self.set_banner("YR Music v0.8.7 • Pure Rust");
+                            self.set_banner("YR Music v0.8.8 • Pure Rust");
                         }
 
                         #[cfg(target_os = "android")]
@@ -9672,6 +9719,375 @@ impl YrApp {
                         ui.add_space(8.0);
                     });
             });
+    }
+
+    fn render_recap_modal(&mut self, ctx: &egui::Context) {
+        if !self.show_recap_modal {
+            return;
+        }
+        let screen = ctx.screen_rect();
+        let mut close_modal = false;
+        let mut track_to_play: Option<Track> = None;
+        let mut trigger_share = false;
+
+        let total_recent = self.store.data.recent_tracks.len();
+        let total_liked = self.store.data.liked_tracks.len();
+        let total_dur_secs: u64 = self
+            .store
+            .data
+            .recent_tracks
+            .iter()
+            .map(|t| t.duration_secs.unwrap_or(210))
+            .sum();
+        let total_mins = (total_dur_secs / 60).max(total_recent as u64 * 3).max(18);
+
+        // Calculate top artists
+        let mut artist_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        for t in self.store.data.recent_tracks.iter().chain(self.store.data.liked_tracks.iter()) {
+            if !t.artist.trim().is_empty() {
+                *artist_counts.entry(t.artist.clone()).or_insert(0) += 1;
+            }
+        }
+        let mut top_artists: Vec<(String, usize)> = artist_counts.into_iter().collect();
+        top_artists.sort_by(|a, b| b.1.cmp(&a.1));
+        top_artists.truncate(4);
+
+        let top_track = self
+            .store
+            .data
+            .liked_tracks
+            .first()
+            .or_else(|| self.store.data.recent_tracks.first())
+            .cloned();
+
+        let recap_share_text = format!(
+            "🎵 Mi Recap en YR Music (Antony):\n• {} minutos de música escuchada\n• {} canciones reproducidas\n• {} temas favoritos marcados\n#YRMusic #AntonyRecap",
+            total_mins, total_recent, total_liked
+        );
+
+        egui::Area::new(egui::Id::new("yr_recap_modal_area"))
+            .fixed_pos(screen.min)
+            .order(egui::Order::Foreground)
+            .interactable(true)
+            .show(ctx, |ui| {
+                egui::Frame::new()
+                    .fill(Color32::from_rgb(14, 14, 18))
+                    .inner_margin(egui::Margin::symmetric(16, 12))
+                    .show(ui, |ui| {
+                        let inner_w = (screen.width() - 32.0).max(200.0);
+                        ui.set_width(inner_w);
+                        ui.set_max_width(inner_w);
+
+                        #[cfg(target_os = "android")]
+                        ui.add_space(32.0);
+
+                        // Top bar
+                        ui.horizontal(|ui| {
+                            if icons::icon_button(
+                                ui,
+                                icons::Icon::Close,
+                                32.0,
+                                18.0,
+                                Color32::TRANSPARENT,
+                                Color32::WHITE,
+                                16.0,
+                            )
+                            .clicked()
+                            {
+                                close_modal = true;
+                            }
+                            ui.add_space(8.0);
+                            ui.label(
+                                RichText::new("Tu Recap")
+                                    .size(20.0)
+                                    .strong()
+                                    .color(Color32::WHITE),
+                            );
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                if icons::icon_button(
+                                    ui,
+                                    icons::Icon::Share,
+                                    32.0,
+                                    18.0,
+                                    Color32::from_white_alpha(20),
+                                    Color32::WHITE,
+                                    16.0,
+                                )
+                                .clicked()
+                                {
+                                    trigger_share = true;
+                                }
+                            });
+                        });
+
+                        ui.add_space(14.0);
+
+                        egui::ScrollArea::vertical()
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| {
+                                // Profile badge
+                                ui.horizontal(|ui| {
+                                    let av_sz = 38.0;
+                                    let (av_r, _) = ui.allocate_exact_size(Vec2::splat(av_sz), Sense::hover());
+                                    let rad = CornerRadius::same((av_sz * 0.5) as u8);
+                                    let p = paint_antony_avatar(ui, av_r, Vec2::splat(av_sz), rad);
+                                    if !p {
+                                        ui.painter().rect_filled(av_r, rad, Color32::from_rgb(45, 45, 52));
+                                    }
+                                    ui.add_space(10.0);
+                                    ui.vertical(|ui| {
+                                        ui.label(RichText::new("Antony").size(16.0).strong().color(Color32::WHITE));
+                                        ui.label(RichText::new("@IsAntonyVs • Tu resumen musical").size(12.5).color(TEXT_SECONDARY));
+                                    });
+                                });
+
+                                ui.add_space(16.0);
+
+                                // Main Hero Card: Minutos de Música
+                                let hero_rect = ui.allocate_space(Vec2::new(inner_w, 100.0)).1;
+                                if ui.is_rect_visible(hero_rect) {
+                                    ui.painter().rect_filled(hero_rect, CornerRadius::same(14), Color32::from_rgb(180, 24, 44));
+                                    ui.painter().text(
+                                        Pos2::new(hero_rect.left() + 18.0, hero_rect.top() + 32.0),
+                                        Align2::LEFT_CENTER,
+                                        format!("{total_mins} min"),
+                                        egui::FontId::proportional(32.0),
+                                        Color32::WHITE,
+                                    );
+                                    ui.painter().text(
+                                        Pos2::new(hero_rect.left() + 18.0, hero_rect.top() + 66.0),
+                                        Align2::LEFT_CENTER,
+                                        "Tiempo total de escucha acumulado",
+                                        egui::FontId::proportional(14.0),
+                                        Color32::from_white_alpha(230),
+                                    );
+                                    ui.painter().text(
+                                        Pos2::new(hero_rect.left() + 18.0, hero_rect.top() + 84.0),
+                                        Align2::LEFT_CENTER,
+                                        "Música en alta calidad sin interrupciones",
+                                        egui::FontId::proportional(11.5),
+                                        Color32::from_white_alpha(170),
+                                    );
+                                }
+
+                                ui.add_space(12.0);
+
+                                // Two Stats Columns
+                                ui.horizontal(|ui| {
+                                    let col_w = (inner_w - 10.0) * 0.5;
+                                    // Left Card: Favoritas
+                                    let (l_rect, _) = ui.allocate_exact_size(Vec2::new(col_w, 80.0), Sense::hover());
+                                    if ui.is_rect_visible(l_rect) {
+                                        ui.painter().rect_filled(l_rect, CornerRadius::same(12), Color32::from_rgb(28, 28, 34));
+                                        let ic_r = Rect::from_center_size(Pos2::new(l_rect.left() + 22.0, l_rect.top() + 26.0), Vec2::splat(18.0));
+                                        icons::draw_icon(ui.painter(), ic_r, icons::Icon::HeartFilled, ACCENT_RED);
+                                        ui.painter().text(
+                                            Pos2::new(l_rect.left() + 40.0, l_rect.top() + 26.0),
+                                            Align2::LEFT_CENTER,
+                                            format!("{total_liked}"),
+                                            egui::FontId::proportional(20.0),
+                                            Color32::WHITE,
+                                        );
+                                        ui.painter().text(
+                                            Pos2::new(l_rect.left() + 14.0, l_rect.top() + 58.0),
+                                            Align2::LEFT_CENTER,
+                                            "Canciones favoritas",
+                                            egui::FontId::proportional(12.5),
+                                            TEXT_SECONDARY,
+                                        );
+                                    }
+
+                                    // Right Card: Pistas en Historial
+                                    let (r_rect, _) = ui.allocate_exact_size(Vec2::new(col_w, 80.0), Sense::hover());
+                                    if ui.is_rect_visible(r_rect) {
+                                        ui.painter().rect_filled(r_rect, CornerRadius::same(12), Color32::from_rgb(28, 28, 34));
+                                        let ic_r = Rect::from_center_size(Pos2::new(r_rect.left() + 22.0, r_rect.top() + 26.0), Vec2::splat(18.0));
+                                        icons::draw_icon(ui.painter(), ic_r, icons::Icon::History, Color32::from_rgb(108, 168, 255));
+                                        ui.painter().text(
+                                            Pos2::new(r_rect.left() + 40.0, r_rect.top() + 26.0),
+                                            Align2::LEFT_CENTER,
+                                            format!("{total_recent}"),
+                                            egui::FontId::proportional(20.0),
+                                            Color32::WHITE,
+                                        );
+                                        ui.painter().text(
+                                            Pos2::new(r_rect.left() + 14.0, r_rect.top() + 58.0),
+                                            Align2::LEFT_CENTER,
+                                            "Pistas reproducidas",
+                                            egui::FontId::proportional(12.5),
+                                            TEXT_SECONDARY,
+                                        );
+                                    }
+                                });
+
+                                ui.add_space(14.0);
+
+                                // Card: Tu Top Canción
+                                if let Some(top) = &top_track {
+                                    ui.label(RichText::new("Tu tema más escuchado").size(15.0).strong().color(Color32::WHITE));
+                                    ui.add_space(6.0);
+                                    let (t_rect, t_resp) = ui.allocate_exact_size(Vec2::new(inner_w, 68.0), Sense::click());
+                                    if ui.is_rect_visible(t_rect) {
+                                        let bg = if t_resp.hovered() {
+                                            Color32::from_white_alpha(24)
+                                        } else {
+                                            Color32::from_rgb(24, 24, 30)
+                                        };
+                                        ui.painter().rect_filled(t_rect, CornerRadius::same(12), bg);
+
+                                        let thumb_sz = 52.0;
+                                        let thumb_r = Rect::from_min_size(
+                                            Pos2::new(t_rect.left() + 8.0, t_rect.top() + 8.0),
+                                            Vec2::splat(thumb_sz),
+                                        );
+                                        let thumb_url = track_thumb_url(top.thumbnail_url.as_deref(), &top.id);
+                                        let painted = thumb_url
+                                            .as_deref()
+                                            .map(|u| {
+                                                paint_ready_image(
+                                                    ui,
+                                                    thumb_r,
+                                                    tracked_thumb_uri(u, 96),
+                                                    Vec2::splat(thumb_sz),
+                                                    CornerRadius::same(8),
+                                                )
+                                            })
+                                            .unwrap_or(false);
+                                        if !painted {
+                                            ui.painter().rect_filled(thumb_r, CornerRadius::same(8), Color32::from_rgb(44, 44, 52));
+                                            icons::draw_icon(
+                                                ui.painter(),
+                                                Rect::from_center_size(thumb_r.center(), Vec2::splat(22.0)),
+                                                icons::Icon::MusicNote,
+                                                TEXT_SECONDARY,
+                                            );
+                                        }
+
+                                        let text_x = thumb_r.right() + 10.0;
+                                        let short_title = if top.title.len() > 32 {
+                                            format!("{}...", &top.title[..30])
+                                        } else {
+                                            top.title.clone()
+                                        };
+                                        ui.painter().text(
+                                            Pos2::new(text_x, t_rect.top() + 24.0),
+                                            Align2::LEFT_CENTER,
+                                            short_title,
+                                            egui::FontId::proportional(14.5),
+                                            Color32::WHITE,
+                                        );
+                                        ui.painter().text(
+                                            Pos2::new(text_x, t_rect.top() + 46.0),
+                                            Align2::LEFT_CENTER,
+                                            &top.artist,
+                                            egui::FontId::proportional(12.5),
+                                            TEXT_SECONDARY,
+                                        );
+
+                                        let play_r = Rect::from_center_size(
+                                            Pos2::new(t_rect.right() - 24.0, t_rect.center().y),
+                                            Vec2::splat(28.0),
+                                        );
+                                        ui.painter().circle_filled(play_r.center(), 14.0, ACCENT_RED);
+                                        icons::draw_icon(
+                                            ui.painter(),
+                                            Rect::from_center_size(play_r.center(), Vec2::splat(14.0)),
+                                            icons::Icon::Play,
+                                            Color32::WHITE,
+                                        );
+                                    }
+                                    if t_resp.clicked() {
+                                        track_to_play = Some(top.clone());
+                                        close_modal = true;
+                                    }
+                                    ui.add_space(14.0);
+                                }
+
+                                // Top Artists Section
+                                if !top_artists.is_empty() {
+                                    ui.label(RichText::new("Tus artistas más reproducidos").size(15.0).strong().color(Color32::WHITE));
+                                    ui.add_space(6.0);
+                                    for (idx, (artist_name, play_cnt)) in top_artists.iter().enumerate() {
+                                        let (row_r, _) = ui.allocate_exact_size(Vec2::new(inner_w, 40.0), Sense::hover());
+                                        if ui.is_rect_visible(row_r) {
+                                            ui.painter().rect_filled(row_r, CornerRadius::same(8), Color32::from_rgb(22, 22, 28));
+                                            let badge_color = match idx {
+                                                0 => Color32::from_rgb(255, 193, 7),  // Gold
+                                                1 => Color32::from_rgb(189, 189, 189), // Silver
+                                                2 => Color32::from_rgb(205, 127, 50),  // Bronze
+                                                _ => TEXT_SECONDARY,
+                                            };
+                                            ui.painter().text(
+                                                Pos2::new(row_r.left() + 16.0, row_r.center().y),
+                                                Align2::LEFT_CENTER,
+                                                format!("#{}", idx + 1),
+                                                egui::FontId::proportional(14.0),
+                                                badge_color,
+                                            );
+                                            ui.painter().text(
+                                                Pos2::new(row_r.left() + 48.0, row_r.center().y),
+                                                Align2::LEFT_CENTER,
+                                                artist_name,
+                                                egui::FontId::proportional(13.5),
+                                                Color32::WHITE,
+                                            );
+                                            ui.painter().text(
+                                                Pos2::new(row_r.right() - 14.0, row_r.center().y),
+                                                Align2::RIGHT_CENTER,
+                                                format!("{play_cnt} reproducciones"),
+                                                egui::FontId::proportional(11.5),
+                                                TEXT_SECONDARY,
+                                            );
+                                        }
+                                        ui.add_space(4.0);
+                                    }
+                                }
+
+                                ui.add_space(18.0);
+
+                                // Compartir mi Recap Button
+                                let (share_r, share_resp) = ui.allocate_exact_size(Vec2::new(inner_w, 48.0), Sense::click());
+                                if ui.is_rect_visible(share_r) {
+                                    let fill = if share_resp.hovered() {
+                                        Color32::from_rgb(240, 40, 60)
+                                    } else {
+                                        ACCENT_RED
+                                    };
+                                    ui.painter().rect_filled(share_r, CornerRadius::same(24), fill);
+                                    let ic_r = Rect::from_center_size(Pos2::new(share_r.center().x - 70.0, share_r.center().y), Vec2::splat(18.0));
+                                    icons::draw_icon(ui.painter(), ic_r, icons::Icon::Share, Color32::WHITE);
+                                    ui.painter().text(
+                                        Pos2::new(share_r.center().x + 10.0, share_r.center().y),
+                                        Align2::CENTER_CENTER,
+                                        "Compartir mi Recap",
+                                        egui::FontId::proportional(15.5),
+                                        Color32::WHITE,
+                                    );
+                                }
+                                if share_resp.clicked() {
+                                    trigger_share = true;
+                                }
+
+                                #[cfg(target_os = "android")]
+                                ui.add_space(60.0);
+                                #[cfg(not(target_os = "android"))]
+                                ui.add_space(24.0);
+                            });
+                    });
+            });
+
+        if trigger_share {
+            crate::android_media::share_text("Tu Recap Musical • YR Music", &recap_share_text);
+            self.set_banner("Tu Recap compartido exitosamente");
+        }
+
+        if close_modal {
+            self.show_recap_modal = false;
+        }
+
+        if let Some(track) = track_to_play {
+            self.play_track_in_list(vec![track], 0, ctx);
+        }
     }
 
     fn render_google_login_modal(&mut self, ctx: &egui::Context) {
