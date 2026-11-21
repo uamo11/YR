@@ -2152,6 +2152,10 @@ impl YrApp {
             }
 
             if !painted {
+                painted = paint_antony_avatar(ui, rect, Vec2::splat(size), radius);
+            }
+
+            if !painted {
                 let initial = account_info
                     .and_then(|a| a.name.chars().next())
                     .unwrap_or('A')
@@ -2714,17 +2718,16 @@ impl YrApp {
                     .account
                     .as_ref()
                     .and_then(|a| a.avatar_url.as_deref());
+                let (av_rect, _) = ui.allocate_exact_size(Vec2::splat(30.0), Sense::hover());
+                let mut painted = false;
                 if let Some(url) = avatar_url {
-                    let thumb_uri = tracked_thumb_uri(url, 192);
-                    ui.add(
-                        Image::new(thumb_uri)
-                            .fit_to_exact_size(Vec2::splat(30.0))
-                            .corner_radius(CornerRadius::same(15)),
-                    );
-                } else {
-                    let (av_rect, _) = ui.allocate_exact_size(Vec2::splat(30.0), Sense::hover());
-                    ui.painter()
-                        .circle_filled(av_rect.center(), 15.0, BG_ELEVATED);
+                    painted = paint_ready_image(ui, av_rect, tracked_thumb_uri(url, 192), Vec2::splat(30.0), CornerRadius::same(15));
+                }
+                if !painted {
+                    painted = paint_antony_avatar(ui, av_rect, Vec2::splat(30.0), CornerRadius::same(15));
+                }
+                if !painted {
+                    ui.painter().circle_filled(av_rect.center(), 15.0, BG_ELEVATED);
                     icons::draw_icon(
                         ui.painter(),
                         egui::Rect::from_center_size(av_rect.center(), Vec2::splat(16.0)),
@@ -6452,15 +6455,23 @@ impl YrApp {
                         ui.allocate_ui(Vec2::new(tw, 42.0), |ui| {
                             ui.vertical(|ui| {
                                 ui.set_max_width(tw);
-                                ui.add(
-                                    egui::Label::new(
-                                        RichText::new(&track.title)
-                                            .size(14.5)
-                                            .strong()
-                                            .color(Color32::WHITE),
-                                    )
-                                    .truncate(),
-                                );
+                                ui.horizontal(|ui| {
+                                    ui.spacing_mut().item_spacing.x = 6.0;
+                                    if snap.status == PlaybackStatus::Playing {
+                                        let (eq_r, _) = ui.allocate_exact_size(Vec2::new(14.0, 14.0), Sense::hover());
+                                        icons::draw_animated_equalizer(ui.painter(), eq_r, true, ui.input(|i| i.time), ACCENT_RED);
+                                        ctx.request_repaint();
+                                    }
+                                    ui.add(
+                                        egui::Label::new(
+                                            RichText::new(&track.title)
+                                                .size(14.5)
+                                                .strong()
+                                                .color(Color32::WHITE),
+                                        )
+                                        .truncate(),
+                                    );
+                                });
                                 ui.add(
                                     egui::Label::new(
                                         RichText::new(&track.artist)
@@ -6780,7 +6791,12 @@ impl YrApp {
                                                         ui.spacing_mut().item_spacing.x = 4.0;
                                                         if is_curr {
                                                             let (eq_rect, _) = ui.allocate_exact_size(Vec2::splat(22.0), Sense::hover());
-                                                            icons::draw_icon(ui.painter(), eq_rect, icons::Icon::Equalizer, ACCENT_RED);
+                                                            let is_playing = snap.status == PlaybackStatus::Playing;
+                                                            let t = ui.input(|i| i.time);
+                                                            if is_playing {
+                                                                ctx.request_repaint();
+                                                            }
+                                                            icons::draw_animated_equalizer(ui.painter(), eq_rect, is_playing, t, ACCENT_RED);
                                                         } else {
                                                             if icons::icon_button(
                                                                 ui,
@@ -7466,6 +7482,11 @@ impl YrApp {
                         ui.horizontal(|ui| {
                             ui.spacing_mut().item_spacing.x = 8.0;
                             if let Some((txt, col)) = status_badge {
+                                if snap.status == PlaybackStatus::Playing {
+                                    let (eq_r, _) = ui.allocate_exact_size(Vec2::new(14.0, 12.0), Sense::hover());
+                                    icons::draw_animated_equalizer(ui.painter(), eq_r, true, ui.input(|i| i.time), col);
+                                    ctx.request_repaint();
+                                }
                                 ui.label(RichText::new(txt).size(11.5).color(col));
                             }
                             if let Some(ref t_txt) = timer_text {
@@ -8440,7 +8461,7 @@ impl YrApp {
                     ui.label(RichText::new("Ajusta los mixes de inicio según tu historial de reproducción, canciones favoritas y artistas seguidos.").size(12.0).color(TEXT_SECONDARY));
                 }
                 SettingsCategory::About => {
-                    ui.heading("YR Music v0.8.5");
+                    ui.heading("YR Music v0.8.6");
                     ui.label("Cliente nativo de música 100% en Rust para Android y escritorio.");
                     ui.add_space(6.0);
                     ui.label(RichText::new("Motor de audio Symphonia PCM con DSP Morphe 3D binaural, reproductor integrado de video en la app, auto-scroll inteligente de cola, prefetch predictivo en disco y compatibilidad completa con YouTube Music.").size(12.0).color(TEXT_SECONDARY));
@@ -8981,7 +9002,7 @@ impl YrApp {
 
         let mut changed = false;
         let panel_w = screen.width();
-        let inner_w = (panel_w - 28.0).max(220.0);
+        let inner_w = (panel_w - 36.0).max(220.0);
 
         egui::Area::new(egui::Id::new("yr_equalizer_panel"))
             .anchor(egui::Align2::LEFT_BOTTOM, Vec2::ZERO)
@@ -8999,7 +9020,7 @@ impl YrApp {
                         sw: 0,
                         se: 0,
                     })
-                    .inner_margin(egui::Margin::symmetric(14, 14))
+                    .inner_margin(egui::Margin::symmetric(18, 16))
                     .show(ui, |ui| {
                         ui.set_width(inner_w);
                         ui.set_max_width(inner_w);
@@ -9100,40 +9121,47 @@ impl YrApp {
                         ui.add_space(4.0);
 
                         let band_labels = EqualizerConfig::BAND_LABELS;
-                        ui.columns(5, |cols| {
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 4.0;
+                            let band_w = ((inner_w - 16.0) / 5.0).clamp(32.0, 56.0);
                             for i in 0..5 {
-                                cols[i].vertical_centered(|ui| {
-                                    let mut gain = self.store.data.config.equalizer.bands_db[i];
-                                    let val_str = if gain >= 0.0 {
-                                        format!("+{:.1}", gain)
-                                    } else {
-                                        format!("{:.1}", gain)
-                                    };
-                                    ui.label(
-                                        RichText::new(val_str)
-                                            .size(11.0)
-                                            .monospace()
-                                            .color(Color32::from_white_alpha(200)),
-                                    );
+                                ui.allocate_ui_with_layout(
+                                    Vec2::new(band_w, 130.0),
+                                    Layout::top_down(Align::Center),
+                                    |ui| {
+                                        ui.set_width(band_w);
+                                        let mut gain = self.store.data.config.equalizer.bands_db[i];
+                                        let val_str = if gain >= 0.0 {
+                                            format!("+{:.1}", gain)
+                                        } else {
+                                            format!("{:.1}", gain)
+                                        };
+                                        ui.label(
+                                            RichText::new(val_str)
+                                                .size(10.5)
+                                                .monospace()
+                                                .color(Color32::from_white_alpha(200)),
+                                        );
 
-                                    let v_slider = egui::Slider::new(&mut gain, -12.0..=12.0)
-                                        .vertical()
-                                        .show_value(false)
-                                        .step_by(0.5);
-                                    let resp = ui.add_sized(Vec2::new(36.0, 90.0), v_slider);
-                                    if resp.changed() {
-                                        self.store.data.config.equalizer.bands_db[i] = gain;
-                                        self.store.data.config.equalizer.preset_name = "Personalizado".to_string();
-                                        changed = true;
-                                    }
+                                        let v_slider = egui::Slider::new(&mut gain, -12.0..=12.0)
+                                            .vertical()
+                                            .show_value(false)
+                                            .step_by(0.5);
+                                        let resp = ui.add_sized(Vec2::new(band_w.min(32.0), 80.0), v_slider);
+                                        if resp.changed() {
+                                            self.store.data.config.equalizer.bands_db[i] = gain;
+                                            self.store.data.config.equalizer.preset_name = "Personalizado".to_string();
+                                            changed = true;
+                                        }
 
-                                    ui.label(
-                                        RichText::new(band_labels[i])
-                                            .size(10.5)
-                                            .strong()
-                                            .color(Color32::WHITE),
-                                    );
-                                });
+                                        ui.label(
+                                            RichText::new(band_labels[i])
+                                                .size(10.0)
+                                                .strong()
+                                                .color(Color32::WHITE),
+                                        );
+                                    },
+                                );
                             }
                         });
 
@@ -9432,6 +9460,9 @@ impl YrApp {
                                 );
                             }
                             if !painted {
+                                painted = paint_antony_avatar(ui, av_rect, Vec2::splat(avatar_sz), radius);
+                            }
+                            if !painted {
                                 let initial = user_name.chars().next().unwrap_or('A').to_uppercase().to_string();
                                 ui.painter().text(
                                     av_rect.center(),
@@ -9578,7 +9609,7 @@ impl YrApp {
                         }
                         if menu_row(ui, icons::Icon::Help, "Ayuda y comentarios").clicked() {
                             self.show_account_modal = false;
-                            self.set_banner("YR Music v0.8.5 • Pure Rust");
+                            self.set_banner("YR Music v0.8.6 • Pure Rust");
                         }
 
                         #[cfg(target_os = "android")]
@@ -10074,6 +10105,31 @@ fn paint_ready_image(
     corner_radius: CornerRadius,
 ) -> bool {
     let img = Image::new(uri)
+        .fit_to_exact_size(size)
+        .corner_radius(corner_radius);
+    match img.load_for_size(ui.ctx(), size) {
+        Ok(egui::load::TexturePoll::Ready { .. }) => {
+            img.paint_at(ui, rect);
+            true
+        }
+        Ok(egui::load::TexturePoll::Pending { .. }) => {
+            ui.ctx().request_repaint();
+            false
+        }
+        Err(_) => false,
+    }
+}
+
+const ANTONY_AVATAR_BYTES: &[u8] = include_bytes!("../assets/user_avatar_antony.png");
+
+/// Renders Antony's authentic user avatar from the embedded high-resolution asset.
+fn paint_antony_avatar(
+    ui: &mut egui::Ui,
+    rect: egui::Rect,
+    size: Vec2,
+    corner_radius: CornerRadius,
+) -> bool {
+    let img = Image::from_bytes("bytes://antony_profile_avatar.png", ANTONY_AVATAR_BYTES)
         .fit_to_exact_size(size)
         .corner_radius(corner_radius);
     match img.load_for_size(ui.ctx(), size) {

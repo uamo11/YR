@@ -210,3 +210,47 @@ pub fn icon_pill_button(
     }
     resp
 }
+
+/// Renders an authentic 4-bar animated equalizer visualizer (like YouTube Music's playing indicator).
+pub fn draw_animated_equalizer(
+    painter: &egui::Painter,
+    rect: Rect,
+    is_playing: bool,
+    time: f64,
+    color: Color32,
+) {
+    let bar_w = 2.4_f32;
+    let gap = 2.0_f32;
+    let total_w = 4.0 * bar_w + 3.0 * gap;
+    let start_x = rect.center().x - total_w * 0.5;
+    let max_h = (rect.height() - 4.0).clamp(6.0, 18.0);
+    let min_h = 3.5_f32;
+    let base_bottom = rect.bottom() - 2.0;
+
+    for i in 0..4 {
+        let h = if is_playing {
+            let (freq, phase): (f64, f64) = match i {
+                0 => (8.5, 0.0),
+                1 => (12.0, 1.4),
+                2 => (7.2, 2.7),
+                _ => (13.5, 0.8),
+            };
+            let sine = (time * freq + phase).sin().abs() as f32;
+            min_h + (max_h - min_h) * sine
+        } else {
+            match i {
+                0 => min_h + 2.0,
+                1 => min_h + 5.0,
+                2 => min_h + 4.0,
+                _ => min_h + 1.5,
+            }
+        };
+
+        let bx = start_x + (i as f32) * (bar_w + gap);
+        let bar_rect = Rect::from_min_max(
+            Pos2::new(bx, base_bottom - h),
+            Pos2::new(bx + bar_w, base_bottom),
+        );
+        painter.rect_filled(bar_rect, egui::CornerRadius::same(1), color);
+    }
+}

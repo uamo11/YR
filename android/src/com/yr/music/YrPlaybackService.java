@@ -594,6 +594,10 @@ public class YrPlaybackService extends Service {
                         dialog.dismiss();
                     } catch (Throwable ignored) {
                     }
+                    try {
+                        nativeOnMediaAction(NATIVE_PLAY, 0);
+                    } catch (Throwable ignored) {
+                    }
                 };
 
                 closeBtn.setOnClickListener(v -> cleanup.run());
