@@ -115,6 +115,20 @@ pub struct AppConfig {
     pub incognito_mode: bool,
     #[serde(default = "default_true")]
     pub personalized_recommendations: bool,
+
+    // Morphe Audio DSP
+    #[serde(default)]
+    pub morphe_spatial_audio: bool,
+    #[serde(default)]
+    pub morphe_vocal_boost: bool,
+    #[serde(default)]
+    pub morphe_dynamic_bass: bool,
+    #[serde(default = "default_true")]
+    pub morphe_limiter: bool,
+
+    // Centro familiar
+    #[serde(default)]
+    pub restricted_mode: bool,
 }
 
 fn default_true() -> bool {
@@ -150,6 +164,11 @@ impl Default for AppConfig {
             notifications_enabled: true,
             incognito_mode: false,
             personalized_recommendations: true,
+            morphe_spatial_audio: false,
+            morphe_vocal_boost: false,
+            morphe_dynamic_bass: false,
+            morphe_limiter: true,
+            restricted_mode: false,
         }
     }
 }

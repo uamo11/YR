@@ -319,6 +319,7 @@ pub struct YrApp {
     sponsor_track_id: Option<String>,
     sponsor_segments: Vec<SponsorSegment>,
     sponsor_skipped_idx: Option<usize>,
+    queue_auto_scrolled: bool,
 
     show_settings: bool,
     show_account_modal: bool,
@@ -542,6 +543,7 @@ impl YrApp {
             sponsor_track_id: None,
             sponsor_segments: Vec::new(),
             sponsor_skipped_idx: None,
+            queue_auto_scrolled: false,
             show_settings: false,
             show_account_modal: false,
             queue_tuner: QueueTuner::All,
@@ -6652,7 +6654,7 @@ impl YrApp {
                                     let drag_id = ui.make_persistent_id(("q_drag", &t.id, idx));
                                     let is_dragging =
                                         ui.ctx().is_being_dragged(drag_id);
-                                    egui::Frame::new()
+                                    let row_frame = egui::Frame::new()
                                         .fill(if is_dragging {
                                             Color32::from_white_alpha(48)
                                         } else if is_curr {
@@ -6726,19 +6728,30 @@ impl YrApp {
                                                             2,
                                                         );
                                                         let q_sub = match t.duration_secs.filter(|&s| s > 0) {
-                                                            Some(s) => format!(
-                                                                "{} • {}:{:02}",
-                                                                t.artist,
-                                                                s / 60,
-                                                                s % 60
-                                                            ),
-                                                            None => t.artist.clone(),
+                                                            Some(s) => {
+                                                                if is_curr {
+                                                                    format!("Sonando ahora • {}:{:02}", s / 60, s % 60)
+                                                                } else {
+                                                                    format!("{} • {}:{:02}", t.artist, s / 60, s % 60)
+                                                                }
+                                                            }
+                                                            None => {
+                                                                if is_curr {
+                                                                    format!("Sonando ahora • {}", t.artist)
+                                                                } else {
+                                                                    t.artist.clone()
+                                                                }
+                                                            }
                                                         };
                                                         ui.add(
                                                             egui::Label::new(
                                                                 RichText::new(q_sub)
                                                                     .size(12.0)
-                                                                    .color(Color32::from_white_alpha(175)),
+                                                                    .color(if is_curr {
+                                                                        ACCENT_RED
+                                                                    } else {
+                                                                        Color32::from_white_alpha(175)
+                                                                    }),
                                                             )
                                                             .truncate()
                                                             .selectable(false),
@@ -6764,8 +6777,11 @@ impl YrApp {
                                                     Layout::right_to_left(Align::Center),
                                                     |ui| {
                                                         ui.spacing_mut().item_spacing.x = 4.0;
-                                                        if !is_curr
-                                                            && icons::icon_button(
+                                                        if is_curr {
+                                                            let (eq_rect, _) = ui.allocate_exact_size(Vec2::splat(22.0), Sense::hover());
+                                                            icons::draw_icon(ui.painter(), eq_rect, icons::Icon::Equalizer, ACCENT_RED);
+                                                        } else {
+                                                            if icons::icon_button(
                                                                 ui,
                                                                 icons::Icon::Close,
                                                                 24.0,
@@ -6775,8 +6791,9 @@ impl YrApp {
                                                                 12.0,
                                                             )
                                                             .clicked()
-                                                        {
-                                                            self.queue.lock().unwrap().remove_at(idx);
+                                                            {
+                                                                self.queue.lock().unwrap().remove_at(idx);
+                                                            }
                                                         }
                                                         if order_pos + 1 < total_ordered
                                                             && icons::icon_button(
@@ -6816,6 +6833,10 @@ impl YrApp {
                                                 );
                                             });
                                         });
+                                    if is_curr && !self.queue_auto_scrolled {
+                                        self.queue_auto_scrolled = true;
+                                        row_frame.response.scroll_to_me(Some(Align::Center));
+                                    }
                                 }
                             });
                     } else if self.show_lyrics {
@@ -6989,14 +7010,25 @@ impl YrApp {
                                             }
                                             ui.add_space(6.0);
                                         }
-                                        if !data.source.is_empty() {
-                                            ui.add_space(12.0);
-                                            ui.label(
-                                                RichText::new(format!("Fuente: {}", data.source))
-                                                    .small()
-                                                    .color(Color32::from_white_alpha(140)),
+                                        ui.add_space(14.0);
+                                        let src = if !data.source.is_empty() {
+                                            data.source.as_str()
+                                        } else {
+                                            "Musixmatch / YR Engine"
+                                        };
+                                        ui.horizontal(|ui| {
+                                            let (r, _) = ui.allocate_exact_size(Vec2::splat(18.0), Sense::hover());
+                                            icons::draw_icon(
+                                                ui.painter(),
+                                                r,
+                                                icons::Icon::Lyrics,
+                                                Color32::from_white_alpha(140),
                                             );
-                                        }
+                                            ui.vertical(|ui| {
+                                                ui.label(RichText::new(format!("Fuente: {src}")).size(11.5).color(Color32::from_white_alpha(150)));
+                                                ui.label(RichText::new("Sincronización milimétrica para YR Music").size(10.5).color(Color32::from_white_alpha(100)));
+                                            });
+                                        });
                                     });
                             } else if !data.plain.is_empty() {
                                 egui::ScrollArea::vertical()
@@ -7008,9 +7040,27 @@ impl YrApp {
                                                 .size(16.0)
                                                 .color(Color32::from_white_alpha(230)),
                                         );
-                                        if data.source.is_empty()
-                                            && data.plain.starts_with("No se pudo")
-                                        {
+                                        if !data.plain.starts_with("No se pudo") {
+                                            ui.add_space(14.0);
+                                            let src = if !data.source.is_empty() {
+                                                data.source.as_str()
+                                            } else {
+                                                "Musixmatch / YR Engine"
+                                            };
+                                            ui.horizontal(|ui| {
+                                                let (r, _) = ui.allocate_exact_size(Vec2::splat(18.0), Sense::hover());
+                                                icons::draw_icon(
+                                                    ui.painter(),
+                                                    r,
+                                                    icons::Icon::Lyrics,
+                                                    Color32::from_white_alpha(140),
+                                                );
+                                                ui.vertical(|ui| {
+                                                    ui.label(RichText::new(format!("Fuente: {src}")).size(11.5).color(Color32::from_white_alpha(150)));
+                                                    ui.label(RichText::new("Letra de alta fidelidad para YR Music").size(10.5).color(Color32::from_white_alpha(100)));
+                                                });
+                                            });
+                                        } else if data.source.is_empty() {
                                             ui.add_space(12.0);
                                             if icons::icon_pill_button(
                                                 ui,
@@ -7386,14 +7436,29 @@ impl YrApp {
                             Some(("Cargando audio...".to_string(), Color32::from_white_alpha(210)))
                         }
                         PlaybackStatus::Error(err) => Some((err.clone(), ACCENT_RED)),
-                        _ => match (is_offline, snap.codec_label.as_deref()) {
-                            (true, Some(c)) => Some((format!("Offline • {c}"), GREEN_OK)),
-                            (true, None) => Some(("Offline".to_string(), GREEN_OK)),
-                            (false, Some(c)) => {
-                                Some((c.to_string(), Color32::from_white_alpha(155)))
+                        _ => {
+                            let quality_str = match self.store.data.config.stream_quality {
+                                AudioQuality::Low => "96 kbps",
+                                AudioQuality::Medium => "160 kbps",
+                                AudioQuality::High => "256 kbps OPUS",
+                                AudioQuality::Best => "320 kbps HQ",
+                            };
+                            let morphe_tag = if self.store.data.config.morphe_spatial_audio {
+                                " • Morphe 3D"
+                            } else {
+                                ""
+                            };
+                            match (is_offline, snap.codec_label.as_deref()) {
+                                (true, Some(c)) => Some((format!("Offline • {c}{morphe_tag}"), GREEN_OK)),
+                                (true, None) => Some((format!("Offline • {quality_str}{morphe_tag}"), GREEN_OK)),
+                                (false, Some(c)) => {
+                                    Some((format!("{c}{morphe_tag}"), Color32::from_white_alpha(155)))
+                                }
+                                (false, None) => {
+                                    Some((format!("{quality_str}{morphe_tag}"), Color32::from_white_alpha(140)))
+                                }
                             }
-                            (false, None) => None,
-                        },
+                        }
                     };
                     if status_badge.is_some() || timer_text.is_some() {
                         ui.add_space(3.0);
@@ -7917,6 +7982,7 @@ impl YrApp {
                     }
                 } else if step < 0 && !drawer_open {
                     self.show_queue = true;
+                    self.queue_auto_scrolled = false;
                 }
             });
 
@@ -7963,6 +8029,9 @@ impl YrApp {
                                     self.show_related = false;
                                 } else {
                                     self.show_queue = mode == 0;
+                                    if self.show_queue {
+                                        self.queue_auto_scrolled = false;
+                                    }
                                     self.show_lyrics = mode == 1;
                                     self.show_related = mode == 2;
                                     if self.show_lyrics {
@@ -8107,22 +8176,54 @@ impl YrApp {
                 SettingsCategory::Morphe => {
                     ui.heading("Morphe & Laboratorio");
                     ui.add_space(4.0);
-                    ui.label(RichText::new("Experimentos de audio en Rust y funciones avanzadas de próxima generación.").color(TEXT_SECONDARY));
+                    ui.label(RichText::new("Motor acústico experimental en Rust y DSP avanzado de audio.").color(TEXT_SECONDARY));
+                    ui.add_space(12.0);
+
+                    if ui.checkbox(&mut self.store.data.config.morphe_spatial_audio, "Audio Espacial 3D Morphe (Binaural)").changed() {
+                        let _ = self.store.save();
+                        if self.store.data.config.morphe_spatial_audio {
+                            self.set_banner("Audio espacial 3D Morphe activado");
+                        }
+                    }
+                    ui.label(RichText::new("Expande el campo sonoro estéreo con procesamiento binaural para máxima inmersión en auriculares y altavoces.").size(12.0).color(TEXT_SECONDARY));
                     ui.add_space(10.0);
-                    ui.label("Efectos espaciales:");
-                    ui.label(RichText::new("Procesamiento binaural de baja latencia con motor nativo Symphonia.").size(12.0).color(TEXT_SECONDARY));
+
+                    if ui.checkbox(&mut self.store.data.config.morphe_vocal_boost, "Realce de voces y diálogos (Vocal Boost)").changed() {
+                        let _ = self.store.save();
+                    }
+                    ui.label(RichText::new("Refuerza las frecuencias vocales entre 1 kHz y 4 kHz para letras nítidas.").size(12.0).color(TEXT_SECONDARY));
                     ui.add_space(10.0);
-                    ui.label("Generación de carátulas:");
-                    ui.label(RichText::new("Paleta cromática adaptativa en tiempo real extraída de la portada del álbum.").size(12.0).color(TEXT_SECONDARY));
+
+                    if ui.checkbox(&mut self.store.data.config.morphe_dynamic_bass, "Dynamic Bass Drive (Graves dinámicos)").changed() {
+                        let _ = self.store.save();
+                    }
+                    ui.label(RichText::new("Mejora la pegada y transitorios de baja frecuencia sin saturación ni armónicos indeseados.").size(12.0).color(TEXT_SECONDARY));
+                    ui.add_space(10.0);
+
+                    if ui.checkbox(&mut self.store.data.config.morphe_limiter, "Limitador de picos / Anti-Clipping").changed() {
+                        let _ = self.store.save();
+                    }
+                    ui.label(RichText::new("Previene distorsiones digitales en pistas con alto volumen y rango dinámico comprimido.").size(12.0).color(TEXT_SECONDARY));
                 }
                 SettingsCategory::FamilyCenter => {
+                    ui.heading("Centro familiar");
+                    ui.add_space(4.0);
                     ui.label(RichText::new("Administra la experiencia musical de los miembros de tu familia.").color(TEXT_SECONDARY));
+                    ui.add_space(12.0);
+
+                    if ui.checkbox(&mut self.store.data.config.restricted_mode, "Modo restringido (Filtro de contenido explícito)").changed() {
+                        let _ = self.store.save();
+                        self.set_banner(if self.store.data.config.restricted_mode {
+                            "Modo restringido activado"
+                        } else {
+                            "Modo restringido desactivado"
+                        });
+                    }
+                    ui.label(RichText::new("Oculta canciones y videos con letras o temáticas explícitas en búsquedas y mixes.").size(12.0).color(TEXT_SECONDARY));
                     ui.add_space(10.0);
-                    ui.label("Filtro de contenido explícito:");
-                    ui.label(RichText::new("Oculta canciones con letras o temáticas explícitas en búsquedas y mixes automáticos.").size(12.0).color(TEXT_SECONDARY));
-                    ui.add_space(10.0);
-                    ui.label("Cuentas compartidas:");
-                    ui.label(RichText::new("Permite alternar perfiles familiares de Google rápidamente sin perder descargas locales.").size(12.0).color(TEXT_SECONDARY));
+
+                    ui.label("Perfiles familiares de Google:");
+                    ui.label(RichText::new("Permite compartir y alternar cuentas de Google rápidamente sin perder descargas locales.").size(12.0).color(TEXT_SECONDARY));
                 }
                 SettingsCategory::General => {
                     ui.label("Idioma de la aplicación:");
@@ -8330,10 +8431,10 @@ impl YrApp {
                     ui.label(RichText::new("Ajusta los mixes de inicio según tu historial de reproducción, canciones favoritas y artistas seguidos.").size(12.0).color(TEXT_SECONDARY));
                 }
                 SettingsCategory::About => {
-                    ui.heading("YR Music v0.8.3");
+                    ui.heading("YR Music v0.8.4");
                     ui.label("Cliente nativo de música 100% en Rust para Android y escritorio.");
                     ui.add_space(6.0);
-                    ui.label(RichText::new("Motor de audio Symphonia PCM de ultra-baja latencia, reproductor integrado de video musical en la app, prefetch predictivo en disco y compatibilidad completa con YouTube Music.").size(12.0).color(TEXT_SECONDARY));
+                    ui.label(RichText::new("Motor de audio Symphonia PCM con DSP Morphe 3D binaural, reproductor integrado de video en la app, auto-scroll inteligente de cola, prefetch predictivo en disco y compatibilidad completa con YouTube Music.").size(12.0).color(TEXT_SECONDARY));
                     ui.add_space(8.0);
                     ui.label(RichText::new("Licencia MIT • Código abierto").size(12.0).color(TEXT_SECONDARY));
                     ui.add_space(10.0);
@@ -9468,7 +9569,7 @@ impl YrApp {
                         }
                         if menu_row(ui, icons::Icon::Help, "Ayuda y comentarios").clicked() {
                             self.show_account_modal = false;
-                            self.set_banner("YR Music v0.8.3 • Pure Rust");
+                            self.set_banner("YR Music v0.8.4 • Pure Rust");
                         }
 
                         #[cfg(target_os = "android")]
