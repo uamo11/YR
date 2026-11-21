@@ -25,6 +25,8 @@ import android.text.TextUtils;
 import android.util.Log;
 import android.view.Gravity;
 import android.view.KeyEvent;
+import android.view.View;
+import android.os.Message;
 import android.webkit.CookieManager;
 import android.webkit.WebChromeClient;
 import android.webkit.WebResourceRequest;
@@ -410,12 +412,12 @@ public class YrPlaybackService extends Service {
                 final Dialog dialog = new Dialog(ctx, android.R.style.Theme_Black_NoTitleBar_Fullscreen);
                 dialog.setCancelable(true);
 
-                LinearLayout root = new LinearLayout(ctx);
+                final LinearLayout root = new LinearLayout(ctx);
                 root.setOrientation(LinearLayout.VERTICAL);
                 root.setBackgroundColor(0xFF000000);
 
                 // Top Bar
-                LinearLayout topBar = new LinearLayout(ctx);
+                final LinearLayout topBar = new LinearLayout(ctx);
                 topBar.setOrientation(LinearLayout.HORIZONTAL);
                 topBar.setBackgroundColor(0xFF101014);
                 topBar.setPadding(24, 20, 24, 20);
@@ -473,7 +475,7 @@ public class YrPlaybackService extends Service {
                 ));
 
                 // WebView Video Frame
-                FrameLayout container = new FrameLayout(ctx);
+                final FrameLayout container = new FrameLayout(ctx);
                 container.setBackgroundColor(0xFF000000);
 
                 final WebView wv = new WebView(ctx);
@@ -492,35 +494,81 @@ public class YrPlaybackService extends Service {
                         : "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36";
                 ws.setUserAgentString(cleanUa);
 
-                wv.setWebChromeClient(new WebChromeClient());
+                wv.setWebChromeClient(new WebChromeClient() {
+                    private View customView;
+                    private CustomViewCallback customViewCallback;
+
+                    @Override
+                    public boolean onCreateWindow(WebView view, boolean isDialog, boolean isUserGesture, Message resultMsg) {
+                        return false;
+                    }
+
+                    @Override
+                    public void onShowCustomView(View view, CustomViewCallback callback) {
+                        if (customView != null) {
+                            callback.onCustomViewHidden();
+                            return;
+                        }
+                        customView = view;
+                        customViewCallback = callback;
+                        topBar.setVisibility(View.GONE);
+                        container.setVisibility(View.GONE);
+                        root.addView(customView, new LinearLayout.LayoutParams(
+                                LinearLayout.LayoutParams.MATCH_PARENT,
+                                LinearLayout.LayoutParams.MATCH_PARENT));
+                    }
+
+                    @Override
+                    public void onHideCustomView() {
+                        if (customView == null) return;
+                        topBar.setVisibility(View.VISIBLE);
+                        container.setVisibility(View.VISIBLE);
+                        root.removeView(customView);
+                        customView = null;
+                        if (customViewCallback != null) {
+                            customViewCallback.onCustomViewHidden();
+                            customViewCallback = null;
+                        }
+                    }
+                });
+
                 wv.setWebViewClient(new WebViewClient() {
                     @Override
                     public boolean shouldOverrideUrlLoading(WebView view, String url) {
-                        return false;
+                        if (url != null && (url.contains("youtube.com/embed") || url.contains("youtube-nocookie.com/embed"))) {
+                            return false;
+                        }
+                        // Strictly block opening external apps, intents, or external browsers
+                        return true;
                     }
 
                     @Override
                     public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
-                        return false;
-                    }
-
-                    @Override
-                    public void onPageFinished(WebView view, String url) {
-                        super.onPageFinished(view, url);
-                        // Hide banners, recommendations and comments to present a pure video player
-                        String js = "(function() {"
-                                + "  var style = document.createElement('style');"
-                                + "  style.type = 'text/css';"
-                                + "  style.innerHTML = 'header, ytm-mobile-topbar-renderer, #masthead, ytm-pivot-bar-renderer, .slim-video-metadata-actions, ytm-item-section-renderer, #related, #comments { display: none !important; } html, body { background: #000000 !important; color: #ffffff !important; }';"
-                                + "  document.head.appendChild(style);"
-                                + "  var v = document.querySelector('video');"
-                                + "  if (v) { v.play(); }"
-                                + "})();";
-                        view.evaluateJavascript(js, null);
+                        if (request != null && request.getUrl() != null) {
+                            String u = request.getUrl().toString();
+                            if (u.contains("youtube.com/embed") || u.contains("youtube-nocookie.com/embed")) {
+                                return false;
+                            }
+                        }
+                        // Strictly block opening external apps, intents, or external browsers
+                        return true;
                     }
                 });
 
-                wv.loadUrl("https://m.youtube.com/watch?v=" + videoId);
+                String embedHtml = "<!DOCTYPE html><html><head>"
+                        + "<meta name='viewport' content='width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no'>"
+                        + "<style>"
+                        + "  * { margin:0; padding:0; box-sizing:border-box; background-color:#000000; }"
+                        + "  html, body { width:100%; height:100%; overflow:hidden; display:flex; align-items:center; justify-content:center; }"
+                        + "  iframe { width:100%; height:100%; border:none; }"
+                        + "</style>"
+                        + "</head><body>"
+                        + "<iframe id='player' type='text/html' width='100%' height='100%' "
+                        + "src='https://www.youtube-nocookie.com/embed/" + videoId + "?autoplay=1&playsinline=1&controls=1&rel=0&modestbranding=1&enablejsapi=1&origin=https://music.youtube.com' "
+                        + "frameborder='0' allow='accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture' allowfullscreen></iframe>"
+                        + "</body></html>";
+
+                wv.loadDataWithBaseURL("https://music.youtube.com", embedHtml, "text/html", "UTF-8", null);
 
                 container.addView(wv, new FrameLayout.LayoutParams(
                         FrameLayout.LayoutParams.MATCH_PARENT,

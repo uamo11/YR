@@ -6371,6 +6371,7 @@ impl YrApp {
                             }
                             if a_resp.clicked() {
                                 self.is_video_mode = false;
+                                self.audio.resume();
                                 self.set_banner("Modo Canción activado");
                             }
                             let (vr, v_resp) = ui.allocate_exact_size(Vec2::new(76.0, 28.0), Sense::click());
@@ -6397,7 +6398,7 @@ impl YrApp {
                                 self.is_video_mode = true;
                                 self.audio.pause();
                                 crate::android_media::open_video(&track.id, &track.title, &track.artist);
-                                self.set_banner("Reproduciendo video musical...");
+                                self.set_banner("Reproduciendo video musical en la app");
                             }
                         });
                     });
@@ -7188,7 +7189,7 @@ impl YrApp {
                         if video_resp.clicked() {
                             self.audio.pause();
                             crate::android_media::open_video(&track.id, &track.title, &track.artist);
-                            self.set_banner("Reproduciendo video musical...");
+                            self.set_banner("Reproduciendo video musical en la app");
                         }
 
                         ui.add_space(8.0);
@@ -7208,7 +7209,7 @@ impl YrApp {
                             {
                                 self.audio.pause();
                                 crate::android_media::open_video(&track.id, &track.title, &track.artist);
-                                self.set_banner("Reproduciendo video musical...");
+                                self.set_banner("Reproduciendo video musical en la app");
                             }
                             ui.add_space(6.0);
                             if icons::icon_pill_button(
@@ -7221,6 +7222,8 @@ impl YrApp {
                             .clicked()
                             {
                                 self.is_video_mode = false;
+                                self.audio.resume();
+                                self.set_banner("Modo Audio reanudado");
                             }
                         });
                     });
@@ -8315,10 +8318,10 @@ impl YrApp {
                     ui.label(RichText::new("Ajusta los mixes de inicio según tu historial de reproducción, canciones favoritas y artistas seguidos.").size(12.0).color(TEXT_SECONDARY));
                 }
                 SettingsCategory::About => {
-                    ui.heading("YR Music v0.7.8");
+                    ui.heading("YR Music v0.7.9");
                     ui.label("Cliente nativo de música 100% en Rust para Android y escritorio.");
                     ui.add_space(6.0);
-                    ui.label(RichText::new("Motor de audio Symphonia PCM de ultra-baja latencia con ecualizador paramétrico de 5 bandas en tiempo real, prefetch predictivo en disco y compatibilidad completa con YouTube Music.").size(12.0).color(TEXT_SECONDARY));
+                    ui.label(RichText::new("Motor de audio Symphonia PCM de ultra-baja latencia, reproductor integrado de video musical en la app, prefetch predictivo en disco y compatibilidad completa con YouTube Music.").size(12.0).color(TEXT_SECONDARY));
                     ui.add_space(8.0);
                     ui.label(RichText::new("Licencia MIT • Código abierto").size(12.0).color(TEXT_SECONDARY));
                     ui.add_space(10.0);
@@ -8610,7 +8613,7 @@ impl YrApp {
                 if sheet_row(ui, icons::Icon::Video, "Ver video musical") {
                     self.audio.pause();
                     crate::android_media::open_video(&track.id, &track.title, &track.artist);
-                    self.set_banner("Reproduciendo video musical...");
+                    self.set_banner("Reproduciendo video musical en la app");
                     self.action_sheet_track = None;
                 }
                 if sheet_row(

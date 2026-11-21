@@ -12,7 +12,7 @@
 ## ✨ Características Principales
 
 - 🎛️ **Ecualizador paramétrico de 5 bandas, Bass Boost & Normalización de volumen:** Motor de audio DSP puro en Rust con filtros biquad de segundo orden en tiempo real (`60 Hz`, `230 Hz`, `910 Hz`, `3.6 kHz`, `14 kHz`), normalización automática de sonoridad (`Normalización de volumen`), saturación suave anti-clipping (`tanh`), panel centrado sin desbordamiento y preajustes audiófilos (*Plano*, *Graves +*, *Rock*, *Pop*, *Electrónica*, *Vocal*, *Acústico*).
-- 🎬 **Selector interactivo Canción / Video:** Switch dinámico estilo YouTube Music `[ 🎧 Canción | ▶ Video ]` en el reproductor a pantalla completa, superficie panorámica 16:9 con badge 1080p HD y apertura directa de video nativo en Android.
+- 🎬 **Selector interactivo Canción / Video & Reproductor Integrado:** Switch dinámico estilo YouTube Music `[ 🎧 Canción | ▶ Video ]` en el reproductor a pantalla completa, superficie panorámica 16:9 con badge 1080p HD y reproductor de video musical 100% integrado dentro de la app sin abrir el navegador ni salir de YR Music.
 - 👤 **Apartado de Perfil / Cuenta:** Pantalla completa idéntica a YouTube Music con foto de perfil, identificador de usuario Google (`Antony`, `@IsAntonyVs`), enlace directo a gestión de cuenta Google, accesos a *Tu canal*, *Descargas*, *Historial*, *Tu Recap*, *Insignias*, *Cambiar de cuenta*, *Configuración* y enlaces legales.
 - ⚙️ **Configuración categorizada en 10 secciones:**
   - 🧪 **Morphe & Centro familiar:** Experimentos de audio 3D y control familiar.
