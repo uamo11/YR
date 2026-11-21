@@ -61,6 +61,23 @@ impl PlaybackQueue {
         self.current_pos = None;
     }
 
+    /// Clears upcoming tracks in the queue while preserving the current playing track.
+    pub fn clear_upcoming(&mut self) {
+        let Some(pos) = self.current_pos else {
+            self.clear();
+            return;
+        };
+        if let Some(&curr_idx) = self.order.get(pos) {
+            if let Some(curr_track) = self.tracks.get(curr_idx).cloned() {
+                self.tracks = vec![curr_track];
+                self.order = vec![0];
+                self.current_pos = Some(0);
+                return;
+            }
+        }
+        self.clear();
+    }
+
     pub fn current_track(&self) -> Option<&Track> {
         let pos = self.current_pos?;
         let idx = *self.order.get(pos)?;
@@ -385,5 +402,17 @@ mod tests {
         assert_eq!(next.id, "fut1"); // Apple before Zebra
         let last = q.next_track(true).unwrap();
         assert_eq!(last.id, "fut2"); // Zebra
+    }
+
+    #[test]
+    fn clear_upcoming_preserves_current() {
+        let mut q = PlaybackQueue::new();
+        q.set_queue(vec![sample_track("1"), sample_track("2"), sample_track("3")], 0);
+        assert_eq!(q.len(), 3);
+        assert_eq!(q.remaining(), 2);
+        q.clear_upcoming();
+        assert_eq!(q.len(), 1);
+        assert_eq!(q.remaining(), 0);
+        assert_eq!(q.current_track().unwrap().id, "1");
     }
 }

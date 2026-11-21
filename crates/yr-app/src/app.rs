@@ -5534,11 +5534,17 @@ impl YrApp {
             });
         });
 
+        let dl_q = self.library_search.trim().to_lowercase();
         let completed: Vec<Track> = self
             .downloads
             .iter()
             .filter(|d| d.status == DownloadStatus::Completed)
             .map(|d| d.track.clone())
+            .filter(|t| {
+                dl_q.is_empty()
+                    || t.title.to_lowercase().contains(&dl_q)
+                    || t.artist.to_lowercase().contains(&dl_q)
+            })
             .collect();
 
         if !completed.is_empty() {
@@ -5623,7 +5629,16 @@ impl YrApp {
                 Delete,
             }
 
-            let items = self.downloads.clone();
+            let items: Vec<DownloadTask> = self
+                .downloads
+                .iter()
+                .filter(|t| {
+                    dl_q.is_empty()
+                        || t.track.title.to_lowercase().contains(&dl_q)
+                        || t.track.artist.to_lowercase().contains(&dl_q)
+                })
+                .cloned()
+                .collect();
             for task in items {
                 let mut pending_op: Option<DlAction> = None;
                 let mut play_completed = false;
@@ -6337,6 +6352,22 @@ impl YrApp {
                     {
                         self.set_banner("Transmitiendo a dispositivo...");
                     }
+                    if let Some(t_str) = timer_text.as_ref() {
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    RichText::new(format!("⏱ {t_str}"))
+                                        .size(11.5)
+                                        .color(ACCENT_RED),
+                                )
+                                .fill(Color32::from_white_alpha(20))
+                                .corner_radius(CornerRadius::same(12)),
+                            )
+                            .clicked()
+                        {
+                            self.show_sleep_timer_sheet = true;
+                        }
+                    }
                 });
             });
 
@@ -6450,7 +6481,7 @@ impl YrApp {
                             (q.len(), ordered, q.current_index())
                         };
                         ui.horizontal(|ui| {
-                            let hdr_w = (ui.available_width() - 196.0).max(100.0);
+                            let hdr_w = (ui.available_width() - 260.0).max(80.0);
                             ui.allocate_ui(Vec2::new(hdr_w, 30.0), |ui| {
                                 ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
                                     ui.add(
@@ -6466,6 +6497,21 @@ impl YrApp {
                                 });
                             });
                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                if queue_len > 1 {
+                                    if icons::icon_pill_button(
+                                        ui,
+                                        icons::Icon::Trash,
+                                        "Limpiar",
+                                        Color32::from_white_alpha(22),
+                                        Color32::WHITE,
+                                    )
+                                    .clicked()
+                                    {
+                                        self.queue.lock().unwrap().clear_upcoming();
+                                        self.set_banner("Cola siguiente borrada");
+                                    }
+                                    ui.add_space(6.0);
+                                }
                                 if icons::icon_pill_button(
                                     ui,
                                     icons::Icon::Radio,
@@ -8191,7 +8237,7 @@ impl YrApp {
                     ui.label(RichText::new("Ajusta los mixes de inicio según tu historial de reproducción, canciones favoritas y artistas seguidos.").size(12.0).color(TEXT_SECONDARY));
                 }
                 SettingsCategory::About => {
-                    ui.heading("YR Music v0.7.5");
+                    ui.heading("YR Music v0.7.6");
                     ui.label("Cliente nativo de música 100% en Rust para Android y escritorio.");
                     ui.add_space(6.0);
                     ui.label(RichText::new("Motor de audio Symphonia PCM de ultra-baja latencia con ecualizador paramétrico de 5 bandas en tiempo real, prefetch predictivo en disco y compatibilidad completa con YouTube Music.").size(12.0).color(TEXT_SECONDARY));
@@ -8523,17 +8569,6 @@ impl YrApp {
                 };
                 if sheet_row(ui, icons::Icon::Moon, timer_label) {
                     self.show_sleep_timer_sheet = true;
-                    self.action_sheet_track = None;
-                }
-
-                let eq_active = self.store.data.config.equalizer.enabled;
-                let eq_label = if eq_active {
-                    format!("Ecualizador ({})", self.store.data.config.equalizer.preset_name)
-                } else {
-                    "Ecualizador (Desactivado)".to_string()
-                };
-                if sheet_row(ui, icons::Icon::Equalizer, &eq_label) {
-                    self.show_equalizer_modal = true;
                     self.action_sheet_track = None;
                 }
 
@@ -9352,7 +9387,7 @@ impl YrApp {
                         }
                         if menu_row(ui, icons::Icon::Help, "Ayuda y comentarios").clicked() {
                             self.show_account_modal = false;
-                            self.set_banner("YR Music v0.7.5 • Pure Rust");
+                            self.set_banner("YR Music v0.7.6 • Pure Rust");
                         }
 
                         #[cfg(target_os = "android")]
