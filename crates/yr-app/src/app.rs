@@ -6544,21 +6544,12 @@ impl YrApp {
                             (q.len(), ordered, q.current_index())
                         };
                         ui.horizontal(|ui| {
-                            let hdr_w = (ui.available_width() - 260.0).max(80.0);
-                            ui.allocate_ui(Vec2::new(hdr_w, 30.0), |ui| {
-                                ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                                    ui.add(
-                                        egui::Label::new(
-                                            RichText::new(format!("A continuación ({queue_len})"))
-                                                .size(15.0)
-                                                .strong()
-                                                .color(Color32::WHITE),
-                                        )
-                                        .truncate()
-                                        .selectable(false),
-                                    );
-                                });
-                            });
+                            ui.label(
+                                RichText::new(format!("Cola ({queue_len})"))
+                                    .size(15.5)
+                                    .strong()
+                                    .color(Color32::WHITE),
+                            );
                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                                 if queue_len > 1 {
                                     if icons::icon_pill_button(
@@ -8336,7 +8327,7 @@ impl YrApp {
                     ui.label(RichText::new("Ajusta los mixes de inicio según tu historial de reproducción, canciones favoritas y artistas seguidos.").size(12.0).color(TEXT_SECONDARY));
                 }
                 SettingsCategory::About => {
-                    ui.heading("YR Music v0.8.1");
+                    ui.heading("YR Music v0.8.2");
                     ui.label("Cliente nativo de música 100% en Rust para Android y escritorio.");
                     ui.add_space(6.0);
                     ui.label(RichText::new("Motor de audio Symphonia PCM de ultra-baja latencia, reproductor integrado de video musical en la app, prefetch predictivo en disco y compatibilidad completa con YouTube Music.").size(12.0).color(TEXT_SECONDARY));
@@ -9474,7 +9465,7 @@ impl YrApp {
                         }
                         if menu_row(ui, icons::Icon::Help, "Ayuda y comentarios").clicked() {
                             self.show_account_modal = false;
-                            self.set_banner("YR Music v0.8.1 • Pure Rust");
+                            self.set_banner("YR Music v0.8.2 • Pure Rust");
                         }
 
                         #[cfg(target_os = "android")]
