@@ -6545,72 +6545,75 @@ impl YrApp {
                         };
                         ui.horizontal(|ui| {
                             ui.label(
-                                RichText::new(format!("Cola ({queue_len})"))
-                                    .size(15.5)
+                                RichText::new("Cola de reproducción")
+                                    .size(16.5)
                                     .strong()
                                     .color(Color32::WHITE),
                             );
                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                if queue_len > 1 {
+                                ui.label(
+                                    RichText::new(format!("{queue_len} canciones"))
+                                        .size(12.5)
+                                        .color(TEXT_SECONDARY),
+                                );
+                            });
+                        });
+                        ui.add_space(6.0);
+                        egui::ScrollArea::horizontal()
+                            .id_salt("queue_actions_and_tuner_chips")
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    ui.spacing_mut().item_spacing.x = 6.0;
+                                    if queue_len > 1 {
+                                        if icons::icon_pill_button(
+                                            ui,
+                                            icons::Icon::Trash,
+                                            "Limpiar",
+                                            Color32::from_white_alpha(22),
+                                            Color32::WHITE,
+                                        )
+                                        .clicked()
+                                        {
+                                            self.queue.lock().unwrap().clear_upcoming();
+                                            self.set_banner("Cola siguiente borrada");
+                                        }
+                                    }
                                     if icons::icon_pill_button(
                                         ui,
-                                        icons::Icon::Trash,
-                                        "Limpiar",
-                                        Color32::from_white_alpha(22),
+                                        icons::Icon::Radio,
+                                        "Radio",
+                                        Color32::from_white_alpha(24),
                                         Color32::WHITE,
                                     )
                                     .clicked()
                                     {
-                                        self.queue.lock().unwrap().clear_upcoming();
-                                        self.set_banner("Cola siguiente borrada");
+                                        self.start_radio(track.id.clone(), ctx);
                                     }
-                                    ui.add_space(6.0);
-                                }
-                                if icons::icon_pill_button(
-                                    ui,
-                                    icons::Icon::Radio,
-                                    "Radio",
-                                    Color32::from_white_alpha(24),
-                                    Color32::WHITE,
-                                )
-                                .clicked()
-                                {
-                                    self.start_radio(track.id.clone(), ctx);
-                                }
-                                ui.add_space(6.0);
-                                if icons::icon_pill_button(
-                                    ui,
-                                    icons::Icon::PlaylistAdd,
-                                    "Guardar",
-                                    Color32::from_white_alpha(24),
-                                    Color32::WHITE,
-                                )
-                                .clicked()
-                                {
-                                    let q_tracks: Vec<Track> = ordered
-                                        .iter()
-                                        .map(|(_, qt)| qt.clone())
-                                        .collect();
-                                    let pl = self
-                                        .store
-                                        .create_playlist(format!("Mix • {}", track.title));
-                                    let count = q_tracks.len();
-                                    for qt in q_tracks {
-                                        self.store.add_to_playlist(&pl.id, qt);
+                                    if icons::icon_pill_button(
+                                        ui,
+                                        icons::Icon::PlaylistAdd,
+                                        "Guardar",
+                                        Color32::from_white_alpha(24),
+                                        Color32::WHITE,
+                                    )
+                                    .clicked()
+                                    {
+                                        let q_tracks: Vec<Track> = ordered
+                                            .iter()
+                                            .map(|(_, qt)| qt.clone())
+                                            .collect();
+                                        let pl = self
+                                            .store
+                                            .create_playlist(format!("Mix • {}", track.title));
+                                        let count = q_tracks.len();
+                                        for qt in q_tracks {
+                                            self.store.add_to_playlist(&pl.id, qt);
+                                        }
+                                        self.set_banner(format!(
+                                            "Playlist guardada ({count} canciones)"
+                                        ));
                                     }
-                                    self.set_banner(format!(
-                                        "Playlist guardada ({count} canciones)"
-                                    ));
-                                }
-                            });
-                        });
-                        // Dynamic Queue Tuner Mood Pills (YouTube Music Parity)
-                        ui.add_space(4.0);
-                        egui::ScrollArea::horizontal()
-                            .id_salt("queue_tuner_chips")
-                            .show(ui, |ui| {
-                                ui.horizontal(|ui| {
-                                    ui.spacing_mut().item_spacing.x = 6.0;
+                                    ui.add_space(4.0);
                                     for tuner in [
                                         QueueTuner::All,
                                         QueueTuner::Familiar,
@@ -8327,7 +8330,7 @@ impl YrApp {
                     ui.label(RichText::new("Ajusta los mixes de inicio según tu historial de reproducción, canciones favoritas y artistas seguidos.").size(12.0).color(TEXT_SECONDARY));
                 }
                 SettingsCategory::About => {
-                    ui.heading("YR Music v0.8.2");
+                    ui.heading("YR Music v0.8.3");
                     ui.label("Cliente nativo de música 100% en Rust para Android y escritorio.");
                     ui.add_space(6.0);
                     ui.label(RichText::new("Motor de audio Symphonia PCM de ultra-baja latencia, reproductor integrado de video musical en la app, prefetch predictivo en disco y compatibilidad completa con YouTube Music.").size(12.0).color(TEXT_SECONDARY));
@@ -9465,7 +9468,7 @@ impl YrApp {
                         }
                         if menu_row(ui, icons::Icon::Help, "Ayuda y comentarios").clicked() {
                             self.show_account_modal = false;
-                            self.set_banner("YR Music v0.8.2 • Pure Rust");
+                            self.set_banner("YR Music v0.8.3 • Pure Rust");
                         }
 
                         #[cfg(target_os = "android")]
