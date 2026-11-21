@@ -27,6 +27,14 @@ pub struct EqualizerConfig {
     pub bands_db: [f32; 5],
     #[serde(default = "default_true")]
     pub loudness_normalization: bool,
+    #[serde(default)]
+    pub morphe_spatial_audio: bool,
+    #[serde(default)]
+    pub morphe_vocal_boost: bool,
+    #[serde(default)]
+    pub morphe_dynamic_bass: bool,
+    #[serde(default = "default_true")]
+    pub morphe_limiter: bool,
 }
 
 fn default_preset_name() -> String {
@@ -45,6 +53,10 @@ impl Default for EqualizerConfig {
             bass_boost_db: 0.0,
             bands_db: default_eq_bands(),
             loudness_normalization: true,
+            morphe_spatial_audio: false,
+            morphe_vocal_boost: false,
+            morphe_dynamic_bass: false,
+            morphe_limiter: true,
         }
     }
 }

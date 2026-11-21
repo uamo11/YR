@@ -823,33 +823,45 @@ impl EqualizerProcessor {
 
     fn recompute(&mut self) {
         self.coeffs.clear();
-        if !self.config.enabled {
-            return;
-        }
         let sr = self.sample_rate as f32;
-        if self.config.bass_boost_db.abs() >= 0.05 {
-            self.coeffs.push(BiquadCoeffs::low_shelf(sr, 80.0, self.config.bass_boost_db, 0.707));
+
+        if self.config.morphe_dynamic_bass {
+            self.coeffs.push(BiquadCoeffs::low_shelf(sr, 80.0, 3.8, 0.707));
         }
-        if self.config.bands_db[0].abs() >= 0.05 {
-            self.coeffs.push(BiquadCoeffs::low_shelf(sr, 60.0, self.config.bands_db[0], 0.9));
+        if self.config.morphe_vocal_boost {
+            self.coeffs.push(BiquadCoeffs::peaking(sr, 2500.0, 3.5, 1.0));
         }
-        if self.config.bands_db[1].abs() >= 0.05 {
-            self.coeffs.push(BiquadCoeffs::peaking(sr, 230.0, self.config.bands_db[1], 1.2));
-        }
-        if self.config.bands_db[2].abs() >= 0.05 {
-            self.coeffs.push(BiquadCoeffs::peaking(sr, 910.0, self.config.bands_db[2], 1.2));
-        }
-        if self.config.bands_db[3].abs() >= 0.05 {
-            self.coeffs.push(BiquadCoeffs::peaking(sr, 3600.0, self.config.bands_db[3], 1.2));
-        }
-        if self.config.bands_db[4].abs() >= 0.05 {
-            self.coeffs.push(BiquadCoeffs::high_shelf(sr, 14000.0, self.config.bands_db[4], 0.9));
+
+        if self.config.enabled {
+            if self.config.bass_boost_db.abs() >= 0.05 {
+                self.coeffs.push(BiquadCoeffs::low_shelf(sr, 80.0, self.config.bass_boost_db, 0.707));
+            }
+            if self.config.bands_db[0].abs() >= 0.05 {
+                self.coeffs.push(BiquadCoeffs::low_shelf(sr, 60.0, self.config.bands_db[0], 0.9));
+            }
+            if self.config.bands_db[1].abs() >= 0.05 {
+                self.coeffs.push(BiquadCoeffs::peaking(sr, 230.0, self.config.bands_db[1], 1.2));
+            }
+            if self.config.bands_db[2].abs() >= 0.05 {
+                self.coeffs.push(BiquadCoeffs::peaking(sr, 910.0, self.config.bands_db[2], 1.2));
+            }
+            if self.config.bands_db[3].abs() >= 0.05 {
+                self.coeffs.push(BiquadCoeffs::peaking(sr, 3600.0, self.config.bands_db[3], 1.2));
+            }
+            if self.config.bands_db[4].abs() >= 0.05 {
+                self.coeffs.push(BiquadCoeffs::high_shelf(sr, 14000.0, self.config.bands_db[4], 0.9));
+            }
         }
         self.states = vec![vec![FilterChannelState::default(); self.channels]; self.coeffs.len()];
     }
 
     pub fn process(&mut self, samples: &mut [i16], rate: u32, channels: usize) {
-        if !self.config.enabled && !self.config.loudness_normalization {
+        let has_morphe = self.config.morphe_spatial_audio
+            || self.config.morphe_vocal_boost
+            || self.config.morphe_dynamic_bass
+            || self.config.morphe_limiter;
+
+        if !self.config.enabled && !self.config.loudness_normalization && !has_morphe {
             return;
         }
         let safe_ch = channels.clamp(1, 8);
@@ -859,7 +871,7 @@ impl EqualizerProcessor {
             self.recompute();
         }
 
-        let do_eq = self.config.enabled && !self.coeffs.is_empty();
+        let do_eq = !self.coeffs.is_empty();
         let do_norm = self.config.loudness_normalization;
 
         for (i, s) in samples.iter_mut().enumerate() {
@@ -885,14 +897,32 @@ impl EqualizerProcessor {
             }
 
             let clamped = x.clamp(-1.2, 1.2);
-            let soft = if clamped > 1.0 {
-                1.0 - (-clamped + 1.0).exp() * 0.1
-            } else if clamped < -1.0 {
-                -1.0 + (clamped + 1.0).exp() * 0.1
+            let soft = if self.config.morphe_limiter {
+                if clamped > 1.0 {
+                    1.0 - (-clamped + 1.0).exp() * 0.1
+                } else if clamped < -1.0 {
+                    -1.0 + (clamped + 1.0).exp() * 0.1
+                } else {
+                    clamped
+                }
             } else {
-                clamped
+                clamped.clamp(-1.0, 1.0)
             };
             *s = (soft * 32767.0).clamp(-32768.0, 32767.0) as i16;
+        }
+
+        // Morphe 3D Binaural Spatial Expander (Mid-Side Stereo Widening)
+        if safe_ch == 2 && self.config.morphe_spatial_audio {
+            for chunk in samples.chunks_exact_mut(2) {
+                let l = chunk[0] as f32;
+                let r = chunk[1] as f32;
+                let mid = (l + r) * 0.5;
+                let side = (l - r) * 0.5;
+                let wide_side = side * 1.38;
+                let wide_mid = mid * 0.96;
+                chunk[0] = (wide_mid + wide_side).clamp(-32768.0, 32767.0) as i16;
+                chunk[1] = (wide_mid - wide_side).clamp(-32768.0, 32767.0) as i16;
+            }
         }
     }
 }

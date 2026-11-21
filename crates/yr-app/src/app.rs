@@ -807,6 +807,7 @@ impl YrApp {
         if (app.store.data.config.playback_speed - 1.0).abs() > 0.02 {
             app.audio.set_speed(app.store.data.config.playback_speed);
         }
+        app.audio.set_equalizer(app.store.data.config.equalizer.clone());
         if !app.store.data.last_queue.is_empty() {
             let idx = app
                 .store
@@ -8179,28 +8180,36 @@ impl YrApp {
                     ui.label(RichText::new("Motor acústico experimental en Rust y DSP avanzado de audio.").color(TEXT_SECONDARY));
                     ui.add_space(12.0);
 
-                    if ui.checkbox(&mut self.store.data.config.morphe_spatial_audio, "Audio Espacial 3D Morphe (Binaural)").changed() {
+                    if ui.checkbox(&mut self.store.data.config.equalizer.morphe_spatial_audio, "Audio Espacial 3D Morphe (Binaural)").changed() {
+                        self.store.data.config.morphe_spatial_audio = self.store.data.config.equalizer.morphe_spatial_audio;
+                        self.audio.set_equalizer(self.store.data.config.equalizer.clone());
                         let _ = self.store.save();
-                        if self.store.data.config.morphe_spatial_audio {
+                        if self.store.data.config.equalizer.morphe_spatial_audio {
                             self.set_banner("Audio espacial 3D Morphe activado");
                         }
                     }
                     ui.label(RichText::new("Expande el campo sonoro estéreo con procesamiento binaural para máxima inmersión en auriculares y altavoces.").size(12.0).color(TEXT_SECONDARY));
                     ui.add_space(10.0);
 
-                    if ui.checkbox(&mut self.store.data.config.morphe_vocal_boost, "Realce de voces y diálogos (Vocal Boost)").changed() {
+                    if ui.checkbox(&mut self.store.data.config.equalizer.morphe_vocal_boost, "Realce de voces y diálogos (Vocal Boost)").changed() {
+                        self.store.data.config.morphe_vocal_boost = self.store.data.config.equalizer.morphe_vocal_boost;
+                        self.audio.set_equalizer(self.store.data.config.equalizer.clone());
                         let _ = self.store.save();
                     }
                     ui.label(RichText::new("Refuerza las frecuencias vocales entre 1 kHz y 4 kHz para letras nítidas.").size(12.0).color(TEXT_SECONDARY));
                     ui.add_space(10.0);
 
-                    if ui.checkbox(&mut self.store.data.config.morphe_dynamic_bass, "Dynamic Bass Drive (Graves dinámicos)").changed() {
+                    if ui.checkbox(&mut self.store.data.config.equalizer.morphe_dynamic_bass, "Dynamic Bass Drive (Graves dinámicos)").changed() {
+                        self.store.data.config.morphe_dynamic_bass = self.store.data.config.equalizer.morphe_dynamic_bass;
+                        self.audio.set_equalizer(self.store.data.config.equalizer.clone());
                         let _ = self.store.save();
                     }
                     ui.label(RichText::new("Mejora la pegada y transitorios de baja frecuencia sin saturación ni armónicos indeseados.").size(12.0).color(TEXT_SECONDARY));
                     ui.add_space(10.0);
 
-                    if ui.checkbox(&mut self.store.data.config.morphe_limiter, "Limitador de picos / Anti-Clipping").changed() {
+                    if ui.checkbox(&mut self.store.data.config.equalizer.morphe_limiter, "Limitador de picos / Anti-Clipping").changed() {
+                        self.store.data.config.morphe_limiter = self.store.data.config.equalizer.morphe_limiter;
+                        self.audio.set_equalizer(self.store.data.config.equalizer.clone());
                         let _ = self.store.save();
                     }
                     ui.label(RichText::new("Previene distorsiones digitales en pistas con alto volumen y rango dinámico comprimido.").size(12.0).color(TEXT_SECONDARY));
@@ -8431,7 +8440,7 @@ impl YrApp {
                     ui.label(RichText::new("Ajusta los mixes de inicio según tu historial de reproducción, canciones favoritas y artistas seguidos.").size(12.0).color(TEXT_SECONDARY));
                 }
                 SettingsCategory::About => {
-                    ui.heading("YR Music v0.8.4");
+                    ui.heading("YR Music v0.8.5");
                     ui.label("Cliente nativo de música 100% en Rust para Android y escritorio.");
                     ui.add_space(6.0);
                     ui.label(RichText::new("Motor de audio Symphonia PCM con DSP Morphe 3D binaural, reproductor integrado de video en la app, auto-scroll inteligente de cola, prefetch predictivo en disco y compatibilidad completa con YouTube Music.").size(12.0).color(TEXT_SECONDARY));
@@ -9569,7 +9578,7 @@ impl YrApp {
                         }
                         if menu_row(ui, icons::Icon::Help, "Ayuda y comentarios").clicked() {
                             self.show_account_modal = false;
-                            self.set_banner("YR Music v0.8.4 • Pure Rust");
+                            self.set_banner("YR Music v0.8.5 • Pure Rust");
                         }
 
                         #[cfg(target_os = "android")]
