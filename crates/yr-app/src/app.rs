@@ -365,6 +365,7 @@ pub struct YrApp {
     search_scroller: SmoothTouchScroller,
     library_scroller: SmoothTouchScroller,
     detail_scroller: SmoothTouchScroller,
+    last_video_attached: Option<(String, i32, i32, i32, i32)>,
 }
 
 async fn play_track_bg(
@@ -375,6 +376,7 @@ async fn play_track_bg(
     audio: AudioEngine,
     tx: mpsc::UnboundedSender<AppEvent>,
     ctx: egui::Context,
+    cache_dir: PathBuf,
 ) {
     crate::android_media::update_playback(
         &track.title,
@@ -397,6 +399,23 @@ async fn play_track_bg(
 
     if let Some(local_path) = dl.find_local_path(&track.id).await {
         audio.play_file(local_path, track.duration_secs);
+        ctx.request_repaint();
+        return;
+    }
+
+    let cached_stream_file = cache_dir.join(format!("stream_{}.audio", track.id));
+    if cached_stream_file.exists()
+        && std::fs::metadata(&cached_stream_file)
+            .map(|m| m.len() > 32_768)
+            .unwrap_or(false)
+    {
+        let dl_reg = Arc::clone(&dl);
+        let track_cloned = track.clone();
+        let cached_path = cached_stream_file.clone();
+        tokio::spawn(async move {
+            let _ = dl_reg.register_cached_track(track_cloned, &cached_path).await;
+        });
+        audio.play_file(cached_stream_file, track.duration_secs);
         ctx.request_repaint();
         return;
     }
@@ -442,10 +461,18 @@ async fn play_track_bg(
             audio.play_url(url, track.id, track.duration_secs);
         }
         Err(e) => {
-            let _ = tx.send(AppEvent::StreamResolved {
-                track,
-                result: Err(e),
-            });
+            if cached_stream_file.exists()
+                && std::fs::metadata(&cached_stream_file)
+                    .map(|m| m.len() > 32_768)
+                    .unwrap_or(false)
+            {
+                audio.play_file(cached_stream_file, track.duration_secs);
+            } else {
+                let _ = tx.send(AppEvent::StreamResolved {
+                    track,
+                    result: Err(e),
+                });
+            }
         }
     }
     ctx.request_repaint();
@@ -585,6 +612,7 @@ impl YrApp {
             search_scroller: SmoothTouchScroller::default(),
             library_scroller: SmoothTouchScroller::default(),
             detail_scroller: SmoothTouchScroller::default(),
+            last_video_attached: None,
         };
 
         let (media_tx, mut media_rx) = mpsc::unbounded_channel();
@@ -604,6 +632,11 @@ impl YrApp {
         if app.store.data.config.smart_downloads {
             let dl_init = Arc::clone(&app.downloader);
             let q_init = app.store.data.config.download_quality;
+            let c_dir = app.data_dir.join("stream_cache");
+            let mut known_tracks: HashMap<String, Track> = HashMap::new();
+            for t in app.store.data.recent_tracks.iter().chain(app.store.data.liked_tracks.iter()) {
+                known_tracks.entry(t.id.clone()).or_insert_with(|| t.clone());
+            }
             let recent_to_dl: Vec<Track> = app
                 .store
                 .data
@@ -614,6 +647,22 @@ impl YrApp {
                 .cloned()
                 .collect();
             app.runtime.spawn(async move {
+                // Auto-promote any existing stream_cache tracks into DownloadManager
+                if let Ok(entries) = std::fs::read_dir(&c_dir) {
+                    for entry in entries.flatten() {
+                        let path = entry.path();
+                        if let Some(fname) = path.file_name().and_then(|n| n.to_str()) {
+                            if fname.starts_with("stream_") && fname.ends_with(".audio") {
+                                let id = fname.trim_start_matches("stream_").trim_end_matches(".audio");
+                                if dl_init.find_local_path(id).await.is_none() {
+                                    if let Some(track) = known_tracks.get(id) {
+                                        let _ = dl_init.register_cached_track(track.clone(), &path).await;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
                 for t in recent_to_dl {
                     if dl_init.find_local_path(&t.id).await.is_none() {
                         dl_init.enqueue(t, q_init).await;
@@ -628,6 +677,7 @@ impl YrApp {
         let quality_bg = app.store.data.config.stream_quality;
         let ev_tx_bg = app.event_tx.clone();
         let ctx_bg = cc.egui_ctx.clone();
+        let cache_dir_bg = app.data_dir.join("stream_cache");
         app.runtime.spawn(async move {
             use crate::android_media::MediaAction;
             while let Some(act) = media_rx.recv().await {
@@ -704,6 +754,7 @@ impl YrApp {
                                 audio_bg.clone(),
                                 ev_tx_bg.clone(),
                                 ctx_bg.clone(),
+                                cache_dir_bg.clone(),
                             )
                             .await;
                         }
@@ -719,6 +770,7 @@ impl YrApp {
                                 audio_bg.clone(),
                                 ev_tx_bg.clone(),
                                 ctx_bg.clone(),
+                                cache_dir_bg.clone(),
                             )
                             .await;
                         }
@@ -738,6 +790,7 @@ impl YrApp {
         let fin_tick = Arc::clone(&app.last_finished_counter);
         let sleep_tick = Arc::clone(&app.sleep_after_track);
         let timer_tick = Arc::clone(&app.sleep_timer_until);
+        let cache_dir_tick = app.data_dir.join("stream_cache");
         app.runtime.spawn(async move {
             use std::sync::atomic::Ordering;
             let mut interval = tokio::time::interval(Duration::from_secs(1));
@@ -793,6 +846,7 @@ impl YrApp {
                         let audio_next = audio_tick.clone();
                         let ev_next = ev_tx_tick.clone();
                         let ctx_next = ctx_tick.clone();
+                        let c_next = cache_dir_tick.clone();
                         tokio::spawn(async move {
                             play_track_bg(
                                 track,
@@ -802,6 +856,7 @@ impl YrApp {
                                 audio_next,
                                 ev_next,
                                 ctx_next,
+                                c_next,
                             )
                             .await;
                         });
@@ -1111,9 +1166,21 @@ impl YrApp {
         let dl = Arc::clone(&self.downloader);
         let quality = self.store.data.config.download_quality;
         let track_cloned = track.clone();
+        let cache_file = self
+            .data_dir
+            .join("stream_cache")
+            .join(format!("stream_{}.audio", track.id));
         self.runtime.spawn(async move {
             if dl.find_local_path(&track_cloned.id).await.is_none() {
-                dl.enqueue(track_cloned, quality).await;
+                if cache_file.exists()
+                    && std::fs::metadata(&cache_file)
+                        .map(|m| m.len() > 32_768)
+                        .unwrap_or(false)
+                {
+                    let _ = dl.register_cached_track(track_cloned, &cache_file).await;
+                } else {
+                    dl.enqueue(track_cloned, quality).await;
+                }
             }
         });
     }
@@ -1302,9 +1369,29 @@ impl YrApp {
             }
         }
 
+        let cache_file = self
+            .data_dir
+            .join("stream_cache")
+            .join(format!("stream_{}.audio", track.id));
+        let cache_file_cloned = cache_file.clone();
+        let track_cloned = track.clone();
+
         self.runtime.spawn(async move {
             if let Some(local_path) = dl.find_local_path(&track.id).await {
                 audio.play_file(local_path, track.duration_secs);
+                ctx_bg.request_repaint();
+            } else if cache_file_cloned.exists()
+                && std::fs::metadata(&cache_file_cloned)
+                    .map(|m| m.len() > 32_768)
+                    .unwrap_or(false)
+            {
+                let dl_reg = Arc::clone(&dl);
+                let t_reg = track_cloned.clone();
+                let c_path = cache_file_cloned.clone();
+                tokio::spawn(async move {
+                    let _ = dl_reg.register_cached_track(t_reg, &c_path).await;
+                });
+                audio.play_file(cache_file_cloned, track.duration_secs);
                 ctx_bg.request_repaint();
             } else {
                 let res = match provider.resolve_audio_stream(&track.id, quality).await {
@@ -1320,7 +1407,28 @@ impl YrApp {
                         wv.ok_or_else(|| rust_err.to_string())
                     }
                 };
-                let _ = tx.send(AppEvent::StreamResolved { track, result: res });
+                match res {
+                    Ok(url) => {
+                        let _ = tx.send(AppEvent::StreamResolved {
+                            track,
+                            result: Ok(url),
+                        });
+                    }
+                    Err(err) => {
+                        if cache_file_cloned.exists()
+                            && std::fs::metadata(&cache_file_cloned)
+                                .map(|m| m.len() > 32_768)
+                                .unwrap_or(false)
+                        {
+                            audio.play_file(cache_file_cloned, track.duration_secs);
+                        } else {
+                            let _ = tx.send(AppEvent::StreamResolved {
+                                track,
+                                result: Err(err),
+                            });
+                        }
+                    }
+                }
                 ctx_bg.request_repaint();
             }
 
@@ -6424,6 +6532,7 @@ impl YrApp {
                 {
                     self.now_playing_open = false;
                     self.is_video_mode = false;
+                    self.last_video_attached = None;
                     crate::android_media::hide_embedded_video();
                 }
 
@@ -6465,6 +6574,7 @@ impl YrApp {
                             }
                             if a_resp.clicked() {
                                 self.is_video_mode = false;
+                                self.last_video_attached = None;
                                 crate::android_media::hide_embedded_video();
                                 self.audio.resume();
                                 self.set_banner("Modo Canción activado");
@@ -7331,7 +7441,11 @@ impl YrApp {
                             let h_px = (video_rect.height() * ppp).round() as i32;
                             let start_sec = snap.position_secs.max(0.0) as u64;
 
-                            crate::android_media::attach_embedded_video(&track.id, x_px, y_px, w_px, h_px, start_sec);
+                            let geom = (track.id.clone(), x_px, y_px, w_px, h_px);
+                            if self.last_video_attached != Some(geom.clone()) {
+                                self.last_video_attached = Some(geom);
+                                crate::android_media::attach_embedded_video(&track.id, x_px, y_px, w_px, h_px, start_sec);
+                            }
 
                             if video_resp.clicked() {
                                 let is_playing = snap.status == PlaybackStatus::Playing;
@@ -7354,6 +7468,7 @@ impl YrApp {
                                 .clicked()
                                 {
                                     self.is_video_mode = false;
+                                    self.last_video_attached = None;
                                     crate::android_media::hide_embedded_video();
                                     self.audio.resume();
                                     self.set_banner("Modo Canción reanudado");
@@ -7362,7 +7477,10 @@ impl YrApp {
                         });
                     } else {
                         // Main Cover Now Playing view
-                        crate::android_media::hide_embedded_video();
+                        if self.last_video_attached.is_some() {
+                            self.last_video_attached = None;
+                            crate::android_media::hide_embedded_video();
+                        }
                     ui.add_space(4.0);
                     let art_size = (avail_w - 28.0).min(body_h * 0.43).clamp(155.0, 290.0);
                     ui.vertical_centered(|ui| {
@@ -7418,19 +7536,20 @@ impl YrApp {
                                     .duration_secs
                                     .or(track.duration_secs.map(|d| d as f64))
                                     .unwrap_or(0.0);
+                                let seek_step = self.store.data.config.seek_seconds as f64;
                                 let delta = if pos.x < art_rect.center().x {
-                                    -10.0
+                                    -seek_step
                                 } else {
-                                    10.0
+                                    seek_step
                                 };
                                 let target = (snap.position_secs + delta)
-                                    .clamp(0.0, total_dur.max(snap.position_secs + 10.0));
+                                    .clamp(0.0, total_dur.max(snap.position_secs + seek_step));
                                 self.audio.seek(Duration::from_secs_f64(target));
                                 self.last_media_sync = None;
                                 self.set_banner(if delta < 0.0 {
-                                    "-10s"
+                                    format!("-{seek_step:.0}s")
                                 } else {
-                                    "+10s"
+                                    format!("+{seek_step:.0}s")
                                 });
                             }
                         }
@@ -8373,6 +8492,20 @@ impl YrApp {
                     if slider_resp.drag_stopped() || slider_resp.lost_focus() {
                         let _ = self.store.save();
                     }
+                    ui.add_space(10.0);
+                    ui.label("Tocar dos veces para buscar:");
+                    ui.add_space(4.0);
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing = Vec2::new(8.0, 8.0);
+                        for secs in [5_u32, 10, 15, 20, 30] {
+                            let label = format!("{secs} s");
+                            let selected = self.store.data.config.seek_seconds == secs;
+                            if settings_choice_pill(ui, selected, &label) {
+                                self.store.data.config.seek_seconds = secs;
+                                let _ = self.store.save();
+                            }
+                        }
+                    });
                 }
                 SettingsCategory::Playback => {
                     ui.label("Calidad de streaming de audio:");
@@ -8439,6 +8572,11 @@ impl YrApp {
                         let _ = self.store.save();
                     }
                     ui.label(RichText::new("Ajusta suavemente el nivel de volumen para mantener un nivel uniforme en todas las pistas.").size(12.0).color(TEXT_SECONDARY));
+                    ui.add_space(8.0);
+                    if ui.checkbox(&mut self.store.data.config.gapless_playback, "Reproducción sin pausas (Gapless)").changed() {
+                        let _ = self.store.save();
+                    }
+                    ui.label(RichText::new("Elimina los silencios entre pistas continuas y precarga automáticamente la siguiente canción.").size(12.0).color(TEXT_SECONDARY));
                     ui.add_space(8.0);
                     if ui.checkbox(&mut self.store.data.config.autoplay_radio, "Radio automática continua al terminar la cola").changed() {
                         let _ = self.store.save();
@@ -8617,7 +8755,7 @@ impl YrApp {
                     ui.label(RichText::new("Ajusta los mixes de inicio según tu historial de reproducción, canciones favoritas y artistas seguidos.").size(12.0).color(TEXT_SECONDARY));
                 }
                 SettingsCategory::About => {
-                    ui.heading("YR Music v0.8.9");
+                    ui.heading("YR Music v0.9.0");
                     ui.label("Cliente nativo de música 100% en Rust para Android y escritorio.");
                     ui.add_space(6.0);
                     ui.label(RichText::new("Motor de audio Symphonia PCM con DSP Morphe 3D binaural, reproductor integrado de video en la app, auto-scroll inteligente de cola, prefetch predictivo en disco y compatibilidad completa con YouTube Music.").size(12.0).color(TEXT_SECONDARY));
@@ -8910,11 +9048,20 @@ impl YrApp {
                     }
                 }
                 if sheet_row(ui, icons::Icon::Video, "Ver video musical") {
+                    let cur_id = self
+                        .queue
+                        .lock()
+                        .ok()
+                        .and_then(|q| q.current_track().map(|t| t.id.clone()));
+                    if cur_id.as_deref() != Some(&track.id) {
+                        self.play_track_in_list(vec![track.clone()], 0, ctx);
+                    }
                     self.audio.pause();
-                    let start_sec = self.audio.snapshot().position_secs.max(0.0) as u64;
-                    crate::android_media::open_video(&track.id, &track.title, &track.artist, start_sec);
-                    self.set_banner(format!("Video sincronizado en {}:{:02}", start_sec / 60, start_sec % 60));
+                    self.is_video_mode = true;
+                    self.last_video_attached = None;
+                    self.now_playing_open = true;
                     self.action_sheet_track = None;
+                    self.set_banner("Reproduciendo video in-place");
                 }
                 if sheet_row(
                     ui,
@@ -9780,7 +9927,7 @@ impl YrApp {
                         }
                         if menu_row(ui, icons::Icon::Help, "Ayuda y comentarios").clicked() {
                             self.show_account_modal = false;
-                            self.set_banner("YR Music v0.8.9 • Pure Rust");
+                            self.set_banner("YR Music v0.9.0 • Pure Rust");
                         }
 
                         #[cfg(target_os = "android")]

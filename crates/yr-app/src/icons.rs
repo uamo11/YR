@@ -116,7 +116,7 @@ impl Icon {
             Icon::Cast => '\u{e307}',             // cast
             Icon::Channel => '\u{e851}',          // account_box
             Icon::Recap => '\u{e020}',            // fast_rewind
-            Icon::Badge => '\u{e65f}',            // auto_awesome
+            Icon::Badge => '\u{ea65}',            // celebration / badges
             Icon::SwitchAccount => '\u{e9ed}',     // switch_account
             Icon::Help => '\u{e8fd}',             // help_outline
             Icon::Video => '\u{f06a}',            // smart_display

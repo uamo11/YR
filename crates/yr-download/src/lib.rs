@@ -177,6 +177,74 @@ impl DownloadManager {
             .sum()
     }
 
+    /// Directly registers an already-cached local audio file (e.g. from stream_cache)
+    /// into the permanent downloads folder with sidecar metadata for instant offline availability.
+    pub async fn register_cached_track(
+        &self,
+        mut track: Track,
+        source_audio_file: &Path,
+    ) -> Result<PathBuf, String> {
+        if !source_audio_file.exists() {
+            return Err("Source file does not exist".to_string());
+        }
+        let size = std::fs::metadata(source_audio_file)
+            .map(|m| m.len())
+            .unwrap_or(0);
+        if size < 32_768 {
+            return Err("File too small to be valid audio".to_string());
+        }
+
+        let base_name = format!(
+            "{} - {} [{}]",
+            sanitize_filename(&track.artist),
+            sanitize_filename(&track.title),
+            sanitize_filename(&track.id)
+        );
+        let ext = source_audio_file
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("m4a");
+        let final_path = self.download_dir.join(format!("{base_name}.{ext}"));
+
+        // Copy if not already in final location
+        if source_audio_file != final_path {
+            if let Err(e) = std::fs::copy(source_audio_file, &final_path) {
+                return Err(format!("Failed to copy cached file: {e}"));
+            }
+        }
+
+        track.local_path = Some(final_path.to_string_lossy().into_owned());
+        let sidecar = sidecar_path_for(&final_path);
+        let audio_filename = final_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default()
+            .to_string();
+        let meta = SidecarMeta {
+            track: track.clone(),
+            audio_filename,
+        };
+        if let Ok(json) = serde_json::to_string_pretty(&meta) {
+            let _ = tokio::fs::write(&sidecar, json).await;
+        }
+
+        let mut guard = self.tasks.lock().await;
+        guard.insert(
+            track.id.clone(),
+            DownloadTask {
+                track,
+                quality: AudioQuality::High,
+                status: DownloadStatus::Completed,
+                downloaded_bytes: size,
+                total_bytes: Some(size),
+                speed_bps: 0,
+                output_path: Some(final_path.clone()),
+            },
+        );
+
+        Ok(final_path)
+    }
+
     pub async fn enqueue(self: &Arc<Self>, track: Track, quality: AudioQuality) {
         let track_id = track.id.clone();
         {

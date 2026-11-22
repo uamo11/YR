@@ -141,6 +141,16 @@ pub struct AppConfig {
     // Centro familiar
     #[serde(default)]
     pub restricted_mode: bool,
+
+    // Comportamiento de reproducción y búsqueda
+    #[serde(default = "default_seek_seconds")]
+    pub seek_seconds: u32,
+    #[serde(default = "default_true")]
+    pub gapless_playback: bool,
+}
+
+fn default_seek_seconds() -> u32 {
+    10
 }
 
 fn default_true() -> bool {
@@ -181,6 +191,8 @@ impl Default for AppConfig {
             morphe_dynamic_bass: false,
             morphe_limiter: true,
             restricted_mode: false,
+            seek_seconds: default_seek_seconds(),
+            gapless_playback: true,
         }
     }
 }

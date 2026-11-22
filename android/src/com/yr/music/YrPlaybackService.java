@@ -460,28 +460,26 @@ public class YrPlaybackService extends Service {
                     ws.setJavaScriptEnabled(true);
                     ws.setMediaPlaybackRequiresUserGesture(false);
                     ws.setDomStorageEnabled(true);
+                    ws.setSupportMultipleWindows(false);
+                    ws.setJavaScriptCanOpenWindowsAutomatically(false);
                     ws.setCacheMode(WebSettings.LOAD_DEFAULT);
                     ws.setUserAgentString("Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36");
 
-                    sEmbeddedWebView.setWebChromeClient(new WebChromeClient());
+                    sEmbeddedWebView.setWebChromeClient(new WebChromeClient() {
+                        @Override
+                        public boolean onCreateWindow(WebView view, boolean isDialog, boolean isUserGesture, Message resultMsg) {
+                            return false; // Prevent opening any external popup window
+                        }
+                    });
                     sEmbeddedWebView.setWebViewClient(new WebViewClient() {
                         @Override
                         public boolean shouldOverrideUrlLoading(WebView view, String url) {
-                            if (url != null && (url.contains("youtube.com/embed") || url.contains("youtube-nocookie.com/embed"))) {
-                                return false;
-                            }
-                            return true;
+                            return true; // Keep strictly within embed, never open external browser
                         }
 
                         @Override
                         public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
-                            if (request != null && request.getUrl() != null) {
-                                String u = request.getUrl().toString();
-                                if (u.contains("youtube.com/embed") || u.contains("youtube-nocookie.com/embed")) {
-                                    return false;
-                                }
-                            }
-                            return true;
+                            return true; // Keep strictly within embed, never open external browser
                         }
                     });
 
@@ -512,10 +510,11 @@ public class YrPlaybackService extends Service {
                             + "  * { margin:0; padding:0; box-sizing:border-box; background-color:#000000; }"
                             + "  html, body { width:100%; height:100%; overflow:hidden; display:flex; align-items:center; justify-content:center; }"
                             + "  iframe { width:100%; height:100%; border:none; }"
+                            + "  .ytp-title-link, .ytp-watermark, .ytp-youtube-button, .ytp-pause-overlay, .ytp-impression-link, .ytp-contextmenu { display:none !important; pointer-events:none !important; }"
                             + "</style>"
                             + "</head><body>"
                             + "<iframe id='player' type='text/html' width='100%' height='100%' "
-                            + "src='https://www.youtube-nocookie.com/embed/" + videoId + "?autoplay=1&playsinline=1&controls=1&rel=0&modestbranding=1&enablejsapi=1&origin=https://music.youtube.com" + startParam + "' "
+                            + "src='https://www.youtube-nocookie.com/embed/" + videoId + "?autoplay=1&playsinline=1&controls=1&rel=0&modestbranding=1&enablejsapi=1&origin=https://music.youtube.com&fs=0&iv_load_policy=3" + startParam + "' "
                             + "frameborder='0' allow='accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture' allowfullscreen></iframe>"
                             + "</body></html>";
                     sEmbeddedWebView.loadDataWithBaseURL("https://music.youtube.com", embedHtml, "text/html", "UTF-8", null);
