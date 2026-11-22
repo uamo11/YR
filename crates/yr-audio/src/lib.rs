@@ -1126,8 +1126,10 @@ fn stream_client_ua(url: &str) -> Option<&'static str> {
         Some("Mozilla/5.0 (Macintosh; Intel Mac OS X 14_6) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15")
     } else if url.contains("c=IOS") {
         Some("com.google.ios.youtube/19.29.1 (iPhone16,2; U; CPU iOS 17_5_1 like Mac OS X;)")
+    } else if url.contains("c=ANDROID_VR") {
+        Some("com.google.android.apps.youtube.vr.oculus/1.60.19 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip")
     } else {
-        None
+        Some("Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36")
     }
 }
 
@@ -1311,10 +1313,7 @@ fn open_progressive_stream(
         }
 
         let _ = writer.flush();
-        if !cancel_bg.load(Ordering::Relaxed)
-            && written_total > 4096
-            && total.is_none_or(|t| written_total >= t)
-        {
+        if written_total > 4096 && total.is_none_or(|t| written_total >= t) {
             if let Some(dest) = final_cache {
                 let _ = std::fs::rename(&path_bg, dest);
             }
@@ -1416,13 +1415,8 @@ fn prefetch_stream_to_cache(
             }
         }
         let _ = writer.flush();
-        if !cancel.load(Ordering::Relaxed)
-            && written > 4096
-            && expected_len.is_none_or(|t| written >= t)
-        {
+        if written > 4096 && expected_len.is_none_or(|t| written >= t) {
             let _ = std::fs::rename(&part_path, &final_path);
-        } else {
-            let _ = std::fs::remove_file(&part_path);
         }
     });
 }
@@ -1442,7 +1436,12 @@ mod tests {
         assert!(stream_client_ua("https://rr1.googlevideo.com/videoplayback?c=VISIONOS")
             .unwrap_or("")
             .contains("Macintosh"));
-        assert!(stream_client_ua("https://rr1.googlevideo.com/videoplayback?c=ANDROID").is_none());
+        assert!(stream_client_ua("https://rr1.googlevideo.com/videoplayback?c=ANDROID_VR")
+            .unwrap_or("")
+            .contains("oculus"));
+        assert!(stream_client_ua("https://rr1.googlevideo.com/videoplayback?c=ANDROID")
+            .unwrap_or("")
+            .contains("Mobile"));
     }
 
     #[test]

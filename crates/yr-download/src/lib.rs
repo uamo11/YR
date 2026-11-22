@@ -17,6 +17,40 @@ const PROBE_CHUNK_BYTES: u64 = 256 * 1024;
 const PARALLEL_CHUNK_BYTES: u64 = 1024 * 1024;
 const PARALLEL_CONNECTIONS: usize = 4;
 
+fn stream_client_ua(url: &str) -> Option<&'static str> {
+    if url.contains("c=MWEB") || url.contains("c=WEB") {
+        Some("Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36")
+    } else if url.contains("c=VISIONOS") {
+        Some("Mozilla/5.0 (Macintosh; Intel Mac OS X 14_6) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15")
+    } else if url.contains("c=IOS") {
+        Some("com.google.ios.youtube/19.29.1 (iPhone16,2; U; CPU iOS 17_5_1 like Mac OS X;)")
+    } else if url.contains("c=ANDROID_VR") {
+        Some("com.google.android.apps.youtube.vr.oculus/1.60.19 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip")
+    } else {
+        Some("Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36")
+    }
+}
+
+fn build_download_request(
+    client: &reqwest::Client,
+    url: &str,
+    range_val: Option<String>,
+) -> reqwest::RequestBuilder {
+    let mut r = client.get(url);
+    if let Some(ua) = stream_client_ua(url) {
+        r = r.header(reqwest::header::USER_AGENT, ua);
+    }
+    if url.contains("c=MWEB") || url.contains("c=WEB") {
+        r = r
+            .header(reqwest::header::ORIGIN, "https://m.youtube.com")
+            .header(reqwest::header::REFERER, "https://m.youtube.com/");
+    }
+    if let Some(rv) = range_val {
+        r = r.header(RANGE, rv);
+    }
+    r
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DownloadStatus {
     Queued,
@@ -437,12 +471,12 @@ impl DownloadManager {
             }
         }
 
-        let mut req = self.http.get(&stream.url);
-        if existing_len > 0 {
-            req = req.header(RANGE, format!("bytes={existing_len}-"));
-        }
-
-        let resp = req
+        let range_hdr = if existing_len > 0 {
+            Some(format!("bytes={existing_len}-"))
+        } else {
+            None
+        };
+        let resp = build_download_request(&self.http, &stream.url, range_hdr)
             .send()
             .await
             .map_err(|e| DownloadInternalError::Retryable(e.to_string()))?;
@@ -543,13 +577,14 @@ impl DownloadManager {
         pause_rx: &watch::Receiver<bool>,
     ) -> Result<Option<PathBuf>, DownloadInternalError> {
         let probe_end = PROBE_CHUNK_BYTES - 1;
-        let first_resp = self
-            .http
-            .get(url)
-            .header(RANGE, format!("bytes=0-{probe_end}"))
-            .send()
-            .await
-            .map_err(|e| DownloadInternalError::Retryable(e.to_string()))?;
+        let first_resp = build_download_request(
+            &self.http,
+            url,
+            Some(format!("bytes=0-{probe_end}")),
+        )
+        .send()
+        .await
+        .map_err(|e| DownloadInternalError::Retryable(e.to_string()))?;
 
         if first_resp.status().as_u16() != 206 {
             return Ok(None);
@@ -661,11 +696,13 @@ impl DownloadManager {
                         if attempt > 0 {
                             tokio::time::sleep(Duration::from_millis(200)).await;
                         }
-                        match http
-                            .get(&url)
-                            .header(RANGE, format!("bytes={start}-{end}"))
-                            .send()
-                            .await
+                        match build_download_request(
+                            &http,
+                            &url,
+                            Some(format!("bytes={start}-{end}")),
+                        )
+                        .send()
+                        .await
                         {
                             Ok(resp) if resp.status().is_success() || resp.status().as_u16() == 206 => {
                                 let mut buf = Vec::with_capacity((end - start + 1) as usize);

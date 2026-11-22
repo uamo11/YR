@@ -1172,6 +1172,10 @@ impl YrApp {
             .data_dir
             .join("stream_cache")
             .join(format!("stream_{}.audio", track.id));
+        let cache_tmp = self
+            .data_dir
+            .join("stream_cache")
+            .join(format!("stream_{}.tmp", track.id));
         self.runtime.spawn(async move {
             if dl.find_local_path(&track_cloned.id).await.is_none() {
                 if cache_file.exists()
@@ -1180,6 +1184,12 @@ impl YrApp {
                         .unwrap_or(false)
                 {
                     let _ = dl.register_cached_track(track_cloned, &cache_file).await;
+                } else if cache_tmp.exists()
+                    && std::fs::metadata(&cache_tmp)
+                        .map(|m| m.len() > 65_536)
+                        .unwrap_or(false)
+                {
+                    let _ = dl.register_cached_track(track_cloned, &cache_tmp).await;
                 } else {
                     dl.enqueue(track_cloned, quality).await;
                 }
@@ -8818,7 +8828,7 @@ impl YrApp {
                     ui.label(RichText::new("Ajusta los mixes de inicio según tu historial de reproducción, canciones favoritas y artistas seguidos.").size(12.0).color(TEXT_SECONDARY));
                 }
                 SettingsCategory::About => {
-                    ui.heading("YR Music v0.9.1");
+                    ui.heading("YR Music v0.9.2");
                     ui.label("Cliente nativo de música 100% en Rust para Android y escritorio.");
                     ui.add_space(6.0);
                     ui.label(RichText::new("Motor de audio Symphonia PCM con DSP Morphe 3D binaural, reproductor integrado de video en la app, auto-scroll inteligente de cola, prefetch predictivo en disco y compatibilidad completa con YouTube Music.").size(12.0).color(TEXT_SECONDARY));
@@ -9990,7 +10000,7 @@ impl YrApp {
                         }
                         if menu_row(ui, icons::Icon::Help, "Ayuda y comentarios").clicked() {
                             self.show_account_modal = false;
-                            self.set_banner("YR Music v0.9.1 • Pure Rust");
+                            self.set_banner("YR Music v0.9.2 • Pure Rust");
                         }
 
                         #[cfg(target_os = "android")]
