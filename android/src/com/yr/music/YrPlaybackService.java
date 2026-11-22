@@ -1,5 +1,6 @@
 package com.yr.music;
 
+import android.app.Activity;
 import android.app.Dialog;
 import android.app.Notification;
 import android.app.NotificationChannel;
@@ -29,6 +30,7 @@ import android.util.Log;
 import android.view.Gravity;
 import android.view.KeyEvent;
 import android.view.View;
+import android.view.ViewGroup;
 import android.os.Message;
 import android.webkit.CookieManager;
 import android.webkit.WebChromeClient;
@@ -75,6 +77,9 @@ public class YrPlaybackService extends Service {
     private static volatile YrPlaybackService activeInstance = null;
     private static volatile String lastMetaKey = "";
     private static volatile Boolean lastNotifPlaying = null;
+    private static volatile FrameLayout sEmbeddedContainer = null;
+    private static volatile WebView sEmbeddedWebView = null;
+    private static volatile String sCurrentVideoId = null;
 
     static {
         try {
@@ -408,6 +413,154 @@ public class YrPlaybackService extends Service {
         } catch (Throwable ignored) {
             return false;
         }
+    }
+
+    public static String extractVideoId(final String videoUrlOrId) {
+        if (videoUrlOrId == null) return "";
+        String videoId = videoUrlOrId.trim();
+        if (videoId.contains("v=")) {
+            videoId = videoId.substring(videoId.indexOf("v=") + 2);
+            int amp = videoId.indexOf("&");
+            if (amp != -1) videoId = videoId.substring(0, amp);
+        } else if (videoId.contains("youtu.be/")) {
+            videoId = videoId.substring(videoId.indexOf("youtu.be/") + 9);
+            int q = videoId.indexOf("?");
+            if (q != -1) videoId = videoId.substring(0, q);
+        } else if (videoId.contains("embed/")) {
+            videoId = videoId.substring(videoId.indexOf("embed/") + 6);
+            int q = videoId.indexOf("?");
+            if (q != -1) videoId = videoId.substring(0, q);
+        }
+        return videoId;
+    }
+
+    public static void attachEmbeddedVideo(final Context ctx, final String videoUrlOrId, final int x, final int y, final int width, final int height, final long startSecs) {
+        if (ctx == null || videoUrlOrId == null) return;
+        final Activity act = (ctx instanceof Activity) ? (Activity) ctx : null;
+        if (act == null) return;
+
+        new Handler(Looper.getMainLooper()).post(() -> {
+            try {
+                // Pause background audio so it doesn't double-play with the music video
+                try {
+                    nativeOnMediaAction(NATIVE_PAUSE, 0);
+                } catch (Throwable ignored) {
+                }
+
+                final String videoId = extractVideoId(videoUrlOrId);
+                if (videoId.isEmpty()) return;
+
+                if (sEmbeddedContainer == null) {
+                    sEmbeddedContainer = new FrameLayout(act);
+                    sEmbeddedContainer.setBackgroundColor(0xFF000000);
+
+                    sEmbeddedWebView = new WebView(act);
+                    sEmbeddedWebView.setBackgroundColor(0xFF000000);
+                    WebSettings ws = sEmbeddedWebView.getSettings();
+                    ws.setJavaScriptEnabled(true);
+                    ws.setMediaPlaybackRequiresUserGesture(false);
+                    ws.setDomStorageEnabled(true);
+                    ws.setCacheMode(WebSettings.LOAD_DEFAULT);
+                    ws.setUserAgentString("Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36");
+
+                    sEmbeddedWebView.setWebChromeClient(new WebChromeClient());
+                    sEmbeddedWebView.setWebViewClient(new WebViewClient() {
+                        @Override
+                        public boolean shouldOverrideUrlLoading(WebView view, String url) {
+                            if (url != null && (url.contains("youtube.com/embed") || url.contains("youtube-nocookie.com/embed"))) {
+                                return false;
+                            }
+                            return true;
+                        }
+
+                        @Override
+                        public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
+                            if (request != null && request.getUrl() != null) {
+                                String u = request.getUrl().toString();
+                                if (u.contains("youtube.com/embed") || u.contains("youtube-nocookie.com/embed")) {
+                                    return false;
+                                }
+                            }
+                            return true;
+                        }
+                    });
+
+                    sEmbeddedContainer.addView(sEmbeddedWebView, new FrameLayout.LayoutParams(
+                            FrameLayout.LayoutParams.MATCH_PARENT,
+                            FrameLayout.LayoutParams.MATCH_PARENT
+                    ));
+
+                    act.getWindow().addContentView(sEmbeddedContainer, new ViewGroup.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                            ViewGroup.LayoutParams.MATCH_PARENT
+                    ));
+                }
+
+                FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(width, height);
+                lp.gravity = Gravity.TOP | Gravity.START;
+                lp.leftMargin = x;
+                lp.topMargin = y;
+                sEmbeddedContainer.setLayoutParams(lp);
+                sEmbeddedContainer.setVisibility(View.VISIBLE);
+
+                if (sCurrentVideoId == null || !sCurrentVideoId.equals(videoId)) {
+                    sCurrentVideoId = videoId;
+                    String startParam = (startSecs > 0) ? "&start=" + startSecs : "";
+                    String embedHtml = "<!DOCTYPE html><html><head>"
+                            + "<meta name='viewport' content='width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no'>"
+                            + "<style>"
+                            + "  * { margin:0; padding:0; box-sizing:border-box; background-color:#000000; }"
+                            + "  html, body { width:100%; height:100%; overflow:hidden; display:flex; align-items:center; justify-content:center; }"
+                            + "  iframe { width:100%; height:100%; border:none; }"
+                            + "</style>"
+                            + "</head><body>"
+                            + "<iframe id='player' type='text/html' width='100%' height='100%' "
+                            + "src='https://www.youtube-nocookie.com/embed/" + videoId + "?autoplay=1&playsinline=1&controls=1&rel=0&modestbranding=1&enablejsapi=1&origin=https://music.youtube.com" + startParam + "' "
+                            + "frameborder='0' allow='accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture' allowfullscreen></iframe>"
+                            + "</body></html>";
+                    sEmbeddedWebView.loadDataWithBaseURL("https://music.youtube.com", embedHtml, "text/html", "UTF-8", null);
+                } else {
+                    sEmbeddedWebView.evaluateJavascript("document.querySelector('iframe').contentWindow.postMessage('{\"event\":\"command\",\"func\":\"playVideo\",\"args\":\"\"}', '*');", null);
+                    if (startSecs > 0) {
+                        sEmbeddedWebView.evaluateJavascript("document.querySelector('iframe').contentWindow.postMessage('{\"event\":\"command\",\"func\":\"seekTo\",\"args\":[" + startSecs + ", true]}', '*');", null);
+                    }
+                }
+            } catch (Throwable t) {
+                Log.w("YrPlaybackService", "attachEmbeddedVideo failed: " + t);
+            }
+        });
+    }
+
+    public static void hideEmbeddedVideo(final Context ctx) {
+        new Handler(Looper.getMainLooper()).post(() -> {
+            try {
+                if (sEmbeddedContainer != null) {
+                    sEmbeddedContainer.setVisibility(View.GONE);
+                }
+                if (sEmbeddedWebView != null) {
+                    sEmbeddedWebView.evaluateJavascript("document.querySelector('iframe').contentWindow.postMessage('{\"event\":\"command\",\"func\":\"pauseVideo\",\"args\":\"\"}', '*');", null);
+                }
+            } catch (Throwable ignored) {
+            }
+        });
+    }
+
+    public static void controlEmbeddedVideo(final Context ctx, final String command, final double arg) {
+        new Handler(Looper.getMainLooper()).post(() -> {
+            try {
+                if (sEmbeddedWebView == null || sEmbeddedContainer == null || sEmbeddedContainer.getVisibility() != View.VISIBLE) {
+                    return;
+                }
+                if ("play".equalsIgnoreCase(command)) {
+                    sEmbeddedWebView.evaluateJavascript("document.querySelector('iframe').contentWindow.postMessage('{\"event\":\"command\",\"func\":\"playVideo\",\"args\":\"\"}', '*');", null);
+                } else if ("pause".equalsIgnoreCase(command)) {
+                    sEmbeddedWebView.evaluateJavascript("document.querySelector('iframe').contentWindow.postMessage('{\"event\":\"command\",\"func\":\"pauseVideo\",\"args\":\"\"}', '*');", null);
+                } else if ("seekTo".equalsIgnoreCase(command)) {
+                    sEmbeddedWebView.evaluateJavascript("document.querySelector('iframe').contentWindow.postMessage('{\"event\":\"command\",\"func\":\"seekTo\",\"args\":[" + (long) arg + ", true]}', '*');", null);
+                }
+            } catch (Throwable ignored) {
+            }
+        });
     }
 
     public static void openVideo(final Context ctx, final String videoUrl) {

@@ -600,6 +600,27 @@ impl YrApp {
                 ctx_cookie.request_repaint();
             }
         });
+
+        if app.store.data.config.smart_downloads {
+            let dl_init = Arc::clone(&app.downloader);
+            let q_init = app.store.data.config.download_quality;
+            let recent_to_dl: Vec<Track> = app
+                .store
+                .data
+                .recent_tracks
+                .iter()
+                .chain(app.store.data.liked_tracks.iter())
+                .take(20)
+                .cloned()
+                .collect();
+            app.runtime.spawn(async move {
+                for t in recent_to_dl {
+                    if dl_init.find_local_path(&t.id).await.is_none() {
+                        dl_init.enqueue(t, q_init).await;
+                    }
+                }
+            });
+        }
         let audio_bg = app.audio.clone();
         let queue_bg = Arc::clone(&app.queue);
         let dl_bg = Arc::clone(&app.downloader);
@@ -1080,6 +1101,23 @@ impl YrApp {
         });
     }
 
+    fn maybe_smart_download_track(&self, track: &Track) {
+        if !self.store.data.config.smart_downloads {
+            return;
+        }
+        if track.local_path.is_some() || track.id.starts_with("local_") {
+            return;
+        }
+        let dl = Arc::clone(&self.downloader);
+        let quality = self.store.data.config.download_quality;
+        let track_cloned = track.clone();
+        self.runtime.spawn(async move {
+            if dl.find_local_path(&track_cloned.id).await.is_none() {
+                dl.enqueue(track_cloned, quality).await;
+            }
+        });
+    }
+
     fn load_lyrics(&mut self, track: Track, ctx: &egui::Context) {
         self.lyrics_track_id = Some(track.id.clone());
         self.lyrics_data = None;
@@ -1184,6 +1222,20 @@ impl YrApp {
         self.sync_last_queue_snapshot();
         self.seeking_secs = None;
         self.prewarmed_next_track_id = None;
+        self.maybe_smart_download_track(&track);
+        if let Some(ref nid) = next_track_id {
+            if let Some(next_t) = self
+                .queue
+                .lock()
+                .unwrap()
+                .ordered_tracks()
+                .into_iter()
+                .find(|(_, t)| &t.id == nid)
+                .map(|(_, t)| t)
+            {
+                self.maybe_smart_download_track(&next_t);
+            }
+        }
         self.audio.stop();
         self.lyrics_data = None;
         self.lyrics_track_id = None;
@@ -1868,6 +1920,9 @@ impl eframe::App for YrApp {
                 if self.now_playing_open {
                     self.render_full_player(ui, ctx, &snap);
                     return;
+                } else if self.is_video_mode {
+                    self.is_video_mode = false;
+                    crate::android_media::hide_embedded_video();
                 }
 
                 if self.render_detail_if_active(ui, ctx) {
@@ -5635,6 +5690,20 @@ impl YrApp {
             });
         });
 
+        if self.store.data.config.smart_downloads {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                let (dot_r, _) = ui.allocate_exact_size(Vec2::splat(8.0), Sense::hover());
+                ui.painter().circle_filled(dot_r.center(), 4.0, GREEN_OK);
+                ui.label(
+                    RichText::new("Descargas inteligentes activas • Música guardada automáticamente para escuchar sin conexión")
+                        .size(11.5)
+                        .color(TEXT_SECONDARY),
+                );
+            });
+            ui.add_space(4.0);
+        }
+
         let dl_q = self.library_search.trim().to_lowercase();
         let completed: Vec<Track> = self
             .downloads
@@ -6354,6 +6423,8 @@ impl YrApp {
                 .clicked()
                 {
                     self.now_playing_open = false;
+                    self.is_video_mode = false;
+                    crate::android_media::hide_embedded_video();
                 }
 
                 let total_w = inner_rect.width();
@@ -6394,6 +6465,7 @@ impl YrApp {
                             }
                             if a_resp.clicked() {
                                 self.is_video_mode = false;
+                                crate::android_media::hide_embedded_video();
                                 self.audio.resume();
                                 self.set_banner("Modo Canción activado");
                             }
@@ -6420,9 +6492,7 @@ impl YrApp {
                             if v_resp.clicked() {
                                 self.is_video_mode = true;
                                 self.audio.pause();
-                                let start_sec = snap.position_secs.max(0.0) as u64;
-                                crate::android_media::open_video(&track.id, &track.title, &track.artist, start_sec);
-                                self.set_banner(format!("Video sincronizado en {}:{:02}", start_sec / 60, start_sec % 60));
+                                self.set_banner("Modo Video activado");
                             }
                         });
                     });
@@ -6549,8 +6619,18 @@ impl YrApp {
                             .clicked()
                             {
                                 match snap.status {
-                                    PlaybackStatus::Playing => self.audio.pause(),
-                                    PlaybackStatus::Paused => self.audio.resume(),
+                                    PlaybackStatus::Playing => {
+                                        self.audio.pause();
+                                        if self.is_video_mode {
+                                            crate::android_media::control_embedded_video("pause", 0.0);
+                                        }
+                                    }
+                                    PlaybackStatus::Paused => {
+                                        self.audio.resume();
+                                        if self.is_video_mode {
+                                            crate::android_media::control_embedded_video("play", 0.0);
+                                        }
+                                    }
                                     _ => self.play_current_queue_track(ctx),
                                 }
                             }
@@ -7234,90 +7314,55 @@ impl YrApp {
                 } else {
                     if self.is_video_mode {
                         // Widescreen Video Surface (16:9 YouTube Music style)
-                    ui.add_space(6.0);
-                    let video_w = (avail_w - 24.0).min(380.0);
-                    let video_h = (video_w * 9.0 / 16.0).clamp(140.0, 210.0);
-                    let video_size = Vec2::new(video_w, video_h);
-                    ui.vertical_centered(|ui| {
-                        let (video_rect, video_resp) = ui.allocate_exact_size(video_size, Sense::click());
-                        ui.painter().rect_filled(video_rect, CornerRadius::same(12), Color32::from_rgb(10, 10, 12));
-                        ui.painter().rect_stroke(video_rect, CornerRadius::same(12), Stroke::new(1.0_f32, Color32::from_white_alpha(32)), egui::StrokeKind::Outside);
+                        ui.add_space(6.0);
+                        let video_w = (avail_w - 24.0).min(380.0);
+                        let video_h = (video_w * 9.0 / 16.0).clamp(140.0, 210.0);
+                        let video_size = Vec2::new(video_w, video_h);
+                        ui.vertical_centered(|ui| {
+                            let (video_rect, video_resp) = ui.allocate_exact_size(video_size, Sense::click());
+                            ui.painter().rect_filled(video_rect, CornerRadius::same(12), Color32::from_rgb(10, 10, 12));
+                            ui.painter().rect_stroke(video_rect, CornerRadius::same(12), Stroke::new(1.0_f32, Color32::from_white_alpha(32)), egui::StrokeKind::Outside);
 
-                        // High resolution video frame thumbnail
-                        if let Some(u) = resolved_cover.as_deref() {
-                            paint_progressive_image(ui, video_rect, u, 720, video_size, CornerRadius::same(12));
-                        }
-
-                        // Play circle overlay
-                        let overlay_c = video_rect.center();
-                        ui.painter().circle_filled(overlay_c, 24.0, Color32::from_rgba_unmultiplied(0, 0, 0, 170));
-                        ui.painter().circle_stroke(overlay_c, 24.0, Stroke::new(1.5_f32, Color32::WHITE));
-                        icons::draw_icon(
-                            ui.painter(),
-                            Rect::from_center_size(overlay_c + Vec2::new(2.0, 0.0), Vec2::splat(18.0)),
-                            icons::Icon::Play,
-                            Color32::WHITE,
-                        );
-
-                        // Video Badge top right
-                        let badge_rect = Rect::from_min_size(
-                            Pos2::new(video_rect.right() - 86.0, video_rect.top() + 8.0),
-                            Vec2::new(76.0, 20.0),
-                        );
-                        ui.painter().rect_filled(badge_rect, CornerRadius::same(4), Color32::from_rgba_unmultiplied(0, 0, 0, 190));
-                        ui.painter().text(
-                            badge_rect.center(),
-                            Align2::CENTER_CENTER,
-                            "1080p HD",
-                            egui::FontId::proportional(11.0),
-                            Color32::WHITE,
-                        );
-
-                        if video_resp.clicked() {
-                            self.audio.pause();
+                            // Convert to physical screen coordinates for embedded in-place Android WebView
+                            let ppp = ctx.pixels_per_point();
+                            let x_px = (video_rect.min.x * ppp).round() as i32;
+                            let y_px = (video_rect.min.y * ppp).round() as i32;
+                            let w_px = (video_rect.width() * ppp).round() as i32;
+                            let h_px = (video_rect.height() * ppp).round() as i32;
                             let start_sec = snap.position_secs.max(0.0) as u64;
-                            crate::android_media::open_video(&track.id, &track.title, &track.artist, start_sec);
-                            self.set_banner(format!("Video sincronizado en {}:{:02}", start_sec / 60, start_sec % 60));
-                        }
 
-                        ui.add_space(8.0);
-                        ui.horizontal(|ui| {
-                            let pad = (video_w - 230.0).max(0.0) * 0.5;
-                            if pad > 0.0 {
-                                ui.add_space(pad);
+                            crate::android_media::attach_embedded_video(&track.id, x_px, y_px, w_px, h_px, start_sec);
+
+                            if video_resp.clicked() {
+                                let is_playing = snap.status == PlaybackStatus::Playing;
+                                crate::android_media::control_embedded_video(if is_playing { "pause" } else { "play" }, 0.0);
                             }
-                            if icons::icon_pill_button(
-                                ui,
-                                icons::Icon::Video,
-                                "Reproducir Video",
-                                ACCENT_RED,
-                                Color32::WHITE,
-                            )
-                            .clicked()
-                            {
-                                self.audio.pause();
-                                let start_sec = snap.position_secs.max(0.0) as u64;
-                                crate::android_media::open_video(&track.id, &track.title, &track.artist, start_sec);
-                                self.set_banner(format!("Video sincronizado en {}:{:02}", start_sec / 60, start_sec % 60));
-                            }
-                            ui.add_space(6.0);
-                            if icons::icon_pill_button(
-                                ui,
-                                icons::Icon::Headphones,
-                                "Solo Audio",
-                                Color32::from_white_alpha(26),
-                                Color32::WHITE,
-                            )
-                            .clicked()
-                            {
-                                self.is_video_mode = false;
-                                self.audio.resume();
-                                self.set_banner("Modo Audio reanudado");
-                            }
+
+                            ui.add_space(8.0);
+                            ui.horizontal(|ui| {
+                                let pad = (video_w - 200.0).max(0.0) * 0.5;
+                                if pad > 0.0 {
+                                    ui.add_space(pad);
+                                }
+                                if icons::icon_pill_button(
+                                    ui,
+                                    icons::Icon::Headphones,
+                                    "Volver a Canción",
+                                    Color32::from_white_alpha(26),
+                                    Color32::WHITE,
+                                )
+                                .clicked()
+                                {
+                                    self.is_video_mode = false;
+                                    crate::android_media::hide_embedded_video();
+                                    self.audio.resume();
+                                    self.set_banner("Modo Canción reanudado");
+                                }
+                            });
                         });
-                    });
-                } else {
-                    // Main Cover Now Playing view
+                    } else {
+                        // Main Cover Now Playing view
+                        crate::android_media::hide_embedded_video();
                     ui.add_space(4.0);
                     let art_size = (avail_w - 28.0).min(body_h * 0.43).clamp(155.0, 290.0);
                     ui.vertical_centered(|ui| {
@@ -7584,6 +7629,9 @@ impl YrApp {
                                                 || like_label_resp.clicked()
                                             {
                                                 self.store.toggle_like(track.clone());
+                                                if self.store.is_liked(&track.id) {
+                                                    self.maybe_smart_download_track(&track);
+                                                }
                                             }
                                             ui.label(
                                                 RichText::new("|")
@@ -7787,6 +7835,9 @@ impl YrApp {
                             .or_else(|| bar_resp.interact_pointer_pos().map(|p| frac_from_x(p.x)))
                             .unwrap_or(display_pos);
                         self.audio.seek(Duration::from_secs_f64(target));
+                        if self.is_video_mode {
+                            crate::android_media::control_embedded_video("seekTo", target);
+                        }
                         self.seeking_secs = None;
                         self.last_media_sync = None;
                         display_pos = target;
@@ -7794,6 +7845,9 @@ impl YrApp {
                         if let Some(pointer) = bar_resp.interact_pointer_pos() {
                             let target = frac_from_x(pointer.x);
                             self.audio.seek(Duration::from_secs_f64(target));
+                            if self.is_video_mode {
+                                crate::android_media::control_embedded_video("seekTo", target);
+                            }
                             self.seeking_secs = None;
                             self.last_media_sync = None;
                             display_pos = target;
@@ -7943,8 +7997,18 @@ impl YrApp {
                             .clicked()
                             {
                                 match snap.status {
-                                    PlaybackStatus::Playing => self.audio.pause(),
-                                    PlaybackStatus::Paused => self.audio.resume(),
+                                    PlaybackStatus::Playing => {
+                                        self.audio.pause();
+                                        if self.is_video_mode {
+                                            crate::android_media::control_embedded_video("pause", 0.0);
+                                        }
+                                    }
+                                    PlaybackStatus::Paused => {
+                                        self.audio.resume();
+                                        if self.is_video_mode {
+                                            crate::android_media::control_embedded_video("play", 0.0);
+                                        }
+                                    }
                                     _ => self.play_current_queue_track(ctx),
                                 }
                             }
@@ -8435,6 +8499,30 @@ impl YrApp {
                     if ui.checkbox(&mut self.store.data.config.wifi_only_downloads, "Descargar solo mediante Wi-Fi").changed() {
                         let _ = self.store.save();
                     }
+                    ui.add_space(8.0);
+                    if icons::icon_pill_button(
+                        ui,
+                        icons::Icon::Download,
+                        "Descargar favoritos y recientes para modo offline",
+                        BG_ELEVATED,
+                        Color32::WHITE,
+                    )
+                    .clicked()
+                    {
+                        let recent_tracks: Vec<Track> = self
+                            .store
+                            .data
+                            .recent_tracks
+                            .iter()
+                            .chain(self.store.data.liked_tracks.iter())
+                            .cloned()
+                            .collect();
+                        let count = recent_tracks.len();
+                        for t in &recent_tracks {
+                            self.maybe_smart_download_track(t);
+                        }
+                        self.set_banner(format!("Descargando {count} canciones para modo sin conexión"));
+                    }
                     ui.add_space(10.0);
                     ui.label("Calidad de descargas offline:");
                     ui.add_space(4.0);
@@ -8529,7 +8617,7 @@ impl YrApp {
                     ui.label(RichText::new("Ajusta los mixes de inicio según tu historial de reproducción, canciones favoritas y artistas seguidos.").size(12.0).color(TEXT_SECONDARY));
                 }
                 SettingsCategory::About => {
-                    ui.heading("YR Music v0.8.8");
+                    ui.heading("YR Music v0.8.9");
                     ui.label("Cliente nativo de música 100% en Rust para Android y escritorio.");
                     ui.add_space(6.0);
                     ui.label(RichText::new("Motor de audio Symphonia PCM con DSP Morphe 3D binaural, reproductor integrado de video en la app, auto-scroll inteligente de cola, prefetch predictivo en disco y compatibilidad completa con YouTube Music.").size(12.0).color(TEXT_SECONDARY));
@@ -9692,7 +9780,7 @@ impl YrApp {
                         }
                         if menu_row(ui, icons::Icon::Help, "Ayuda y comentarios").clicked() {
                             self.show_account_modal = false;
-                            self.set_banner("YR Music v0.8.8 • Pure Rust");
+                            self.set_banner("YR Music v0.8.9 • Pure Rust");
                         }
 
                         #[cfg(target_os = "android")]

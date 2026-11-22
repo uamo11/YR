@@ -369,6 +369,88 @@ mod imp {
         val.z().unwrap_or(false)
     }
 
+    pub fn attach_embedded_video(
+        video_id: &str,
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
+        start_secs: u64,
+    ) {
+        let Some(bridge) = bridge() else {
+            return;
+        };
+        let Ok(mut env) = bridge.vm.attach_current_thread() else {
+            return;
+        };
+        let Ok(j_vid) = env.new_string(video_id) else {
+            return;
+        };
+        let service_cls: &JClass = bridge.service_class.as_obj().into();
+        if let Err(e) = env.call_static_method(
+            service_cls,
+            "attachEmbeddedVideo",
+            "(Landroid/content/Context;Ljava/lang/String;IIIIJ)V",
+            &[
+                JValue::Object(bridge.app_ctx.as_obj()),
+                JValue::Object(&j_vid),
+                JValue::Int(x),
+                JValue::Int(y),
+                JValue::Int(width),
+                JValue::Int(height),
+                JValue::Long(start_secs as i64),
+            ],
+        ) {
+            log::warn!("android_media: attachEmbeddedVideo failed: {e:?}");
+            let _ = env.exception_clear();
+        }
+    }
+
+    pub fn hide_embedded_video() {
+        let Some(bridge) = bridge() else {
+            return;
+        };
+        let Ok(mut env) = bridge.vm.attach_current_thread() else {
+            return;
+        };
+        let service_cls: &JClass = bridge.service_class.as_obj().into();
+        if let Err(e) = env.call_static_method(
+            service_cls,
+            "hideEmbeddedVideo",
+            "(Landroid/content/Context;)V",
+            &[JValue::Object(bridge.app_ctx.as_obj())],
+        ) {
+            log::warn!("android_media: hideEmbeddedVideo failed: {e:?}");
+            let _ = env.exception_clear();
+        }
+    }
+
+    pub fn control_embedded_video(command: &str, arg: f64) {
+        let Some(bridge) = bridge() else {
+            return;
+        };
+        let Ok(mut env) = bridge.vm.attach_current_thread() else {
+            return;
+        };
+        let Ok(j_cmd) = env.new_string(command) else {
+            return;
+        };
+        let service_cls: &JClass = bridge.service_class.as_obj().into();
+        if let Err(e) = env.call_static_method(
+            service_cls,
+            "controlEmbeddedVideo",
+            "(Landroid/content/Context;Ljava/lang/String;D)V",
+            &[
+                JValue::Object(bridge.app_ctx.as_obj()),
+                JValue::Object(&j_cmd),
+                JValue::Double(arg),
+            ],
+        ) {
+            log::warn!("android_media: controlEmbeddedVideo failed: {e:?}");
+            let _ = env.exception_clear();
+        }
+    }
+
     #[no_mangle]
     pub extern "system" fn Java_com_yr_music_YrPlaybackService_nativeOnGoogleCookie(
         mut env: JNIEnv,
@@ -414,6 +496,16 @@ mod imp {
     pub fn open_google_login() {}
     pub fn share_text(_title: &str, _text: &str) {}
     pub fn open_video(_video_id: &str, _title: &str, _artist: &str, _start_secs: u64) {}
+    pub fn attach_embedded_video(
+        _video_id: &str,
+        _x: i32,
+        _y: i32,
+        _width: i32,
+        _height: i32,
+        _start_secs: u64,
+    ) {}
+    pub fn hide_embedded_video() {}
+    pub fn control_embedded_video(_command: &str, _arg: f64) {}
     pub fn is_wifi_connected() -> bool {
         true
     }
@@ -432,7 +524,8 @@ mod imp {
 #[cfg(target_os = "android")]
 pub use imp::init;
 pub use imp::{
-    is_metered_network, is_wifi_connected, open_google_login, open_video, resolve_audio_url,
-    set_action_sender, set_artwork_url, set_cookie_sender, set_egui_ctx, set_ui_at_root, share_text,
-    stop_service, take_back_pressed, update_playback,
+    attach_embedded_video, control_embedded_video, hide_embedded_video, is_metered_network,
+    is_wifi_connected, open_google_login, open_video, resolve_audio_url, set_action_sender,
+    set_artwork_url, set_cookie_sender, set_egui_ctx, set_ui_at_root, share_text, stop_service,
+    take_back_pressed, update_playback,
 };

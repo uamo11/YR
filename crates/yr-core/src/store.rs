@@ -113,9 +113,9 @@ pub struct AppConfig {
     pub prefer_video_mode: bool,
 
     // Descargas y almacenamiento
-    #[serde(default)]
-    pub smart_downloads: bool,
     #[serde(default = "default_true")]
+    pub smart_downloads: bool,
+    #[serde(default)]
     pub wifi_only_downloads: bool,
     #[serde(default = "default_max_stream_cache_mb")]
     pub max_stream_cache_mb: u32,
@@ -170,8 +170,8 @@ impl Default for AppConfig {
             mobile_data_saver: true,
             battery_saver: false,
             prefer_video_mode: false,
-            smart_downloads: false,
-            wifi_only_downloads: true,
+            smart_downloads: true,
+            wifi_only_downloads: false,
             max_stream_cache_mb: default_max_stream_cache_mb(),
             notifications_enabled: true,
             incognito_mode: false,
