@@ -6954,13 +6954,16 @@ impl YrApp {
 
                                                 let row_start = ui.next_widget_position();
                                                 render_track_thumb(ui, &t, 44.0);
-                                                if self.downloads.iter().any(|d| d.track.id == t.id && d.status == DownloadStatus::Completed) {
+                                                let is_dl = t.local_path.is_some()
+                                                    || self.downloads.iter().any(|d| d.track.id == t.id && d.status == DownloadStatus::Completed)
+                                                    || self.data_dir.join("stream_cache").join(format!("stream_{}.audio", t.id)).exists();
+                                                if is_dl {
                                                     let badge_r = Rect::from_center_size(
                                                         Pos2::new(row_start.x + 36.0, row_start.y + 36.0),
                                                         Vec2::splat(14.0),
                                                     );
                                                     ui.painter().circle_filled(badge_r.center(), 7.0, Color32::from_rgb(18, 18, 22));
-                                                    icons::draw_icon(ui.painter(), Rect::from_center_size(badge_r.center(), Vec2::splat(10.0)), icons::Icon::Check, GREEN_OK);
+                                                    icons::draw_icon(ui.painter(), Rect::from_center_size(badge_r.center(), Vec2::splat(10.0)), icons::Icon::DownloadDone, GREEN_OK);
                                                 }
                                                 ui.add_space(6.0);
                                                 let right_reserve = if is_curr { 66.0 } else { 98.0 };
@@ -7016,16 +7019,27 @@ impl YrApp {
                                                     row_start,
                                                     Vec2::new(44.0 + 6.0 + tw, 48.0),
                                                 );
-                                                if ui
-                                                    .interact(
-                                                        hit_rect,
-                                                        ui.make_persistent_id(("q_row", order_pos, &t.id)),
-                                                        Sense::click(),
-                                                    )
-                                                    .clicked()
-                                                {
+                                                let row_resp = ui.interact(
+                                                    hit_rect,
+                                                    ui.make_persistent_id(("q_row", order_pos, &t.id)),
+                                                    Sense::click_and_drag(),
+                                                );
+                                                if row_resp.clicked() {
                                                     self.queue.lock().unwrap().jump_to(idx);
                                                     self.play_current_queue_track(ctx);
+                                                }
+                                                if !is_curr {
+                                                    let swipe = consume_horizontal_drag_step(
+                                                        ui,
+                                                        ui.make_persistent_id(("q_row_swipe", order_pos, &t.id)),
+                                                        &row_resp,
+                                                        50.0,
+                                                        true,
+                                                    );
+                                                    if swipe < 0 {
+                                                        self.queue.lock().unwrap().remove_at(idx);
+                                                        self.set_banner(format!("Eliminada de la cola: {}", t.title));
+                                                    }
                                                 }
                                                 ui.with_layout(
                                                     Layout::right_to_left(Align::Center),
@@ -8828,7 +8842,7 @@ impl YrApp {
                     ui.label(RichText::new("Ajusta los mixes de inicio según tu historial de reproducción, canciones favoritas y artistas seguidos.").size(12.0).color(TEXT_SECONDARY));
                 }
                 SettingsCategory::About => {
-                    ui.heading("YR Music v0.9.2");
+                    ui.heading("YR Music v0.9.3");
                     ui.label("Cliente nativo de música 100% en Rust para Android y escritorio.");
                     ui.add_space(6.0);
                     ui.label(RichText::new("Motor de audio Symphonia PCM con DSP Morphe 3D binaural, reproductor integrado de video en la app, auto-scroll inteligente de cola, prefetch predictivo en disco y compatibilidad completa con YouTube Music.").size(12.0).color(TEXT_SECONDARY));
@@ -10000,7 +10014,7 @@ impl YrApp {
                         }
                         if menu_row(ui, icons::Icon::Help, "Ayuda y comentarios").clicked() {
                             self.show_account_modal = false;
-                            self.set_banner("YR Music v0.9.2 • Pure Rust");
+                            self.set_banner("YR Music v0.9.3 • Pure Rust");
                         }
 
                         #[cfg(target_os = "android")]
@@ -10641,6 +10655,43 @@ fn consume_vertical_drag_step(
                 return 0;
             }
             let mut accum = prev + delta_y;
+            let step = if accum >= threshold {
+                accum = if single_shot { f32::NAN } else { accum - threshold };
+                1
+            } else if accum <= -threshold {
+                accum = if single_shot { f32::NAN } else { accum + threshold };
+                -1
+            } else {
+                0
+            };
+            d.insert_temp(id, accum);
+            step
+        })
+    } else if resp.drag_stopped() {
+        ui.data_mut(|d| d.remove::<f32>(id));
+        0
+    } else {
+        0
+    }
+}
+
+/// Accumulates horizontal drag delta without nesting `egui::Context` locks.
+/// Returns `1` when dragged rightward past `threshold`, `-1` leftward, or `0`.
+fn consume_horizontal_drag_step(
+    ui: &egui::Ui,
+    id: egui::Id,
+    resp: &egui::Response,
+    threshold: f32,
+    single_shot: bool,
+) -> i32 {
+    if resp.dragged() {
+        let delta_x = resp.drag_delta().x;
+        ui.data_mut(|d| {
+            let prev = d.get_temp::<f32>(id).unwrap_or(0.0);
+            if prev.is_nan() {
+                return 0;
+            }
+            let mut accum = prev + delta_x;
             let step = if accum >= threshold {
                 accum = if single_shot { f32::NAN } else { accum - threshold };
                 1
