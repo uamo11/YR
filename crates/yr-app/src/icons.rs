@@ -60,6 +60,9 @@ pub enum Icon {
     Storage,
     Bell,
     Shield,
+    DownloadDone,
+    FastForward,
+    Speed,
 }
 
 impl Icon {
@@ -124,6 +127,9 @@ impl Icon {
             Icon::Storage => '\u{e1c2}',          // sd_storage
             Icon::Bell => '\u{e7f4}',             // notifications
             Icon::Shield => '\u{e32a}',           // security
+            Icon::DownloadDone => '\u{f000}',     // download_done
+            Icon::FastForward => '\u{e01f}',      // fast_forward
+            Icon::Speed => '\u{e9e4}',            // speed
         }
     }
 }

@@ -366,6 +366,7 @@ pub struct YrApp {
     library_scroller: SmoothTouchScroller,
     detail_scroller: SmoothTouchScroller,
     last_video_attached: Option<(String, i32, i32, i32, i32)>,
+    seek_ripple_anim: Option<(bool, f32, u32)>,
 }
 
 async fn play_track_bg(
@@ -613,6 +614,7 @@ impl YrApp {
             library_scroller: SmoothTouchScroller::default(),
             detail_scroller: SmoothTouchScroller::default(),
             last_video_attached: None,
+            seek_ripple_anim: None,
         };
 
         let (media_tx, mut media_rx) = mpsc::unbounded_channel();
@@ -6230,9 +6232,15 @@ impl YrApp {
                     render_track_thumb(ui, track, 48.0);
 
                     let text_width = (ui.available_width() - 42.0).max(120.0);
-                    let is_downloaded = self.downloads.iter().any(|d| {
-                        d.track.id == track.id && d.status == DownloadStatus::Completed
-                    });
+                    let is_downloaded = track.local_path.is_some()
+                        || self.downloads.iter().any(|d| {
+                            d.track.id == track.id && d.status == DownloadStatus::Completed
+                        })
+                        || self
+                            .data_dir
+                            .join("stream_cache")
+                            .join(format!("stream_{}.audio", track.id))
+                            .exists();
                     let title_color = if is_current { ACCENT_RED } else { TEXT_PRIMARY };
                     let row_h = 56.0;
 
@@ -6260,7 +6268,7 @@ impl YrApp {
                                     icons::draw_icon(
                                         ui.painter(),
                                         icon_rect,
-                                        icons::Icon::Check,
+                                        icons::Icon::DownloadDone,
                                         GREEN_OK,
                                     );
                                     ui.add(
@@ -7537,20 +7545,61 @@ impl YrApp {
                                     .or(track.duration_secs.map(|d| d as f64))
                                     .unwrap_or(0.0);
                                 let seek_step = self.store.data.config.seek_seconds as f64;
-                                let delta = if pos.x < art_rect.center().x {
-                                    -seek_step
-                                } else {
-                                    seek_step
-                                };
+                                let is_forward = pos.x >= art_rect.center().x;
+                                let delta = if is_forward { seek_step } else { -seek_step };
                                 let target = (snap.position_secs + delta)
                                     .clamp(0.0, total_dur.max(snap.position_secs + seek_step));
                                 self.audio.seek(Duration::from_secs_f64(target));
                                 self.last_media_sync = None;
-                                self.set_banner(if delta < 0.0 {
-                                    format!("-{seek_step:.0}s")
+                                let prev_secs = if let Some((prev_fwd, _, s)) = self.seek_ripple_anim {
+                                    if prev_fwd == is_forward { s } else { 0 }
                                 } else {
-                                    format!("+{seek_step:.0}s")
-                                });
+                                    0
+                                };
+                                let total_secs = prev_secs + self.store.data.config.seek_seconds;
+                                self.seek_ripple_anim = Some((is_forward, 0.0, total_secs));
+                                ctx.request_repaint();
+                            }
+                        }
+
+                        if let Some((is_forward, ref mut progress, total_s)) = self.seek_ripple_anim {
+                            let dt = ctx.input(|i| i.stable_dt).clamp(0.001, 0.05);
+                            *progress += dt * 2.2;
+                            if *progress < 1.0 {
+                                ctx.request_repaint();
+                                let p = *progress;
+                                let alpha = ((1.0 - p) * 90.0) as u8;
+                                let half_rect = if is_forward {
+                                    Rect::from_min_max(
+                                        Pos2::new(art_rect.center().x, art_rect.top()),
+                                        art_rect.right_bottom(),
+                                    )
+                                } else {
+                                    Rect::from_min_max(
+                                        art_rect.left_top(),
+                                        Pos2::new(art_rect.center().x, art_rect.bottom()),
+                                    )
+                                };
+                                ui.painter().rect_filled(
+                                    half_rect,
+                                    CornerRadius::same(14),
+                                    Color32::from_rgba_unmultiplied(255, 255, 255, alpha),
+                                );
+                                let text_center = half_rect.center();
+                                let chev_str = if is_forward {
+                                    format!("+{total_s} s »»")
+                                } else {
+                                    format!("«« -{total_s} s")
+                                };
+                                ui.painter().text(
+                                    text_center,
+                                    Align2::CENTER_CENTER,
+                                    chev_str,
+                                    egui::FontId::proportional(18.0),
+                                    Color32::from_rgba_unmultiplied(255, 255, 255, (255.0 * (1.0 - p * 0.4)) as u8),
+                                );
+                            } else {
+                                self.seek_ripple_anim = None;
                             }
                         }
                     });
@@ -8711,6 +8760,20 @@ impl YrApp {
                             }
                         }
                     });
+                    ui.add_space(10.0);
+                    ui.label("Límite de canciones en auto-descargas:");
+                    ui.add_space(4.0);
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing = Vec2::new(8.0, 8.0);
+                        for count in [25_usize, 50, 100, 200, 500] {
+                            let label = format!("{count}");
+                            let selected = self.store.data.config.max_smart_download_songs == count;
+                            if settings_choice_pill(ui, selected, &label) {
+                                self.store.data.config.max_smart_download_songs = count;
+                                let _ = self.store.save();
+                            }
+                        }
+                    });
                     ui.add_space(12.0);
                     if settings_action_button(ui, "Limpiar caché de streaming y portadas") {
                         let cache_dir = self.data_dir.join("stream_cache");
@@ -8755,7 +8818,7 @@ impl YrApp {
                     ui.label(RichText::new("Ajusta los mixes de inicio según tu historial de reproducción, canciones favoritas y artistas seguidos.").size(12.0).color(TEXT_SECONDARY));
                 }
                 SettingsCategory::About => {
-                    ui.heading("YR Music v0.9.0");
+                    ui.heading("YR Music v0.9.1");
                     ui.label("Cliente nativo de música 100% en Rust para Android y escritorio.");
                     ui.add_space(6.0);
                     ui.label(RichText::new("Motor de audio Symphonia PCM con DSP Morphe 3D binaural, reproductor integrado de video en la app, auto-scroll inteligente de cola, prefetch predictivo en disco y compatibilidad completa con YouTube Music.").size(12.0).color(TEXT_SECONDARY));
@@ -9927,7 +9990,7 @@ impl YrApp {
                         }
                         if menu_row(ui, icons::Icon::Help, "Ayuda y comentarios").clicked() {
                             self.show_account_modal = false;
-                            self.set_banner("YR Music v0.9.0 • Pure Rust");
+                            self.set_banner("YR Music v0.9.1 • Pure Rust");
                         }
 
                         #[cfg(target_os = "android")]

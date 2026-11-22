@@ -119,6 +119,10 @@ pub struct AppConfig {
     pub wifi_only_downloads: bool,
     #[serde(default = "default_max_stream_cache_mb")]
     pub max_stream_cache_mb: u32,
+    #[serde(default = "default_max_smart_download_songs")]
+    pub max_smart_download_songs: usize,
+    #[serde(default = "default_max_smart_download_mb")]
+    pub max_smart_download_mb: u32,
 
     // Notificaciones y privacidad
     #[serde(default = "default_true")]
@@ -165,6 +169,14 @@ fn default_max_stream_cache_mb() -> u32 {
     512
 }
 
+fn default_max_smart_download_songs() -> usize {
+    100
+}
+
+fn default_max_smart_download_mb() -> u32 {
+    1024
+}
+
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
@@ -183,6 +195,8 @@ impl Default for AppConfig {
             smart_downloads: true,
             wifi_only_downloads: false,
             max_stream_cache_mb: default_max_stream_cache_mb(),
+            max_smart_download_songs: default_max_smart_download_songs(),
+            max_smart_download_mb: default_max_smart_download_mb(),
             notifications_enabled: true,
             incognito_mode: false,
             personalized_recommendations: true,
