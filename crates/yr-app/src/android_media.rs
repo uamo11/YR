@@ -297,40 +297,6 @@ mod imp {
         }
     }
 
-    pub fn open_video(video_id: &str, title: &str, artist: &str, start_secs: u64) {
-        let Some(bridge) = bridge() else {
-            return;
-        };
-        let Ok(mut env) = bridge.vm.attach_current_thread() else {
-            return;
-        };
-        let Ok(j_vid) = env.new_string(video_id) else {
-            return;
-        };
-        let Ok(j_title) = env.new_string(title) else {
-            return;
-        };
-        let Ok(j_artist) = env.new_string(artist) else {
-            return;
-        };
-        let service_cls: &JClass = bridge.service_class.as_obj().into();
-        if let Err(e) = env.call_static_method(
-            service_cls,
-            "openVideo",
-            "(Landroid/content/Context;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;J)V",
-            &[
-                JValue::Object(bridge.app_ctx.as_obj()),
-                JValue::Object(&j_vid),
-                JValue::Object(&j_title),
-                JValue::Object(&j_artist),
-                JValue::Long(start_secs as i64),
-            ],
-        ) {
-            log::warn!("android_media: openVideo failed: {e:?}");
-            let _ = env.exception_clear();
-        }
-    }
-
     pub fn is_wifi_connected() -> bool {
         let Some(bridge) = bridge() else {
             return true;
@@ -369,13 +335,17 @@ mod imp {
         val.z().unwrap_or(false)
     }
 
-    pub fn attach_embedded_video(
-        video_id: &str,
+    pub fn attach_native_video(
+        video_url: &str,
+        fallback_url: &str,
+        user_agent: &str,
         x: i32,
         y: i32,
         width: i32,
         height: i32,
-        start_secs: u64,
+        start_ms: u64,
+        playing: bool,
+        speed: f32,
     ) {
         let Some(bridge) = bridge() else {
             return;
@@ -383,25 +353,35 @@ mod imp {
         let Ok(mut env) = bridge.vm.attach_current_thread() else {
             return;
         };
-        let Ok(j_vid) = env.new_string(video_id) else {
+        let Ok(j_url) = env.new_string(video_url) else {
+            return;
+        };
+        let Ok(j_fallback) = env.new_string(fallback_url) else {
+            return;
+        };
+        let Ok(j_ua) = env.new_string(user_agent) else {
             return;
         };
         let service_cls: &JClass = bridge.service_class.as_obj().into();
         if let Err(e) = env.call_static_method(
             service_cls,
-            "attachEmbeddedVideo",
-            "(Landroid/content/Context;Ljava/lang/String;IIIIJ)V",
+            "attachNativeVideo",
+            "(Landroid/content/Context;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;IIIIJZF)V",
             &[
                 JValue::Object(bridge.app_ctx.as_obj()),
-                JValue::Object(&j_vid),
+                JValue::Object(&j_url),
+                JValue::Object(&j_fallback),
+                JValue::Object(&j_ua),
                 JValue::Int(x),
                 JValue::Int(y),
                 JValue::Int(width),
                 JValue::Int(height),
-                JValue::Long(start_secs as i64),
+                JValue::Long(start_ms as i64),
+                JValue::Bool(if playing { 1 } else { 0 }),
+                JValue::Float(speed),
             ],
         ) {
-            log::warn!("android_media: attachEmbeddedVideo failed: {e:?}");
+            log::warn!("android_media: attachNativeVideo failed: {e:?}");
             let _ = env.exception_clear();
         }
     }
@@ -425,28 +405,26 @@ mod imp {
         }
     }
 
-    pub fn control_embedded_video(command: &str, arg: f64) {
+    pub fn sync_native_video(playing: bool, pos_ms: u64, speed: f32) {
         let Some(bridge) = bridge() else {
             return;
         };
         let Ok(mut env) = bridge.vm.attach_current_thread() else {
             return;
         };
-        let Ok(j_cmd) = env.new_string(command) else {
-            return;
-        };
         let service_cls: &JClass = bridge.service_class.as_obj().into();
         if let Err(e) = env.call_static_method(
             service_cls,
-            "controlEmbeddedVideo",
-            "(Landroid/content/Context;Ljava/lang/String;D)V",
+            "syncNativeVideo",
+            "(Landroid/content/Context;ZJF)V",
             &[
                 JValue::Object(bridge.app_ctx.as_obj()),
-                JValue::Object(&j_cmd),
-                JValue::Double(arg),
+                JValue::Bool(if playing { 1 } else { 0 }),
+                JValue::Long(pos_ms as i64),
+                JValue::Float(speed),
             ],
         ) {
-            log::warn!("android_media: controlEmbeddedVideo failed: {e:?}");
+            log::warn!("android_media: syncNativeVideo failed: {e:?}");
             let _ = env.exception_clear();
         }
     }
@@ -495,17 +473,21 @@ mod imp {
     }
     pub fn open_google_login() {}
     pub fn share_text(_title: &str, _text: &str) {}
-    pub fn open_video(_video_id: &str, _title: &str, _artist: &str, _start_secs: u64) {}
-    pub fn attach_embedded_video(
-        _video_id: &str,
+    pub fn attach_native_video(
+        _video_url: &str,
+        _fallback_url: &str,
+        _user_agent: &str,
         _x: i32,
         _y: i32,
         _width: i32,
         _height: i32,
-        _start_secs: u64,
-    ) {}
+        _start_ms: u64,
+        _playing: bool,
+        _speed: f32,
+    ) {
+    }
     pub fn hide_embedded_video() {}
-    pub fn control_embedded_video(_command: &str, _arg: f64) {}
+    pub fn sync_native_video(_playing: bool, _pos_ms: u64, _speed: f32) {}
     pub fn is_wifi_connected() -> bool {
         true
     }
@@ -524,8 +506,8 @@ mod imp {
 #[cfg(target_os = "android")]
 pub use imp::init;
 pub use imp::{
-    attach_embedded_video, control_embedded_video, hide_embedded_video, is_metered_network,
-    is_wifi_connected, open_google_login, open_video, resolve_audio_url, set_action_sender,
-    set_artwork_url, set_cookie_sender, set_egui_ctx, set_ui_at_root, share_text, stop_service,
-    take_back_pressed, update_playback,
+    attach_native_video, hide_embedded_video, is_metered_network, is_wifi_connected,
+    open_google_login, resolve_audio_url, set_action_sender, set_artwork_url, set_cookie_sender,
+    set_egui_ctx, set_ui_at_root, share_text, stop_service, sync_native_video, take_back_pressed,
+    update_playback,
 };

@@ -9,7 +9,7 @@ use tokio::sync::RwLock;
 use yr_core::{
     AlbumSummary, AudioQuality, ExploreFeed, GoogleAccountInfo, HomeFeed, HomeShelf,
     HomeShelfCard, HomeShelfLayout, LyricLine, LyricsData, MoodGenre, PlaylistSummary,
-    ShelfCardKind, SponsorSegment, StreamInfo, Track,
+    ShelfCardKind, SponsorSegment, StreamInfo, Track, VideoStreamInfo,
 };
 
 const YTM_ORIGIN: &str = "https://music.youtube.com";
@@ -770,6 +770,8 @@ fn non_empty(s: String) -> Option<String> {
 }
 
 const VISIONOS_UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_6) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15";
+const ANDROID_VR_UA: &str = "com.google.android.apps.youtube.vr.oculus/1.60.19 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip";
+const IOS_PLAYER_UA: &str = "com.google.ios.youtube/19.29.1 (iPhone16,2; U; CPU iOS 17_5_1 like Mac OS X;)";
 static VISITOR_DATA_CACHE: OnceLock<RwLock<Option<(String, Instant)>>> = OnceLock::new();
 
 fn decode_visitor_data(raw: &str) -> String {
@@ -878,12 +880,97 @@ fn pick_best_audio_stream(video_id: &str, val: &Value, quality: AudioQuality) ->
         .map(|(_, best)| best)
 }
 
-async fn fetch_visionos_stream(
+fn pick_best_video_stream(
+    video_id: &str,
+    val: &Value,
+    max_height: u32,
+    user_agent: &str,
+) -> Option<VideoStreamInfo> {
+    let hls_url = val
+        .pointer("/streamingData/hlsManifestUrl")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    let collect_mp4 = |arr: Option<&Vec<Value>>, require_avc: bool| -> Vec<(u32, u32, u32, String)> {
+        let mut list = Vec::new();
+        let Some(items) = arr else {
+            return list;
+        };
+        for f in items {
+            let Some(mime) = f.get("mimeType").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            if !mime.contains("video/mp4") {
+                continue;
+            }
+            if require_avc && !mime.contains("avc1") {
+                continue;
+            }
+            let Some(url) = f.get("url").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let height = f.get("height").and_then(|v| v.as_u64()).unwrap_or(360) as u32;
+            let width = f
+                .get("width")
+                .and_then(|v| v.as_u64())
+                .unwrap_or((height as u64 * 16) / 9) as u32;
+            let fps = f.get("fps").and_then(|v| v.as_u64()).unwrap_or(30) as u32;
+            list.push((height, width, fps, url.to_string()));
+        }
+        list
+    };
+
+    let mut candidates = collect_mp4(
+        val.pointer("/streamingData/adaptiveFormats")
+            .and_then(|v| v.as_array()),
+        true,
+    );
+    if candidates.is_empty() {
+        candidates = collect_mp4(
+            val.pointer("/streamingData/formats")
+                .and_then(|v| v.as_array()),
+            false,
+        );
+    }
+
+    if let Some((h, w, _, url)) = candidates
+        .iter()
+        .filter(|(h, _, _, _)| *h <= max_height)
+        .max_by_key(|(h, _, fps, _)| (*h, *fps))
+        .cloned()
+        .or_else(|| {
+            candidates
+                .into_iter()
+                .min_by_key(|(h, _, fps, _)| (*h, std::cmp::Reverse(*fps)))
+        })
+    {
+        return Some(VideoStreamInfo {
+            track_id: video_id.to_string(),
+            url,
+            fallback_url: hls_url,
+            user_agent: user_agent.to_string(),
+            width: w,
+            height: h,
+            is_hls: false,
+        });
+    }
+
+    hls_url.map(|url| VideoStreamInfo {
+        track_id: video_id.to_string(),
+        url,
+        fallback_url: None,
+        user_agent: user_agent.to_string(),
+        width: 1280,
+        height: 720,
+        is_hls: true,
+    })
+}
+
+async fn fetch_visionos_player_json(
     http: &reqwest::Client,
     video_id: &str,
-    quality: AudioQuality,
-) -> Result<StreamInfo, String> {
-    let mut last_err = "VISIONOS stream failed".to_string();
+) -> Result<Value, String> {
+    let mut last_err = "VISIONOS player failed".to_string();
     for attempt in 0..2 {
         let vd = get_or_fetch_visitor_data(http, attempt > 0).await?;
         let body = json!({
@@ -932,17 +1019,113 @@ async fn fetch_visionos_stream(
                 last_err = "Invalid JSON from VISIONOS player".to_string();
                 continue;
             };
-            if let Some(best) = pick_best_audio_stream(video_id, &val, quality) {
-                return Ok(best);
-            }
             let status = val
                 .pointer("/playabilityStatus/status")
                 .and_then(|v| v.as_str())
                 .unwrap_or("UNKNOWN");
+            if status == "OK" && val.get("streamingData").is_some() {
+                return Ok(val);
+            }
             last_err = format!("VISIONOS playabilityStatus={status}");
         }
     }
     Err(last_err)
+}
+
+async fn fetch_mobile_player_json(
+    http: &reqwest::Client,
+    video_id: &str,
+    client_name: &str,
+    client_version: &str,
+    ua: &str,
+    client_id: &str,
+) -> Result<Value, String> {
+    let client_obj = if client_name == "IOS" {
+        json!({
+            "clientName": client_name,
+            "clientVersion": client_version,
+            "deviceMake": "Apple",
+            "deviceModel": "iPhone16,2",
+            "hl": "es-419",
+            "gl": "MX",
+            "osName": "iOS",
+            "osVersion": "17.5.1.21F90"
+        })
+    } else {
+        json!({
+            "clientName": client_name,
+            "clientVersion": client_version,
+            "hl": "es-419",
+            "gl": "MX",
+            "androidSdkVersion": 32,
+            "osName": "Android",
+            "osVersion": "12"
+        })
+    };
+    let body = json!({
+        "context": {
+            "client": client_obj
+        },
+        "videoId": video_id,
+        "contentCheckOk": true,
+        "racyCheckOk": true
+    });
+    let resp = http
+        .post("https://www.youtube.com/youtubei/v1/player?prettyPrint=false")
+        .header(CONTENT_TYPE, "application/json")
+        .header(USER_AGENT, ua)
+        .header("X-YouTube-Client-Name", client_id)
+        .header("X-YouTube-Client-Version", client_version)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("{client_name} HTTP {}", resp.status()));
+    }
+    let val = resp
+        .json::<Value>()
+        .await
+        .map_err(|_| format!("{client_name} invalid JSON"))?;
+    let status = val
+        .pointer("/playabilityStatus/status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if status != "OK" {
+        return Err(val
+            .pointer("/playabilityStatus/reason")
+            .and_then(|v| v.as_str())
+            .unwrap_or(status)
+            .to_string());
+    }
+    Ok(val)
+}
+
+async fn fetch_visionos_stream(
+    http: &reqwest::Client,
+    video_id: &str,
+    quality: AudioQuality,
+) -> Result<StreamInfo, String> {
+    let val = fetch_visionos_player_json(http, video_id).await?;
+    pick_best_audio_stream(video_id, &val, quality)
+        .ok_or_else(|| "No audio stream in VISIONOS response".to_string())
+}
+
+/// Resolves a direct hardware-decodable H.264 MP4 or HLS video stream via InnerTube.
+pub async fn fetch_player_video_stream(
+    http: &reqwest::Client,
+    video_id: &str,
+    max_height: u32,
+) -> Result<VideoStreamInfo, String> {
+    if let Ok(val) = fetch_visionos_player_json(http, video_id).await {
+        if let Some(v) = pick_best_video_stream(video_id, &val, max_height, VISIONOS_UA) {
+            return Ok(v);
+        }
+    }
+    let val = fetch_mobile_player_json(http, video_id, "ANDROID_VR", "1.60.19", ANDROID_VR_UA, "28")
+        .await?;
+    pick_best_video_stream(video_id, &val, max_height, ANDROID_VR_UA)
+        .ok_or_else(|| "No compatible MP4/HLS video stream".to_string())
 }
 
 /// Fast direct stream extraction via InnerTube `VISIONOS 0.1` (+ visitorData),
@@ -956,91 +1139,21 @@ pub async fn fetch_player_stream(
         return Ok(stream);
     }
     let clients = [
-        (
-            "ANDROID_VR",
-            "1.60.19",
-            "com.google.android.apps.youtube.vr.oculus/1.60.19 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip",
-            "28",
-        ),
-        (
-            "IOS",
-            "19.29.1",
-            "com.google.ios.youtube/19.29.1 (iPhone16,2; U; CPU iOS 17_5_1 like Mac OS X;)",
-            "5",
-        ),
+        ("ANDROID_VR", "1.60.19", ANDROID_VR_UA, "28"),
+        ("IOS", "19.29.1", IOS_PLAYER_UA, "5"),
     ];
 
     let mut last_err = String::from("No stream returned");
-
     for (client_name, client_version, ua, client_id) in clients {
-        let client_obj = if client_name == "IOS" {
-            json!({
-                "clientName": client_name,
-                "clientVersion": client_version,
-                "deviceMake": "Apple",
-                "deviceModel": "iPhone16,2",
-                "hl": "es-419",
-                "gl": "MX",
-                "osName": "iOS",
-                "osVersion": "17.5.1.21F90"
-            })
-        } else {
-            json!({
-                "clientName": client_name,
-                "clientVersion": client_version,
-                "hl": "es-419",
-                "gl": "MX",
-                "androidSdkVersion": 32,
-                "osName": "Android",
-                "osVersion": "12"
-            })
-        };
-        let body = json!({
-            "context": {
-                "client": client_obj
-            },
-            "videoId": video_id,
-            "contentCheckOk": true,
-            "racyCheckOk": true
-        });
-        let resp = match http
-            .post("https://www.youtube.com/youtubei/v1/player?prettyPrint=false")
-            .header(CONTENT_TYPE, "application/json")
-            .header(USER_AGENT, ua)
-            .header("X-YouTube-Client-Name", client_id)
-            .header("X-YouTube-Client-Version", client_version)
-            .json(&body)
-            .send()
+        match fetch_mobile_player_json(http, video_id, client_name, client_version, ua, client_id)
             .await
         {
-            Ok(r) => r,
-            Err(e) => {
-                last_err = e.to_string();
-                continue;
+            Ok(val) => {
+                if let Some(best) = pick_best_audio_stream(video_id, &val, quality) {
+                    return Ok(best);
+                }
             }
-        };
-        if !resp.status().is_success() {
-            last_err = format!("{client_name} HTTP {}", resp.status());
-            continue;
-        }
-        let Ok(val) = resp.json::<Value>().await else {
-            last_err = format!("{client_name} invalid JSON");
-            continue;
-        };
-        let status = val
-            .pointer("/playabilityStatus/status")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        if status != "OK" {
-            last_err = val
-                .pointer("/playabilityStatus/reason")
-                .and_then(|v| v.as_str())
-                .unwrap_or(status)
-                .to_string();
-            continue;
-        }
-        if let Some(best) = pick_best_audio_stream(video_id, &val, quality) {
-            return Ok(best);
+            Err(e) => last_err = e,
         }
     }
 
@@ -1412,6 +1525,53 @@ mod tests {
         assert!((lines[0].time_secs - 5.0).abs() < 0.01);
         assert_eq!(lines[1].text, "Primera línea");
         assert!((lines[1].time_secs - 12.5).abs() < 0.01);
+    }
+
+    #[test]
+    fn pick_best_video_stream_respects_height_cap_and_attaches_hls() {
+        let sample = json!({
+            "streamingData": {
+                "hlsManifestUrl": "https://manifest.googlevideo.com/test.m3u8",
+                "adaptiveFormats": [
+                    {
+                        "itag": 247,
+                        "mimeType": "video/webm; codecs=\"vp9\"",
+                        "width": 1280,
+                        "height": 720,
+                        "fps": 30,
+                        "url": "https://rr1.googlevideo.com/vp9_720"
+                    },
+                    {
+                        "itag": 135,
+                        "mimeType": "video/mp4; codecs=\"avc1.4D401E\"",
+                        "width": 854,
+                        "height": 480,
+                        "fps": 30,
+                        "url": "https://rr1.googlevideo.com/avc_480"
+                    },
+                    {
+                        "itag": 136,
+                        "mimeType": "video/mp4; codecs=\"avc1.4D401F\"",
+                        "width": 1280,
+                        "height": 720,
+                        "fps": 30,
+                        "url": "https://rr1.googlevideo.com/avc_720"
+                    }
+                ]
+            }
+        });
+        let s480 = pick_best_video_stream("vid1", &sample, 480, VISIONOS_UA).expect("480p video");
+        assert_eq!(s480.height, 480);
+        assert_eq!(s480.url, "https://rr1.googlevideo.com/avc_480");
+        assert_eq!(
+            s480.fallback_url.as_deref(),
+            Some("https://manifest.googlevideo.com/test.m3u8")
+        );
+        assert!(!s480.is_hls);
+
+        let s720 = pick_best_video_stream("vid1", &sample, 720, VISIONOS_UA).expect("720p video");
+        assert_eq!(s720.height, 720);
+        assert_eq!(s720.url, "https://rr1.googlevideo.com/avc_720");
     }
 
     #[tokio::test]

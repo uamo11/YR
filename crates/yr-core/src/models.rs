@@ -209,6 +209,18 @@ pub struct StreamInfo {
     pub content_length: Option<u64>,
 }
 
+/// Resolved direct video stream metadata for native in-place video playback.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VideoStreamInfo {
+    pub track_id: String,
+    pub url: String,
+    pub fallback_url: Option<String>,
+    pub user_agent: String,
+    pub width: u32,
+    pub height: u32,
+    pub is_hls: bool,
+}
+
 /// Persisted user playlist created locally inside YR.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LocalPlaylist {

@@ -12,8 +12,14 @@ import android.content.Intent;
 import android.content.pm.ServiceInfo;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
+import android.graphics.Matrix;
+import android.graphics.Outline;
+import android.graphics.PixelFormat;
+import android.graphics.SurfaceTexture;
 import android.graphics.Typeface;
 import android.media.MediaMetadata;
+import android.media.MediaPlayer;
+import android.media.PlaybackParams;
 import android.media.session.MediaSession;
 import android.media.session.PlaybackState;
 import android.net.ConnectivityManager;
@@ -28,12 +34,13 @@ import android.os.PowerManager;
 import android.text.TextUtils;
 import android.util.Log;
 import android.view.Gravity;
-import android.view.KeyEvent;
+import android.view.Surface;
+import android.view.TextureView;
 import android.view.View;
 import android.view.ViewGroup;
-import android.os.Message;
+import android.view.ViewOutlineProvider;
+import android.view.WindowManager;
 import android.webkit.CookieManager;
-import android.webkit.WebChromeClient;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
@@ -41,10 +48,13 @@ import android.webkit.WebViewClient;
 import android.widget.Button;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
+import android.widget.ProgressBar;
 import android.widget.TextView;
 import java.io.InputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
@@ -77,9 +87,26 @@ public class YrPlaybackService extends Service {
     private static volatile YrPlaybackService activeInstance = null;
     private static volatile String lastMetaKey = "";
     private static volatile Boolean lastNotifPlaying = null;
-    private static volatile FrameLayout sEmbeddedContainer = null;
-    private static volatile WebView sEmbeddedWebView = null;
-    private static volatile String sCurrentVideoId = null;
+    private static volatile FrameLayout sVideoOverlayRoot = null;
+    private static volatile TextureView sVideoTextureView = null;
+    private static volatile ProgressBar sVideoSpinner = null;
+    private static volatile WindowManager.LayoutParams sVideoParams = null;
+    private static volatile boolean sVideoAdded = false;
+    private static volatile MediaPlayer sMediaPlayer = null;
+    private static volatile Surface sVideoSurface = null;
+    private static volatile String sVideoUrl = null;
+    private static volatile String sVideoFallbackUrl = null;
+    private static volatile String sVideoUserAgent = null;
+    private static volatile boolean sVideoPrepared = false;
+    private static volatile boolean sTriedFallback = false;
+    private static volatile boolean sVideoWantedVisible = false;
+    private static volatile boolean sPendingPlaying = false;
+    private static volatile long sPendingPosMs = 0;
+    private static volatile float sPendingSpeed = 1.0f;
+    private static volatile float sLastAppliedSpeed = 1.0f;
+    private static volatile int sVideoWidth = 0;
+    private static volatile int sVideoHeight = 0;
+    private static volatile boolean sActivityPaused = false;
 
     static {
         try {
@@ -434,98 +461,376 @@ public class YrPlaybackService extends Service {
         return videoId;
     }
 
-    public static void attachEmbeddedVideo(final Context ctx, final String videoUrlOrId, final int x, final int y, final int width, final int height, final long startSecs) {
-        if (ctx == null || videoUrlOrId == null) return;
+    private static void applyVideoAspectTransform() {
+        if (sVideoTextureView == null || sVideoWidth <= 0 || sVideoHeight <= 0) return;
+        int viewWidth = sVideoTextureView.getWidth();
+        int viewHeight = sVideoTextureView.getHeight();
+        if (viewWidth <= 0 || viewHeight <= 0) return;
+        float viewAspect = (float) viewWidth / (float) viewHeight;
+        float videoAspect = (float) sVideoWidth / (float) sVideoHeight;
+        float scaleX = 1.0f;
+        float scaleY = 1.0f;
+        if (videoAspect > viewAspect) {
+            scaleY = viewAspect / videoAspect;
+        } else {
+            scaleX = videoAspect / viewAspect;
+        }
+        Matrix matrix = new Matrix();
+        matrix.setScale(scaleX, scaleY, viewWidth * 0.5f, viewHeight * 0.5f);
+        sVideoTextureView.setTransform(matrix);
+    }
+
+    private static void seekMediaPlayerTo(MediaPlayer mp, long posMs) {
+        if (mp == null) return;
+        long clamped = Math.max(0L, posMs);
+        try {
+            if (Build.VERSION.SDK_INT >= 26) {
+                mp.seekTo(clamped, MediaPlayer.SEEK_CLOSEST);
+            } else {
+                mp.seekTo((int) Math.min(Integer.MAX_VALUE, clamped));
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private static void applySpeedToMediaPlayer(MediaPlayer mp, float speed) {
+        if (mp == null || Build.VERSION.SDK_INT < 23) return;
+        float clamped = Math.max(0.5f, Math.min(2.0f, speed));
+        try {
+            PlaybackParams pp = mp.getPlaybackParams();
+            pp.setSpeed(clamped);
+            mp.setPlaybackParams(pp);
+            sLastAppliedSpeed = clamped;
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private static void releaseMediaPlayerLocked() {
+        sVideoPrepared = false;
+        sVideoWidth = 0;
+        sVideoHeight = 0;
+        sLastAppliedSpeed = 1.0f;
+        MediaPlayer old = sMediaPlayer;
+        sMediaPlayer = null;
+        if (old != null) {
+            try {
+                old.setSurface(null);
+            } catch (Throwable ignored) {
+            }
+            try {
+                old.reset();
+            } catch (Throwable ignored) {
+            }
+            try {
+                old.release();
+            } catch (Throwable ignored) {
+            }
+        }
+    }
+
+    private static void prepareNativeMediaPlayer(final Activity act, final String streamUrl, final String ua) {
+        if (act == null || streamUrl == null || streamUrl.isEmpty()) return;
+        releaseMediaPlayerLocked();
+        if (sVideoSpinner != null) {
+            sVideoSpinner.setVisibility(View.VISIBLE);
+        }
+        try {
+            final MediaPlayer mp = new MediaPlayer();
+            sMediaPlayer = mp;
+            mp.setVolume(0f, 0f);
+            mp.setLooping(false);
+            if (sVideoSurface != null && sVideoSurface.isValid()) {
+                mp.setSurface(sVideoSurface);
+            }
+            mp.setOnVideoSizeChangedListener((player, vw, vh) -> {
+                if (player != sMediaPlayer) return;
+                sVideoWidth = vw;
+                sVideoHeight = vh;
+                applyVideoAspectTransform();
+            });
+            mp.setOnInfoListener((player, what, extra) -> {
+                if (player != sMediaPlayer) return false;
+                if (what == MediaPlayer.MEDIA_INFO_VIDEO_RENDERING_START
+                        || what == MediaPlayer.MEDIA_INFO_BUFFERING_END) {
+                    if (sVideoSpinner != null) sVideoSpinner.setVisibility(View.GONE);
+                } else if (what == MediaPlayer.MEDIA_INFO_BUFFERING_START) {
+                    if (sVideoSpinner != null) sVideoSpinner.setVisibility(View.VISIBLE);
+                }
+                return false;
+            });
+            mp.setOnPreparedListener(player -> {
+                if (player != sMediaPlayer) return;
+                sVideoPrepared = true;
+                player.setVolume(0f, 0f);
+                if (sVideoSpinner != null) {
+                    sVideoSpinner.setVisibility(View.GONE);
+                }
+                if (sPendingPosMs > 250) {
+                    seekMediaPlayerTo(player, sPendingPosMs);
+                }
+                if (Math.abs(sPendingSpeed - 1.0f) > 0.03f) {
+                    applySpeedToMediaPlayer(player, sPendingSpeed);
+                }
+                applyVideoAspectTransform();
+                if (sPendingPlaying && !sActivityPaused && sVideoWantedVisible) {
+                    try {
+                        player.start();
+                    } catch (Throwable ignored) {
+                    }
+                }
+                Log.i("YrPlaybackService", "Native MediaPlayer prepared: " + sVideoWidth + "x" + sVideoHeight);
+            });
+            mp.setOnErrorListener((player, what, extra) -> {
+                Log.w("YrPlaybackService", "Native MediaPlayer error what=" + what + " extra=" + extra);
+                if (player != sMediaPlayer) return true;
+                if (!sTriedFallback && sVideoFallbackUrl != null && !sVideoFallbackUrl.isEmpty()) {
+                    sTriedFallback = true;
+                    Log.i("YrPlaybackService", "Retrying fallback HLS video stream");
+                    prepareNativeMediaPlayer(act, sVideoFallbackUrl, sVideoUserAgent);
+                    return true;
+                }
+                if (sVideoSpinner != null) {
+                    sVideoSpinner.setVisibility(View.GONE);
+                }
+                return true;
+            });
+            Map<String, String> headers = new HashMap<String, String>();
+            if (ua != null && !ua.isEmpty()) {
+                headers.put("User-Agent", ua);
+            }
+            mp.setDataSource(act, Uri.parse(streamUrl), headers);
+            mp.prepareAsync();
+        } catch (Throwable t) {
+            Log.w("YrPlaybackService", "prepareNativeMediaPlayer failed: " + t);
+            if (!sTriedFallback && sVideoFallbackUrl != null && !sVideoFallbackUrl.isEmpty()) {
+                sTriedFallback = true;
+                prepareNativeMediaPlayer(act, sVideoFallbackUrl, sVideoUserAgent);
+            } else if (sVideoSpinner != null) {
+                sVideoSpinner.setVisibility(View.GONE);
+            }
+        }
+    }
+
+    public static void attachNativeVideo(
+            final Context ctx,
+            final String videoUrl,
+            final String fallbackUrl,
+            final String userAgent,
+            final int x,
+            final int y,
+            final int width,
+            final int height,
+            final long startMs,
+            final boolean playing,
+            final float speed
+    ) {
+        if (ctx == null || videoUrl == null || videoUrl.isEmpty()) return;
         final Activity act = (ctx instanceof Activity) ? (Activity) ctx : null;
-        if (act == null) return;
+        if (act == null || act.isFinishing()) return;
+        if (Build.VERSION.SDK_INT >= 17 && act.isDestroyed()) return;
 
         new Handler(Looper.getMainLooper()).post(() -> {
             try {
-                // Pause background audio so it doesn't double-play with the music video
-                try {
-                    nativeOnMediaAction(NATIVE_PAUSE, 0);
-                } catch (Throwable ignored) {
+                if (act.isFinishing()) return;
+                if (Build.VERSION.SDK_INT >= 17 && act.isDestroyed()) return;
+                View decor = act.getWindow() != null ? act.getWindow().getDecorView() : null;
+                IBinder token = decor != null ? decor.getWindowToken() : null;
+                if (token == null) {
+                    Log.w("YrPlaybackService", "attachNativeVideo: decor windowToken is null");
+                    return;
                 }
+                WindowManager wm = (WindowManager) act.getSystemService(Context.WINDOW_SERVICE);
+                if (wm == null) return;
 
-                final String videoId = extractVideoId(videoUrlOrId);
-                if (videoId.isEmpty()) return;
+                View content = act.findViewById(android.R.id.content);
+                int[] loc = new int[]{0, 0};
+                if (content != null) {
+                    content.getLocationOnScreen(loc);
+                }
+                final int wx = loc[0] + x;
+                final int wy = loc[1] + y;
 
-                if (sEmbeddedContainer == null) {
-                    sEmbeddedContainer = new FrameLayout(act);
-                    sEmbeddedContainer.setBackgroundColor(0xFF000000);
-
-                    sEmbeddedWebView = new WebView(act);
-                    sEmbeddedWebView.setBackgroundColor(0xFF000000);
-                    WebSettings ws = sEmbeddedWebView.getSettings();
-                    ws.setJavaScriptEnabled(true);
-                    ws.setMediaPlaybackRequiresUserGesture(false);
-                    ws.setDomStorageEnabled(true);
-                    ws.setSupportMultipleWindows(false);
-                    ws.setJavaScriptCanOpenWindowsAutomatically(false);
-                    ws.setCacheMode(WebSettings.LOAD_DEFAULT);
-                    ws.setUserAgentString("Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36");
-
-                    sEmbeddedWebView.setWebChromeClient(new WebChromeClient() {
+                if (sVideoOverlayRoot == null) {
+                    final float radiusPx = 12f * act.getResources().getDisplayMetrics().density;
+                    sVideoOverlayRoot = new FrameLayout(act);
+                    sVideoOverlayRoot.setBackgroundColor(0xFF0A0A0C);
+                    sVideoOverlayRoot.setClipToOutline(true);
+                    sVideoOverlayRoot.setOutlineProvider(new ViewOutlineProvider() {
                         @Override
-                        public boolean onCreateWindow(WebView view, boolean isDialog, boolean isUserGesture, Message resultMsg) {
-                            return false; // Prevent opening any external popup window
+                        public void getOutline(View view, Outline outline) {
+                            outline.setRoundRect(0, 0, view.getWidth(), view.getHeight(), radiusPx);
                         }
                     });
-                    sEmbeddedWebView.setWebViewClient(new WebViewClient() {
-                        @Override
-                        public boolean shouldOverrideUrlLoading(WebView view, String url) {
-                            return true; // Keep strictly within embed, never open external browser
-                        }
-
-                        @Override
-                        public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
-                            return true; // Keep strictly within embed, never open external browser
+                    sVideoOverlayRoot.setOnClickListener(v -> {
+                        try {
+                            nativeOnMediaAction(NATIVE_TOGGLE, 0);
+                        } catch (Throwable ignored) {
                         }
                     });
 
-                    sEmbeddedContainer.addView(sEmbeddedWebView, new FrameLayout.LayoutParams(
+                    sVideoTextureView = new TextureView(act);
+                    sVideoTextureView.setSurfaceTextureListener(new TextureView.SurfaceTextureListener() {
+                        @Override
+                        public void onSurfaceTextureAvailable(SurfaceTexture st, int w, int h) {
+                            if (sVideoSurface != null) {
+                                try {
+                                    sVideoSurface.release();
+                                } catch (Throwable ignored) {
+                                }
+                            }
+                            sVideoSurface = new Surface(st);
+                            if (sMediaPlayer != null) {
+                                try {
+                                    sMediaPlayer.setSurface(sVideoSurface);
+                                } catch (Throwable ignored) {
+                                }
+                            } else if (sVideoWantedVisible && sVideoUrl != null && !sVideoUrl.isEmpty()) {
+                                prepareNativeMediaPlayer(act, sVideoUrl, sVideoUserAgent);
+                            }
+                            applyVideoAspectTransform();
+                        }
+
+                        @Override
+                        public void onSurfaceTextureSizeChanged(SurfaceTexture st, int w, int h) {
+                            applyVideoAspectTransform();
+                        }
+
+                        @Override
+                        public boolean onSurfaceTextureDestroyed(SurfaceTexture st) {
+                            if (sMediaPlayer != null) {
+                                try {
+                                    sMediaPlayer.setSurface(null);
+                                } catch (Throwable ignored) {
+                                }
+                            }
+                            if (sVideoSurface != null) {
+                                try {
+                                    sVideoSurface.release();
+                                } catch (Throwable ignored) {
+                                }
+                                sVideoSurface = null;
+                            }
+                            return true;
+                        }
+
+                        @Override
+                        public void onSurfaceTextureUpdated(SurfaceTexture st) {
+                        }
+                    });
+                    sVideoOverlayRoot.addView(sVideoTextureView, new FrameLayout.LayoutParams(
                             FrameLayout.LayoutParams.MATCH_PARENT,
                             FrameLayout.LayoutParams.MATCH_PARENT
                     ));
 
-                    act.getWindow().addContentView(sEmbeddedContainer, new ViewGroup.LayoutParams(
-                            ViewGroup.LayoutParams.MATCH_PARENT,
-                            ViewGroup.LayoutParams.MATCH_PARENT
-                    ));
+                    sVideoSpinner = new ProgressBar(act);
+                    FrameLayout.LayoutParams spLp = new FrameLayout.LayoutParams(
+                            FrameLayout.LayoutParams.WRAP_CONTENT,
+                            FrameLayout.LayoutParams.WRAP_CONTENT
+                    );
+                    spLp.gravity = Gravity.CENTER;
+                    sVideoOverlayRoot.addView(sVideoSpinner, spLp);
+
+                    sVideoParams = new WindowManager.LayoutParams(
+                            width,
+                            height,
+                            wx,
+                            wy,
+                            WindowManager.LayoutParams.TYPE_APPLICATION_PANEL,
+                            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                                    | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
+                                    | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
+                                    | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
+                                    | WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED,
+                            PixelFormat.TRANSLUCENT
+                    );
+                    sVideoParams.token = token;
+                    sVideoParams.gravity = Gravity.TOP | Gravity.START;
+                    if (Build.VERSION.SDK_INT >= 28) {
+                        sVideoParams.layoutInDisplayCutoutMode =
+                                WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
+                    }
+                    try {
+                        wm.addView(sVideoOverlayRoot, sVideoParams);
+                        sVideoAdded = true;
+                    } catch (Throwable addErr) {
+                        Log.e("YrPlaybackService", "WindowManager.addView failed", addErr);
+                        sVideoOverlayRoot = null;
+                        sVideoTextureView = null;
+                        sVideoSpinner = null;
+                        sVideoParams = null;
+                        sVideoAdded = false;
+                        return;
+                    }
+                } else if (sVideoAdded && sVideoParams != null) {
+                    sVideoParams.token = token;
+                    sVideoParams.x = wx;
+                    sVideoParams.y = wy;
+                    sVideoParams.width = width;
+                    sVideoParams.height = height;
+                    try {
+                        wm.updateViewLayout(sVideoOverlayRoot, sVideoParams);
+                    } catch (Throwable updErr) {
+                        Log.w("YrPlaybackService", "WindowManager.updateViewLayout failed: " + updErr);
+                    }
                 }
 
-                FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(width, height);
-                lp.gravity = Gravity.TOP | Gravity.START;
-                lp.leftMargin = x;
-                lp.topMargin = y;
-                sEmbeddedContainer.setLayoutParams(lp);
-                sEmbeddedContainer.setVisibility(View.VISIBLE);
+                sVideoWantedVisible = true;
+                sPendingPlaying = playing;
+                sPendingPosMs = startMs;
+                sPendingSpeed = speed;
+                if (!sActivityPaused && sVideoOverlayRoot != null) {
+                    sVideoOverlayRoot.setVisibility(View.VISIBLE);
+                }
 
-                if (sCurrentVideoId == null || !sCurrentVideoId.equals(videoId)) {
-                    sCurrentVideoId = videoId;
-                    String startParam = (startSecs > 0) ? "&start=" + startSecs : "";
-                    String embedHtml = "<!DOCTYPE html><html><head>"
-                            + "<meta name='viewport' content='width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no'>"
-                            + "<style>"
-                            + "  * { margin:0; padding:0; box-sizing:border-box; background-color:#000000; }"
-                            + "  html, body { width:100%; height:100%; overflow:hidden; display:flex; align-items:center; justify-content:center; }"
-                            + "  iframe { width:100%; height:100%; border:none; }"
-                            + "  .ytp-title-link, .ytp-watermark, .ytp-youtube-button, .ytp-pause-overlay, .ytp-impression-link, .ytp-contextmenu { display:none !important; pointer-events:none !important; }"
-                            + "</style>"
-                            + "</head><body>"
-                            + "<iframe id='player' type='text/html' width='100%' height='100%' "
-                            + "src='https://www.youtube-nocookie.com/embed/" + videoId + "?autoplay=1&playsinline=1&controls=1&rel=0&modestbranding=1&enablejsapi=1&origin=https://music.youtube.com&fs=0&iv_load_policy=3" + startParam + "' "
-                            + "frameborder='0' allow='accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture' allowfullscreen></iframe>"
-                            + "</body></html>";
-                    sEmbeddedWebView.loadDataWithBaseURL("https://music.youtube.com", embedHtml, "text/html", "UTF-8", null);
-                } else {
-                    sEmbeddedWebView.evaluateJavascript("document.querySelector('iframe').contentWindow.postMessage('{\"event\":\"command\",\"func\":\"playVideo\",\"args\":\"\"}', '*');", null);
-                    if (startSecs > 0) {
-                        sEmbeddedWebView.evaluateJavascript("document.querySelector('iframe').contentWindow.postMessage('{\"event\":\"command\",\"func\":\"seekTo\",\"args\":[" + startSecs + ", true]}', '*');", null);
+                boolean urlChanged = !videoUrl.equals(sVideoUrl);
+                if (urlChanged || sMediaPlayer == null) {
+                    sVideoUrl = videoUrl;
+                    sVideoFallbackUrl = fallbackUrl;
+                    sVideoUserAgent = userAgent;
+                    sTriedFallback = false;
+                    prepareNativeMediaPlayer(act, videoUrl, userAgent);
+                } else if (sVideoPrepared && sMediaPlayer != null) {
+                    try {
+                        if (playing && !sActivityPaused && !sMediaPlayer.isPlaying()) {
+                            sMediaPlayer.start();
+                        } else if (!playing && sMediaPlayer.isPlaying()) {
+                            sMediaPlayer.pause();
+                        }
+                        if (Math.abs(sMediaPlayer.getCurrentPosition() - startMs) > 450) {
+                            seekMediaPlayerTo(sMediaPlayer, startMs);
+                        }
+                    } catch (Throwable ignored) {
                     }
                 }
             } catch (Throwable t) {
-                Log.w("YrPlaybackService", "attachEmbeddedVideo failed: " + t);
+                Log.w("YrPlaybackService", "attachNativeVideo failed: " + t);
+            }
+        });
+    }
+
+    public static void syncNativeVideo(final Context ctx, final boolean playing, final long posMs, final float speed) {
+        new Handler(Looper.getMainLooper()).post(() -> {
+            try {
+                sPendingPlaying = playing;
+                sPendingPosMs = posMs;
+                sPendingSpeed = speed;
+                MediaPlayer mp = sMediaPlayer;
+                if (mp == null || !sVideoPrepared || sActivityPaused || !sVideoWantedVisible) {
+                    return;
+                }
+                if (playing && !mp.isPlaying()) {
+                    mp.start();
+                } else if (!playing && mp.isPlaying()) {
+                    mp.pause();
+                }
+                long cur = mp.getCurrentPosition();
+                if (Math.abs(cur - posMs) > 450) {
+                    seekMediaPlayerTo(mp, posMs);
+                }
+                if (Math.abs(sLastAppliedSpeed - speed) > 0.03f) {
+                    applySpeedToMediaPlayer(mp, speed);
+                }
+            } catch (Throwable ignored) {
             }
         });
     }
@@ -533,277 +838,91 @@ public class YrPlaybackService extends Service {
     public static void hideEmbeddedVideo(final Context ctx) {
         new Handler(Looper.getMainLooper()).post(() -> {
             try {
-                if (sEmbeddedContainer != null) {
-                    sEmbeddedContainer.setVisibility(View.GONE);
+                sVideoWantedVisible = false;
+                if (sMediaPlayer != null && sVideoPrepared) {
+                    try {
+                        if (sMediaPlayer.isPlaying()) {
+                            sMediaPlayer.pause();
+                        }
+                    } catch (Throwable ignored) {
+                    }
                 }
-                if (sEmbeddedWebView != null) {
-                    sEmbeddedWebView.evaluateJavascript("document.querySelector('iframe').contentWindow.postMessage('{\"event\":\"command\",\"func\":\"pauseVideo\",\"args\":\"\"}', '*');", null);
+                if (sVideoOverlayRoot != null) {
+                    sVideoOverlayRoot.setVisibility(View.GONE);
                 }
             } catch (Throwable ignored) {
             }
         });
     }
 
-    public static void controlEmbeddedVideo(final Context ctx, final String command, final double arg) {
+    public static void onActivityPaused(final Context ctx) {
         new Handler(Looper.getMainLooper()).post(() -> {
             try {
-                if (sEmbeddedWebView == null || sEmbeddedContainer == null || sEmbeddedContainer.getVisibility() != View.VISIBLE) {
-                    return;
+                sActivityPaused = true;
+                if (sMediaPlayer != null && sVideoPrepared) {
+                    try {
+                        if (sMediaPlayer.isPlaying()) {
+                            sMediaPlayer.pause();
+                        }
+                    } catch (Throwable ignored) {
+                    }
                 }
-                if ("play".equalsIgnoreCase(command)) {
-                    sEmbeddedWebView.evaluateJavascript("document.querySelector('iframe').contentWindow.postMessage('{\"event\":\"command\",\"func\":\"playVideo\",\"args\":\"\"}', '*');", null);
-                } else if ("pause".equalsIgnoreCase(command)) {
-                    sEmbeddedWebView.evaluateJavascript("document.querySelector('iframe').contentWindow.postMessage('{\"event\":\"command\",\"func\":\"pauseVideo\",\"args\":\"\"}', '*');", null);
-                } else if ("seekTo".equalsIgnoreCase(command)) {
-                    sEmbeddedWebView.evaluateJavascript("document.querySelector('iframe').contentWindow.postMessage('{\"event\":\"command\",\"func\":\"seekTo\",\"args\":[" + (long) arg + ", true]}', '*');", null);
+                if (sVideoOverlayRoot != null) {
+                    sVideoOverlayRoot.setVisibility(View.GONE);
                 }
             } catch (Throwable ignored) {
             }
         });
     }
 
-    public static void openVideo(final Context ctx, final String videoUrl) {
-        openVideo(ctx, videoUrl, "", "", 0);
-    }
-
-    public static void openVideo(final Context ctx, final String videoUrlOrId, final String title, final String artist) {
-        openVideo(ctx, videoUrlOrId, title, artist, 0);
-    }
-
-    public static void openVideo(final Context ctx, final String videoUrlOrId, final String title, final String artist, final long startSecs) {
-        if (ctx == null || videoUrlOrId == null) return;
+    public static void onActivityResumed(final Context ctx) {
         new Handler(Looper.getMainLooper()).post(() -> {
             try {
-                // Pause background audio so it doesn't double-play with the music video
-                try {
-                    nativeOnMediaAction(NATIVE_PAUSE, 0);
-                } catch (Throwable ignored) {
+                sActivityPaused = false;
+                if (sVideoWantedVisible && sVideoOverlayRoot != null) {
+                    sVideoOverlayRoot.setVisibility(View.VISIBLE);
+                    if (sMediaPlayer != null && sVideoPrepared && sPendingPlaying && !sMediaPlayer.isPlaying()) {
+                        try {
+                            sMediaPlayer.start();
+                        } catch (Throwable ignored) {
+                        }
+                    }
                 }
+            } catch (Throwable ignored) {
+            }
+        });
+    }
 
-                String videoId = videoUrlOrId.trim();
-                if (videoId.contains("v=")) {
-                    videoId = videoId.substring(videoId.indexOf("v=") + 2);
-                    int amp = videoId.indexOf("&");
-                    if (amp != -1) videoId = videoId.substring(0, amp);
-                } else if (videoId.contains("youtu.be/")) {
-                    videoId = videoId.substring(videoId.indexOf("youtu.be/") + 9);
-                    int q = videoId.indexOf("?");
-                    if (q != -1) videoId = videoId.substring(0, q);
-                } else if (videoId.contains("embed/")) {
-                    videoId = videoId.substring(videoId.indexOf("embed/") + 6);
-                    int q = videoId.indexOf("?");
-                    if (q != -1) videoId = videoId.substring(0, q);
+    public static void destroyEmbeddedVideo(final Context ctx) {
+        new Handler(Looper.getMainLooper()).post(() -> {
+            try {
+                sVideoWantedVisible = false;
+                sVideoUrl = null;
+                sVideoFallbackUrl = null;
+                sVideoUserAgent = null;
+                releaseMediaPlayerLocked();
+                if (sVideoSurface != null) {
+                    try {
+                        sVideoSurface.release();
+                    } catch (Throwable ignored) {
+                    }
+                    sVideoSurface = null;
                 }
-
-                final Dialog dialog = new Dialog(ctx, android.R.style.Theme_Black_NoTitleBar_Fullscreen);
-                dialog.setCancelable(true);
-
-                final LinearLayout root = new LinearLayout(ctx);
-                root.setOrientation(LinearLayout.VERTICAL);
-                root.setBackgroundColor(0xFF000000);
-
-                // Top Bar
-                final LinearLayout topBar = new LinearLayout(ctx);
-                topBar.setOrientation(LinearLayout.HORIZONTAL);
-                topBar.setBackgroundColor(0xFF101014);
-                topBar.setPadding(24, 20, 24, 20);
-                topBar.setGravity(Gravity.CENTER_VERTICAL);
-
-                // Close button "✕"
-                TextView closeBtn = new TextView(ctx);
-                closeBtn.setText("✕");
-                closeBtn.setTextColor(0xFFFFFFFF);
-                closeBtn.setTextSize(20);
-                closeBtn.setPadding(12, 8, 20, 8);
-                topBar.addView(closeBtn);
-
-                // Title & Artist container
-                LinearLayout infoCol = new LinearLayout(ctx);
-                infoCol.setOrientation(LinearLayout.VERTICAL);
-                infoCol.setPadding(8, 0, 8, 0);
-
-                TextView tvTitle = new TextView(ctx);
-                String displayTitle = (title != null && !title.trim().isEmpty()) ? title : "Video Musical";
-                tvTitle.setText(displayTitle);
-                tvTitle.setTextColor(0xFFFFFFFF);
-                tvTitle.setTextSize(15);
-                tvTitle.setTypeface(Typeface.DEFAULT_BOLD);
-                tvTitle.setSingleLine(true);
-                tvTitle.setEllipsize(TextUtils.TruncateAt.END);
-                infoCol.addView(tvTitle);
-
-                TextView tvArtist = new TextView(ctx);
-                String displayArtist = (artist != null && !artist.trim().isEmpty()) ? artist : "YR Music • Reproductor Integrado";
-                tvArtist.setText(displayArtist);
-                tvArtist.setTextColor(0xFFAAAAAA);
-                tvArtist.setTextSize(12);
-                tvArtist.setSingleLine(true);
-                tvArtist.setEllipsize(TextUtils.TruncateAt.END);
-                infoCol.addView(tvArtist);
-
-                LinearLayout.LayoutParams infoParams = new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.0f);
-                topBar.addView(infoCol, infoParams);
-
-                // Button to close and return to audio
-                Button returnBtn = new Button(ctx);
-                returnBtn.setText("Música");
-                returnBtn.setTextColor(0xFFFFFFFF);
-                returnBtn.setTextSize(12);
-                returnBtn.setBackgroundColor(0xFF24242A);
-                topBar.addView(returnBtn, new LinearLayout.LayoutParams(
-                        LinearLayout.LayoutParams.WRAP_CONTENT,
-                        LinearLayout.LayoutParams.WRAP_CONTENT
-                ));
-
-                root.addView(topBar, new LinearLayout.LayoutParams(
-                        LinearLayout.LayoutParams.MATCH_PARENT,
-                        LinearLayout.LayoutParams.WRAP_CONTENT
-                ));
-
-                // WebView Video Frame
-                final FrameLayout container = new FrameLayout(ctx);
-                container.setBackgroundColor(0xFF000000);
-
-                final WebView wv = new WebView(ctx);
-                wv.setBackgroundColor(0xFF000000);
-                WebSettings ws = wv.getSettings();
-                ws.setJavaScriptEnabled(true);
-                ws.setDomStorageEnabled(true);
-                ws.setMediaPlaybackRequiresUserGesture(false);
-                ws.setSupportMultipleWindows(false);
-                ws.setAllowFileAccess(false);
-                ws.setAllowContentAccess(false);
-
-                String defaultUa = WebSettings.getDefaultUserAgent(ctx);
-                String cleanUa = defaultUa != null
-                        ? defaultUa.replace("; wv)", ")").replace(" wv)", ")")
-                        : "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36";
-                ws.setUserAgentString(cleanUa);
-
-                wv.setWebChromeClient(new WebChromeClient() {
-                    private View customView;
-                    private CustomViewCallback customViewCallback;
-
-                    @Override
-                    public boolean onCreateWindow(WebView view, boolean isDialog, boolean isUserGesture, Message resultMsg) {
-                        return false;
-                    }
-
-                    @Override
-                    public void onShowCustomView(View view, CustomViewCallback callback) {
-                        if (customView != null) {
-                            callback.onCustomViewHidden();
-                            return;
-                        }
-                        customView = view;
-                        customViewCallback = callback;
-                        topBar.setVisibility(View.GONE);
-                        container.setVisibility(View.GONE);
-                        root.addView(customView, new LinearLayout.LayoutParams(
-                                LinearLayout.LayoutParams.MATCH_PARENT,
-                                LinearLayout.LayoutParams.MATCH_PARENT));
-                    }
-
-                    @Override
-                    public void onHideCustomView() {
-                        if (customView == null) return;
-                        topBar.setVisibility(View.VISIBLE);
-                        container.setVisibility(View.VISIBLE);
-                        root.removeView(customView);
-                        customView = null;
-                        if (customViewCallback != null) {
-                            customViewCallback.onCustomViewHidden();
-                            customViewCallback = null;
-                        }
-                    }
-                });
-
-                wv.setWebViewClient(new WebViewClient() {
-                    @Override
-                    public boolean shouldOverrideUrlLoading(WebView view, String url) {
-                        if (url != null && (url.contains("youtube.com/embed") || url.contains("youtube-nocookie.com/embed"))) {
-                            return false;
-                        }
-                        // Strictly block opening external apps, intents, or external browsers
-                        return true;
-                    }
-
-                    @Override
-                    public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
-                        if (request != null && request.getUrl() != null) {
-                            String u = request.getUrl().toString();
-                            if (u.contains("youtube.com/embed") || u.contains("youtube-nocookie.com/embed")) {
-                                return false;
-                            }
-                        }
-                        // Strictly block opening external apps, intents, or external browsers
-                        return true;
-                    }
-                });
-
-                String startParam = (startSecs > 0) ? "&start=" + startSecs : "";
-                String embedHtml = "<!DOCTYPE html><html><head>"
-                        + "<meta name='viewport' content='width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no'>"
-                        + "<style>"
-                        + "  * { margin:0; padding:0; box-sizing:border-box; background-color:#000000; }"
-                        + "  html, body { width:100%; height:100%; overflow:hidden; display:flex; align-items:center; justify-content:center; }"
-                        + "  iframe { width:100%; height:100%; border:none; }"
-                        + "</style>"
-                        + "</head><body>"
-                        + "<iframe id='player' type='text/html' width='100%' height='100%' "
-                        + "src='https://www.youtube-nocookie.com/embed/" + videoId + "?autoplay=1&playsinline=1&controls=1&rel=0&modestbranding=1&enablejsapi=1&origin=https://music.youtube.com" + startParam + "' "
-                        + "frameborder='0' allow='accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture' allowfullscreen></iframe>"
-                        + "</body></html>";
-
-                wv.loadDataWithBaseURL("https://music.youtube.com", embedHtml, "text/html", "UTF-8", null);
-
-                container.addView(wv, new FrameLayout.LayoutParams(
-                        FrameLayout.LayoutParams.MATCH_PARENT,
-                        FrameLayout.LayoutParams.MATCH_PARENT
-                ));
-
-                root.addView(container, new LinearLayout.LayoutParams(
-                        LinearLayout.LayoutParams.MATCH_PARENT,
-                        0,
-                        1.0f
-                ));
-
-                final Runnable cleanup = () -> {
+                if (sVideoAdded && sVideoOverlayRoot != null && ctx != null) {
                     try {
-                        wv.stopLoading();
-                        wv.loadUrl("about:blank");
-                        wv.onPause();
-                        wv.pauseTimers();
-                        wv.destroy();
+                        WindowManager wm = (WindowManager) ctx.getSystemService(Context.WINDOW_SERVICE);
+                        if (wm != null) {
+                            wm.removeViewImmediate(sVideoOverlayRoot);
+                        }
                     } catch (Throwable ignored) {
                     }
-                    try {
-                        dialog.dismiss();
-                    } catch (Throwable ignored) {
-                    }
-                    try {
-                        nativeOnMediaAction(NATIVE_PLAY, 0);
-                    } catch (Throwable ignored) {
-                    }
-                };
-
-                closeBtn.setOnClickListener(v -> cleanup.run());
-                returnBtn.setOnClickListener(v -> cleanup.run());
-                dialog.setOnCancelListener(d -> cleanup.run());
-
-                dialog.setOnKeyListener((d, keyCode, event) -> {
-                    if (keyCode == KeyEvent.KEYCODE_BACK && event.getAction() == KeyEvent.ACTION_UP) {
-                        cleanup.run();
-                        return true;
-                    }
-                    return false;
-                });
-
-                dialog.setContentView(root);
-                dialog.show();
-
-            } catch (Throwable t) {
-                Log.w("YrPlaybackService", "openVideo in-app failed: " + t);
+                }
+                sVideoAdded = false;
+                sVideoOverlayRoot = null;
+                sVideoTextureView = null;
+                sVideoSpinner = null;
+                sVideoParams = null;
+            } catch (Throwable ignored) {
             }
         });
     }

@@ -101,11 +101,15 @@ struct TaskControl {
     pause_tx: watch::Sender<bool>,
 }
 
+/// Optional blocking URL resolver fallback (e.g., Android WebView extractor).
+pub type FallbackUrlResolver = Arc<dyn Fn(String) -> Option<String> + Send + Sync>;
+
 /// Concurrent download manager with Range resume, retries, and offline metadata index.
 pub struct DownloadManager {
     download_dir: PathBuf,
     http: reqwest::Client,
     provider: Arc<dyn MusicProvider>,
+    fallback_resolver: Option<FallbackUrlResolver>,
     semaphore: Arc<Semaphore>,
     tasks: Arc<Mutex<HashMap<String, DownloadTask>>>,
     controls: Arc<Mutex<HashMap<String, TaskControl>>>,
@@ -131,12 +135,18 @@ impl DownloadManager {
             download_dir,
             http,
             provider,
+            fallback_resolver: None,
             semaphore: Arc::new(Semaphore::new(max_concurrent.max(1))),
             tasks: Arc::new(Mutex::new(HashMap::new())),
             controls: Arc::new(Mutex::new(HashMap::new())),
         };
         mgr.scan_existing_sync();
         mgr
+    }
+
+    pub fn with_fallback_resolver(mut self, resolver: FallbackUrlResolver) -> Self {
+        self.fallback_resolver = Some(resolver);
+        self
     }
 
     fn scan_existing_sync(&self) {
@@ -191,6 +201,14 @@ impl DownloadManager {
             .filter(|t| t.status == DownloadStatus::Completed)
             .map(|t| t.track.clone())
             .collect()
+    }
+
+    pub async fn completed_count(&self) -> usize {
+        let guard = self.tasks.lock().await;
+        guard
+            .values()
+            .filter(|t| t.status == DownloadStatus::Completed)
+            .count()
     }
 
     pub async fn find_local_path(&self, track_id: &str) -> Option<PathBuf> {
@@ -434,11 +452,27 @@ impl DownloadManager {
         cancel_rx: &watch::Receiver<bool>,
         pause_rx: &watch::Receiver<bool>,
     ) -> Result<PathBuf, DownloadInternalError> {
-        let stream = self
-            .provider
-            .resolve_audio_stream(&track.id, quality)
-            .await
-            .map_err(|e| DownloadInternalError::Retryable(e.to_string()))?;
+        let stream = match self.provider.resolve_audio_stream(&track.id, quality).await {
+            Ok(s) => s,
+            Err(e) => {
+                let err_msg = e.to_string();
+                let mut fallback_stream = None;
+                if let Some(resolver) = self.fallback_resolver.as_ref().map(Arc::clone) {
+                    let tid = track.id.clone();
+                    if let Ok(Some(url)) = tokio::task::spawn_blocking(move || resolver(tid)).await {
+                        fallback_stream = Some(yr_core::StreamInfo {
+                            track_id: track.id.clone(),
+                            url,
+                            mime_type: "audio/mp4".to_string(),
+                            extension: "m4a".to_string(),
+                            bitrate_bps: 128_000,
+                            content_length: None,
+                        });
+                    }
+                }
+                fallback_stream.ok_or(DownloadInternalError::Retryable(err_msg))?
+            }
+        };
 
         let base_name = format!(
             "{} - {} [{}]",
@@ -869,5 +903,43 @@ mod tests {
         );
         assert_eq!(parse_content_range_total("bytes 0-10/*"), None);
         assert_eq!(parse_content_range_total("invalid"), None);
+    }
+
+    #[tokio::test]
+    async fn register_cached_track_persists_across_restart() {
+        let base = std::env::temp_dir().join(format!("yr_dl_test_{}", std::process::id()));
+        let dl_dir = base.join("downloads");
+        let cache_dir = base.join("stream_cache");
+        let _ = std::fs::remove_dir_all(&base);
+        let _ = std::fs::create_dir_all(&cache_dir);
+
+        let fake_audio = cache_dir.join("stream_test123.audio");
+        std::fs::write(&fake_audio, vec![0xAB_u8; 40_000]).unwrap();
+
+        let track = Track {
+            id: "test123".into(),
+            title: "Song Test".into(),
+            artist: "Artist Test".into(),
+            artist_id: None,
+            album: None,
+            album_id: None,
+            duration_secs: Some(180),
+            thumbnail_url: None,
+            local_path: None,
+        };
+
+        let provider: Arc<dyn MusicProvider> = Arc::new(yr_provider::YtMusicProvider::new());
+        let mgr = DownloadManager::new(dl_dir.clone(), Arc::clone(&provider), 2);
+        let registered = mgr.register_cached_track(track, &fake_audio).await.unwrap();
+        assert!(registered.exists());
+        assert_eq!(mgr.completed_count().await, 1);
+        assert_eq!(mgr.find_local_path("test123").await, Some(registered.clone()));
+
+        // Recreate DownloadManager (simulating app restart / power loss recovery).
+        let mgr2 = DownloadManager::new(dl_dir, provider, 2);
+        assert_eq!(mgr2.completed_count().await, 1);
+        assert_eq!(mgr2.find_local_path("test123").await, Some(registered));
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

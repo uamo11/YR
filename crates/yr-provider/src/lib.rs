@@ -15,7 +15,7 @@ use yr_core::{
     AlbumDetail, AlbumSummary, ArtistDetail, ArtistSummary, AudioQuality, ExploreFeed,
     GoogleAccountInfo, GoogleDeviceAuth, HomeFeed, HomeShelf, HomeShelfCard, HomeShelfLayout, LyricsData, MoodGenre,
     PlaylistDetail, PlaylistSummary, SearchResults, ShelfCardKind, SponsorSegment, StreamInfo,
-    Track,
+    Track, VideoStreamInfo,
 };
 
 #[derive(Debug, Error)]
@@ -50,6 +50,13 @@ pub trait MusicProvider: Send + Sync {
         track_id: &str,
         quality: AudioQuality,
     ) -> Result<StreamInfo, ProviderError>;
+    async fn resolve_video_stream(
+        &self,
+        _track_id: &str,
+        _max_height: u32,
+    ) -> Result<VideoStreamInfo, ProviderError> {
+        Err(ProviderError::Api("Video stream not supported".into()))
+    }
     async fn fetch_bytes(&self, url: &str) -> Result<Vec<u8>, ProviderError>;
     async fn is_logged_in(&self) -> bool;
     async fn start_google_device_login(&self) -> Result<GoogleDeviceAuth, ProviderError>;
@@ -70,6 +77,7 @@ pub struct YtMusicProvider {
     google_session: Arc<Mutex<Option<GoogleSession>>>,
     pending_oauth: Arc<Mutex<Option<OauthDeviceCode>>>,
     stream_cache: Arc<std::sync::Mutex<HashMap<(String, u32), (StreamInfo, Instant)>>>,
+    video_stream_cache: Arc<std::sync::Mutex<HashMap<(String, u32), (VideoStreamInfo, Instant)>>>,
 }
 
 impl Default for YtMusicProvider {
@@ -97,6 +105,7 @@ impl YtMusicProvider {
             google_session: Arc::new(Mutex::new(None)),
             pending_oauth: Arc::new(Mutex::new(None)),
             stream_cache: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            video_stream_cache: Arc::new(std::sync::Mutex::new(HashMap::new())),
         }
     }
 
@@ -114,6 +123,7 @@ impl YtMusicProvider {
             google_session: Arc::new(Mutex::new(session)),
             pending_oauth: Arc::new(Mutex::new(None)),
             stream_cache: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            video_stream_cache: Arc::new(std::sync::Mutex::new(HashMap::new())),
         }
     }
 
@@ -707,6 +717,31 @@ impl MusicProvider for YtMusicProvider {
             },
         };
         if let Ok(mut guard) = self.stream_cache.lock() {
+            guard.insert(cache_key, (info.clone(), Instant::now()));
+        }
+        Ok(info)
+    }
+
+    async fn resolve_video_stream(
+        &self,
+        track_id: &str,
+        max_height: u32,
+    ) -> Result<VideoStreamInfo, ProviderError> {
+        let cache_key = (track_id.to_string(), max_height);
+        if let Ok(guard) = self.video_stream_cache.lock() {
+            if let Some((cached, fetched_at)) = guard.get(&cache_key) {
+                if fetched_at.elapsed() < Duration::from_secs(4 * 3600) {
+                    return Ok(cached.clone());
+                }
+            }
+        }
+        let info = innertube::fetch_player_video_stream(&self.http, track_id, max_height)
+            .await
+            .map_err(ProviderError::Api)?;
+        if let Ok(mut guard) = self.video_stream_cache.lock() {
+            if guard.len() > 200 {
+                guard.clear();
+            }
             guard.insert(cache_key, (info.clone(), Instant::now()));
         }
         Ok(info)
