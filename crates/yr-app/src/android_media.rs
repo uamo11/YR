@@ -7,6 +7,7 @@ pub enum MediaAction {
     Prev,
     SeekMs(u64),
     Stop,
+    CycleVideoQuality,
 }
 
 #[cfg(target_os = "android")]
@@ -242,6 +243,7 @@ mod imp {
             4 => MediaAction::Prev,
             5 => MediaAction::SeekMs(arg.max(0) as u64),
             6 => MediaAction::Stop,
+            7 => MediaAction::CycleVideoQuality,
             _ => return,
         };
         if let Some(tx) = ACTION_TX.lock().ok().and_then(|g| g.clone()) {
@@ -467,6 +469,28 @@ mod imp {
         }
     }
 
+    pub fn set_video_quality_label(label: &str) {
+        let Some(bridge) = bridge() else {
+            return;
+        };
+        let Ok(mut env) = bridge.vm.attach_current_thread() else {
+            return;
+        };
+        let Ok(j_label) = env.new_string(label) else {
+            return;
+        };
+        let service_cls: &JClass = bridge.service_class.as_obj().into();
+        if let Err(e) = env.call_static_method(
+            service_cls,
+            "setVideoQualityLabel",
+            "(Ljava/lang/String;)V",
+            &[JValue::Object(&j_label)],
+        ) {
+            log::warn!("android_media: setVideoQualityLabel failed: {e:?}");
+            let _ = env.exception_clear();
+        }
+    }
+
     #[no_mangle]
     pub extern "system" fn Java_com_yr_music_YrPlaybackService_nativeOnGoogleCookie(
         mut env: JNIEnv,
@@ -528,6 +552,7 @@ mod imp {
     pub fn prepare_next_embedded_video() {}
     pub fn sync_native_video(_playing: bool, _pos_ms: u64, _speed: f32) {}
     pub fn set_video_seek_seconds(_secs: u32) {}
+    pub fn set_video_quality_label(_label: &str) {}
     pub fn is_wifi_connected() -> bool {
         true
     }
@@ -548,6 +573,7 @@ pub use imp::init;
 pub use imp::{
     attach_native_video, hide_embedded_video, is_metered_network, is_wifi_connected,
     open_google_login, prepare_next_embedded_video, resolve_audio_url, set_action_sender,
-    set_artwork_url, set_cookie_sender, set_egui_ctx, set_ui_at_root, set_video_seek_seconds,
-    share_text, stop_service, sync_native_video, take_back_pressed, update_playback,
+    set_artwork_url, set_cookie_sender, set_egui_ctx, set_ui_at_root, set_video_quality_label,
+    set_video_seek_seconds, share_text, stop_service, sync_native_video, take_back_pressed,
+    update_playback,
 };

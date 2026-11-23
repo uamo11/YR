@@ -89,6 +89,7 @@ public class YrPlaybackService extends Service {
     public static final int NATIVE_PREV = 4;
     public static final int NATIVE_SEEK = 5;
     public static final int NATIVE_STOP = 6;
+    public static final int NATIVE_CYCLE_VIDEO_QUALITY = 7;
 
     private static volatile String currentTitle = "YR Music";
     private static volatile String currentArtist = "";
@@ -122,6 +123,8 @@ public class YrPlaybackService extends Service {
     private static volatile View sVideoPauseIcon = null;
     private static volatile TextView sVideoFullscreenBtn = null;
     private static volatile TextView sVideoFullscreenTitle = null;
+    private static volatile TextView sVideoFullscreenQuality = null;
+    private static volatile String sVideoQualityLabel = "Auto";
     private static volatile boolean sVideoFullscreen = false;
     private static volatile int sCompactX = 0;
     private static volatile int sCompactY = 0;
@@ -682,6 +685,16 @@ public class YrPlaybackService extends Service {
         sSeekSeconds = Math.max(5, Math.min(60, seconds));
     }
 
+    public static void setVideoQualityLabel(final String label) {
+        final String norm = (label != null && !label.trim().isEmpty()) ? label.trim() : "Auto";
+        sVideoQualityLabel = norm;
+        sUiHandler.post(() -> {
+            if (sVideoFullscreenQuality != null) {
+                sVideoFullscreenQuality.setText(norm);
+            }
+        });
+    }
+
     private static void updateVideoPauseIcon() {
         if (sVideoPauseIcon == null) return;
         boolean show = sVideoPrepared && !sPendingPlaying && (!sVideoFullscreen || !sFsHudVisible);
@@ -716,6 +729,9 @@ public class YrPlaybackService extends Service {
                     : "";
             sVideoFullscreenTitle.setText(currentTitle + artist);
         }
+        if (sVideoFullscreenQuality != null) {
+            sVideoFullscreenQuality.setText(sVideoQualityLabel);
+        }
         if (!sFsSeeking && sFsSeekBar != null) {
             long pos = (sPendingPosMs > 0) ? sPendingPosMs : currentPosMs;
             long dur = currentDurMs;
@@ -739,12 +755,16 @@ public class YrPlaybackService extends Service {
             }
             if (sFsHudBottom != null) sFsHudBottom.setVisibility(View.GONE);
             if (sVideoFullscreenTitle != null) sVideoFullscreenTitle.setVisibility(View.GONE);
+            if (sVideoFullscreenQuality != null) sVideoFullscreenQuality.setVisibility(View.GONE);
             updateVideoPauseIcon();
             return;
         }
         sFsHudVisible = visible;
         if (sVideoFullscreenTitle != null) {
             sVideoFullscreenTitle.setVisibility(visible ? View.VISIBLE : View.GONE);
+        }
+        if (sVideoFullscreenQuality != null) {
+            sVideoFullscreenQuality.setVisibility(visible ? View.VISIBLE : View.GONE);
         }
         if (sVideoFullscreenBtn != null) {
             sVideoFullscreenBtn.setVisibility(visible ? View.VISIBLE : View.GONE);
@@ -1262,10 +1282,39 @@ public class YrPlaybackService extends Service {
                     titleLp.setMargins(
                             (int) (18f * badgeDensity),
                             (int) (14f * badgeDensity),
-                            (int) (68f * badgeDensity),
+                            (int) (156f * badgeDensity),
                             0
                     );
                     sVideoOverlayRoot.addView(sVideoFullscreenTitle, titleLp);
+
+                    sVideoFullscreenQuality = new TextView(act);
+                    sVideoFullscreenQuality.setText(sVideoQualityLabel);
+                    sVideoFullscreenQuality.setTextColor(0xFFFFFFFF);
+                    sVideoFullscreenQuality.setTextSize(12.5f);
+                    sVideoFullscreenQuality.setTypeface(Typeface.DEFAULT_BOLD);
+                    sVideoFullscreenQuality.setSingleLine(true);
+                    sVideoFullscreenQuality.setGravity(Gravity.CENTER);
+                    sVideoFullscreenQuality.setPadding((int) (10f * badgeDensity), 0, (int) (10f * badgeDensity), 0);
+                    GradientDrawable qBg = new GradientDrawable();
+                    qBg.setColor(0x99121216);
+                    qBg.setCornerRadius(10f * badgeDensity);
+                    sVideoFullscreenQuality.setBackground(qBg);
+                    sVideoFullscreenQuality.setClickable(true);
+                    sVideoFullscreenQuality.setVisibility(View.GONE);
+                    sVideoFullscreenQuality.setOnClickListener(v -> {
+                        try {
+                            nativeOnMediaAction(NATIVE_CYCLE_VIDEO_QUALITY, 0);
+                        } catch (Throwable ignored) {
+                        }
+                        scheduleFsHudAutoHide();
+                    });
+                    FrameLayout.LayoutParams qLp = new FrameLayout.LayoutParams(
+                            FrameLayout.LayoutParams.WRAP_CONTENT,
+                            (int) (36f * badgeDensity)
+                    );
+                    qLp.gravity = Gravity.TOP | Gravity.END;
+                    qLp.setMargins(0, (int) (14f * badgeDensity), (int) (62f * badgeDensity), 0);
+                    sVideoOverlayRoot.addView(sVideoFullscreenQuality, qLp);
 
                     int fsSz = (int) (36f * badgeDensity);
                     sVideoFullscreenBtn = new TextView(act);
@@ -1473,6 +1522,7 @@ public class YrPlaybackService extends Service {
                         sVideoPauseIcon = null;
                         sVideoFullscreenBtn = null;
                         sVideoFullscreenTitle = null;
+                        sVideoFullscreenQuality = null;
                         sFsHudBottom = null;
                         sFsTimeCur = null;
                         sFsTimeDur = null;
@@ -1677,6 +1727,7 @@ public class YrPlaybackService extends Service {
                 sVideoPauseIcon = null;
                 sVideoFullscreenBtn = null;
                 sVideoFullscreenTitle = null;
+                sVideoFullscreenQuality = null;
                 sFsHudBottom = null;
                 sFsTimeCur = null;
                 sFsTimeDur = null;

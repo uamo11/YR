@@ -170,6 +170,11 @@ enum AppEvent {
         track_id: String,
         result: Result<VideoStreamInfo, String>,
     },
+    VideoStreamPrewarmed {
+        track_id: String,
+        max_h: u32,
+        info: VideoStreamInfo,
+    },
 }
 
 /// Disambiguated touch drag & 60fps kinetic fling momentum scroller for egui on mobile.
@@ -376,6 +381,8 @@ pub struct YrApp {
     video_stream_loading: bool,
     video_stream_error: Option<String>,
     last_video_sync: Option<Instant>,
+    video_stream_cache: HashMap<(String, u32), VideoStreamInfo>,
+    prewarmed_video_key: Option<(String, u32)>,
     seek_ripple_anim: Option<(bool, f32, u32)>,
     smart_downloads_flag: Arc<std::sync::atomic::AtomicBool>,
     wifi_only_dl_flag: Arc<std::sync::atomic::AtomicBool>,
@@ -668,6 +675,8 @@ impl YrApp {
             video_stream_loading: false,
             video_stream_error: None,
             last_video_sync: None,
+            video_stream_cache: HashMap::new(),
+            prewarmed_video_key: None,
             seek_ripple_anim: None,
             smart_downloads_flag,
             wifi_only_dl_flag,
@@ -740,9 +749,23 @@ impl YrApp {
         let dl_cov = Arc::clone(&app.downloader);
         let prov_cov = Arc::clone(&app.provider);
         let cov_dir_init = cover_dir.clone();
+        let lyrics_dir_init = app.data_dir.join("lyrics_cache");
         app.runtime.spawn(async move {
-            for t in dl_cov.completed_tracks().await.into_iter().take(20) {
-                cache_track_cover_async(Arc::clone(&prov_cov), cov_dir_init.clone(), t).await;
+            let completed_dl = dl_cov.completed_tracks().await;
+            for t in completed_dl.iter().take(20) {
+                cache_track_cover_async(Arc::clone(&prov_cov), cov_dir_init.clone(), t.clone())
+                    .await;
+            }
+            for t in completed_dl.into_iter().take(12) {
+                if t.id.starts_with("local_")
+                    || yr_core::lyrics_cache::load_cached_lyrics(&lyrics_dir_init, &t.id).is_some()
+                {
+                    continue;
+                }
+                if let Ok(Some(data)) = prov_cov.get_synced_lyrics(&t).await {
+                    let _ = yr_core::lyrics_cache::save_cached_lyrics(&lyrics_dir_init, &t.id, &data);
+                }
+                tokio::time::sleep(Duration::from_millis(250)).await;
             }
         });
         let audio_bg = app.audio.clone();
@@ -869,6 +892,7 @@ impl YrApp {
                         }
                     }
                     MediaAction::Stop => audio_bg.stop(),
+                    MediaAction::CycleVideoQuality => {}
                     MediaAction::Next => {
                         let next = queue_bg.lock().ok().and_then(|mut q| q.next_track(true).cloned());
                         if let Some(track) = next {
@@ -1412,18 +1436,95 @@ impl YrApp {
         }
     }
 
+    fn prewarm_next_video_stream(&mut self, ctx: &egui::Context) {
+        if !self.is_video_mode {
+            return;
+        }
+        let next_id_opt = {
+            let q = self.queue.lock().unwrap();
+            let cur_idx = q.current_index();
+            let ordered = q.ordered_tracks();
+            cur_idx.and_then(|ci| {
+                ordered
+                    .iter()
+                    .position(|(idx, _)| *idx == ci)
+                    .and_then(|pos| ordered.get(pos + 1).map(|(_, t)| t.id.clone()))
+            })
+        };
+        let Some(next_id) = next_id_opt else {
+            return;
+        };
+        if next_id.starts_with("local_") {
+            return;
+        }
+        let max_h = self.effective_video_max_height();
+        let key = (next_id.clone(), max_h);
+        if self.video_stream_cache.contains_key(&key)
+            || self.prewarmed_video_key.as_ref() == Some(&key)
+        {
+            return;
+        }
+        self.prewarmed_video_key = Some(key);
+        let provider = Arc::clone(&self.provider);
+        let tx = self.event_tx.clone();
+        let ctx = ctx.clone();
+        self.runtime.spawn(async move {
+            if let Ok(info) = provider.resolve_video_stream(&next_id, max_h).await {
+                let _ = tx.send(AppEvent::VideoStreamPrewarmed {
+                    track_id: next_id,
+                    max_h,
+                    info,
+                });
+                ctx.request_repaint();
+            }
+        });
+    }
+
+    fn cycle_video_quality(&mut self, track_id: String, ctx: &egui::Context) {
+        const STEPS: [u32; 5] = [0, 360, 480, 720, 1080];
+        let cur_idx = STEPS
+            .iter()
+            .position(|&h| h == self.store.data.config.video_quality_max_height)
+            .unwrap_or(0);
+        let next_q = STEPS[(cur_idx + 1) % STEPS.len()];
+        self.store.data.config.video_quality_max_height = next_q;
+        let _ = self.store.save();
+        let label = Self::video_quality_label(next_q, None);
+        crate::android_media::set_video_quality_label(&label);
+        crate::android_media::prepare_next_embedded_video();
+        self.video_stream_track_id = None;
+        self.video_stream_info = None;
+        self.video_stream_error = None;
+        self.last_video_attached = None;
+        self.resolve_video_for_track(track_id, ctx);
+        self.set_banner(format!("Calidad de video: {label}"));
+    }
+
     fn resolve_video_for_track(&mut self, track_id: String, ctx: &egui::Context) {
         if self.video_stream_track_id.as_deref() == Some(&track_id)
             && (self.video_stream_info.is_some() || self.video_stream_loading)
         {
             return;
         }
+        let max_h = self.effective_video_max_height();
+        let cfg_max_h = self.store.data.config.video_quality_max_height;
+        if let Some(cached) = self.video_stream_cache.get(&(track_id.clone(), max_h)).cloned() {
+            let label = Self::video_quality_label(cfg_max_h, Some(cached.height));
+            crate::android_media::set_video_quality_label(&label);
+            self.video_stream_track_id = Some(track_id);
+            self.video_stream_info = Some(cached);
+            self.video_stream_loading = false;
+            self.video_stream_error = None;
+            self.last_video_attached = None;
+            self.prewarm_next_video_stream(ctx);
+            return;
+        }
+        crate::android_media::set_video_quality_label(&Self::video_quality_label(cfg_max_h, None));
         self.video_stream_track_id = Some(track_id.clone());
         self.video_stream_info = None;
         self.video_stream_loading = true;
         self.video_stream_error = None;
         self.last_video_attached = None;
-        let max_h = self.effective_video_max_height();
         let provider = Arc::clone(&self.provider);
         let tx = self.event_tx.clone();
         let ctx = ctx.clone();
@@ -1487,7 +1588,13 @@ impl YrApp {
         if !manual && !self.store.data.config.smart_downloads {
             return;
         }
-        if track.local_path.is_some() || track.id.starts_with("local_") {
+        if track.id.starts_with("local_")
+            || track
+                .local_path
+                .as_deref()
+                .map(|p| std::path::Path::new(p).exists())
+                .unwrap_or(false)
+        {
             return;
         }
         let cache_file = self
@@ -1552,7 +1659,7 @@ impl YrApp {
                 return;
             }
         }
-        if track.local_path.is_some() || track.id.starts_with("local_") {
+        if track.id.starts_with("local_") {
             self.lyrics_loading = false;
             return;
         }
@@ -2119,6 +2226,18 @@ impl YrApp {
                                 self.resolve_video_for_track(track.id, ctx);
                             }
                         }
+                    } else if matches!(act, MediaAction::CycleVideoQuality) {
+                        let maybe_id = self
+                            .queue
+                            .lock()
+                            .unwrap()
+                            .current_track()
+                            .map(|t| t.id.clone());
+                        if let Some(tid) = maybe_id {
+                            if self.is_video_mode {
+                                self.cycle_video_quality(tid, ctx);
+                            }
+                        }
                     }
                 }
                 AppEvent::VideoStreamResolved { track_id, result } => {
@@ -2126,8 +2245,22 @@ impl YrApp {
                         self.video_stream_loading = false;
                         match result {
                             Ok(info) => {
+                                if self.video_stream_cache.len() >= 24 {
+                                    if let Some(evict) = self.video_stream_cache.keys().next().cloned() {
+                                        self.video_stream_cache.remove(&evict);
+                                    }
+                                }
+                                let max_h = self.effective_video_max_height();
+                                self.video_stream_cache
+                                    .insert((track_id.clone(), max_h), info.clone());
+                                let label = Self::video_quality_label(
+                                    self.store.data.config.video_quality_max_height,
+                                    Some(info.height),
+                                );
+                                crate::android_media::set_video_quality_label(&label);
                                 self.video_stream_info = Some(info);
                                 self.video_stream_error = None;
+                                self.prewarm_next_video_stream(ctx);
                             }
                             Err(e) => {
                                 self.video_stream_error = Some(e);
@@ -2135,6 +2268,18 @@ impl YrApp {
                             }
                         }
                     }
+                }
+                AppEvent::VideoStreamPrewarmed {
+                    track_id,
+                    max_h,
+                    info,
+                } => {
+                    if self.video_stream_cache.len() >= 24 {
+                        if let Some(evict) = self.video_stream_cache.keys().next().cloned() {
+                            self.video_stream_cache.remove(&evict);
+                        }
+                    }
+                    self.video_stream_cache.insert((track_id, max_h), info);
                 }
                 AppEvent::GoogleAuthCode(res) => {
                     self.google_login_loading = false;
@@ -4510,7 +4655,7 @@ impl YrApp {
         let total_samples = self.sample_tracks.len();
         let track = self.sample_tracks[idx].clone();
 
-        let sample_thumb = track_thumb_url(track.thumbnail_url.as_deref(), &track.id);
+        let sample_thumb = resolve_track_cover_uri(&track);
         if let Some(url) = sample_thumb.as_deref() {
             self.ensure_cover_color(Some(url), ctx);
         }
@@ -6399,7 +6544,7 @@ impl YrApp {
                             if icons::icon_pill_button(
                                 ui,
                                 icons::Icon::Play,
-                                "Reproducir todo offline",
+                                "Reproducir todo",
                                 BG_ELEVATED,
                                 TEXT_PRIMARY,
                             )
@@ -8246,23 +8391,7 @@ impl YrApp {
                                 )
                                 .clicked()
                                 {
-                                    const STEPS: [u32; 5] = [0, 360, 480, 720, 1080];
-                                    let cur_idx = STEPS
-                                        .iter()
-                                        .position(|&h| h == self.store.data.config.video_quality_max_height)
-                                        .unwrap_or(0);
-                                    let next_q = STEPS[(cur_idx + 1) % STEPS.len()];
-                                    self.store.data.config.video_quality_max_height = next_q;
-                                    let _ = self.store.save();
-                                    self.video_stream_track_id = None;
-                                    self.video_stream_info = None;
-                                    self.video_stream_error = None;
-                                    self.last_video_attached = None;
-                                    self.resolve_video_for_track(track.id.clone(), ctx);
-                                    self.set_banner(format!(
-                                        "Calidad de video: {}",
-                                        Self::video_quality_label(next_q, None)
-                                    ));
+                                    self.cycle_video_quality(track.id.clone(), ctx);
                                 }
                                 ui.add_space(6.0);
                                 if icons::icon_pill_button(
@@ -9728,7 +9857,7 @@ impl YrApp {
                     ui.label(RichText::new("Ajusta los mixes de inicio según tu historial de reproducción, canciones favoritas y artistas seguidos.").size(12.0).color(TEXT_SECONDARY));
                 }
                 SettingsCategory::About => {
-                    ui.heading("YR Music v0.9.8");
+                    ui.heading("YR Music v0.9.9");
                     ui.label("Cliente nativo de música 100% en Rust para Android y escritorio.");
                     ui.add_space(6.0);
                     ui.label(RichText::new("Motor de audio Symphonia PCM con DSP Morphe 3D binaural, reproductor integrado de video en la app, auto-scroll inteligente de cola, prefetch predictivo en disco y compatibilidad completa con YouTube Music.").size(12.0).color(TEXT_SECONDARY));
@@ -10907,7 +11036,7 @@ impl YrApp {
                         }
                         if menu_row(ui, icons::Icon::Help, "Ayuda y comentarios").clicked() {
                             self.show_account_modal = false;
-                            self.set_banner("YR Music v0.9.8 • Pure Rust");
+                            self.set_banner("YR Music v0.9.9 • Pure Rust");
                         }
 
                         #[cfg(target_os = "android")]

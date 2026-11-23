@@ -1364,44 +1364,141 @@ pub fn parse_lrc_lines(lrc: &str) -> Vec<LyricLine> {
     lines
 }
 
-pub async fn fetch_lrclib_lyrics(http: &reqwest::Client, track: &Track) -> Option<LyricsData> {
-    let clean_title = track
-        .title
-        .split('(')
-        .next()
-        .unwrap_or(&track.title)
-        .split('[')
-        .next()
-        .unwrap_or(&track.title)
-        .trim();
-    let mut req = http
-        .get("https://lrclib.net/api/get")
-        .timeout(std::time::Duration::from_secs(4))
-        .header(USER_AGENT, "YR-Music-Rust/0.1 (https://github.com/uamo11/YR)")
-        .query(&[("track_name", clean_title), ("artist_name", track.artist.as_str())]);
-    if let Some(dur) = track.duration_secs {
-        req = req.query(&[("duration", dur)]);
-    }
-    let val: Value = match req.send().await {
-        Ok(r) if r.status().is_success() => r.json().await.ok()?,
-        _ => {
-            let q = format!("{clean_title} {}", track.artist);
-            let sresp = http
-                .get("https://lrclib.net/api/search")
-                .timeout(std::time::Duration::from_secs(4))
-                .header(USER_AGENT, "YR-Music-Rust/0.1")
-                .query(&[("q", q.as_str())])
-                .send()
-                .await
-                .ok()?;
-            if !sresp.status().is_success() {
-                return None;
+fn strip_bracketed_segments(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut round_depth = 0usize;
+    let mut square_depth = 0usize;
+    for ch in raw.chars() {
+        match ch {
+            '(' => round_depth += 1,
+            ')' => {
+                round_depth = round_depth.saturating_sub(1);
+                out.push(' ');
             }
-            let arr: Vec<Value> = sresp.json().await.ok()?;
-            arr.into_iter().next()?
+            '[' => square_depth += 1,
+            ']' => {
+                square_depth = square_depth.saturating_sub(1);
+                out.push(' ');
+            }
+            _ if round_depth == 0 && square_depth == 0 => out.push(ch),
+            _ => {}
         }
-    };
+    }
+    out
+}
 
+pub fn clean_lyrics_title(raw: &str) -> String {
+    let mut base = strip_bracketed_segments(raw);
+    for sep in [" - ", " | "] {
+        if let Some(pos) = base.find(sep) {
+            let tail_low = base[pos + sep.len()..].to_lowercase();
+            let is_noise = [
+                "official",
+                "oficial",
+                "video",
+                "audio",
+                "lyric",
+                "letra",
+                "remaster",
+                "hd",
+                "4k",
+                "live",
+                "en vivo",
+                "visualizer",
+            ]
+            .iter()
+            .any(|tok| tail_low.contains(tok));
+            if is_noise {
+                base.truncate(pos);
+            }
+        }
+    }
+    let low = base.to_lowercase();
+    let feat_pos = [" feat.", " feat ", " ft.", " ft "]
+        .iter()
+        .filter_map(|pat| low.find(pat))
+        .min();
+    if let Some(pos) = feat_pos {
+        base.truncate(pos);
+    }
+    let collapsed = base.split_whitespace().collect::<Vec<_>>().join(" ");
+    collapsed
+        .trim_matches(|c: char| c.is_whitespace() || c == '-' || c == '|')
+        .to_string()
+}
+
+pub fn clean_lyrics_artist(raw: &str) -> String {
+    let mut s = raw.trim().to_string();
+    let low = s.to_lowercase();
+    if let Some(pos) = low.find(" - topic") {
+        s.truncate(pos);
+    }
+    let low2 = s.to_lowercase();
+    if low2.ends_with("vevo") && s.len() > 4 {
+        let trimmed = s[..s.len() - 4].trim_end();
+        if !trimmed.is_empty() {
+            s = trimmed.to_string();
+        }
+    }
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+pub fn primary_lyrics_artist(raw: &str) -> String {
+    let cleaned = clean_lyrics_artist(raw);
+    let low = cleaned.to_lowercase();
+    let delims = [",", " & ", " x ", " feat.", " feat ", " ft.", " ft ", " / "];
+    let earliest = delims
+        .iter()
+        .filter_map(|d| low.find(d))
+        .filter(|&p| p > 0)
+        .min();
+    match earliest {
+        Some(pos) => cleaned[..pos].trim().to_string(),
+        None => cleaned,
+    }
+}
+
+pub fn pick_best_lrclib_entry(entries: &[Value], target_dur_secs: Option<u64>) -> Option<Value> {
+    let mut best: Option<(i32, Value)> = None;
+    for item in entries {
+        let synced_raw = item
+            .get("syncedLyrics")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let plain_raw = item
+            .get("plainLyrics")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let has_synced = !parse_lrc_lines(synced_raw).is_empty();
+        let has_plain = !plain_raw.trim().is_empty();
+        if !has_synced && !has_plain {
+            continue;
+        }
+        let mut score = if has_synced { 100 } else { 20 };
+        if let (Some(target), Some(dur)) =
+            (target_dur_secs, item.get("duration").and_then(|v| v.as_f64()))
+        {
+            let diff = (dur - target as f64).abs();
+            if diff <= 3.0 {
+                score += 30;
+            } else if diff <= 10.0 {
+                score += 15;
+            } else if diff > 30.0 {
+                score -= 30;
+            }
+        }
+        let replace = match &best {
+            Some((best_score, _)) => score > *best_score,
+            None => true,
+        };
+        if replace {
+            best = Some((score, item.clone()));
+        }
+    }
+    best.map(|(_, v)| v)
+}
+
+fn extract_lrclib_data(val: &Value) -> Option<LyricsData> {
     let synced_raw = val.get("syncedLyrics").and_then(|v| v.as_str()).unwrap_or("");
     let plain_raw = val.get("plainLyrics").and_then(|v| v.as_str()).unwrap_or("");
     let synced = parse_lrc_lines(synced_raw);
@@ -1422,6 +1519,82 @@ pub async fn fetch_lrclib_lyrics(http: &reqwest::Client, track: &Track) -> Optio
         synced,
         source: "LRCLIB".to_string(),
     })
+}
+
+pub async fn fetch_lrclib_lyrics(http: &reqwest::Client, track: &Track) -> Option<LyricsData> {
+    let clean_title = clean_lyrics_title(&track.title);
+    let clean_artist = clean_lyrics_artist(&track.artist);
+    let primary_artist = primary_lyrics_artist(&track.artist);
+    if clean_title.is_empty() {
+        return None;
+    }
+
+    if !clean_artist.is_empty() {
+        let mut req = http
+            .get("https://lrclib.net/api/get")
+            .timeout(std::time::Duration::from_secs(4))
+            .header(USER_AGENT, "YR-Music-Rust/0.1 (https://github.com/uamo11/YR)")
+            .query(&[
+                ("track_name", clean_title.as_str()),
+                ("artist_name", clean_artist.as_str()),
+            ]);
+        if let Some(dur) = track.duration_secs {
+            req = req.query(&[("duration", dur)]);
+        }
+        if let Ok(r) = req.send().await {
+            if r.status().is_success() {
+                if let Ok(val) = r.json::<Value>().await {
+                    if let Some(data) = extract_lrclib_data(&val) {
+                        return Some(data);
+                    }
+                }
+            }
+        }
+    }
+
+    if !primary_artist.is_empty() {
+        if let Ok(sresp) = http
+            .get("https://lrclib.net/api/search")
+            .timeout(std::time::Duration::from_secs(4))
+            .header(USER_AGENT, "YR-Music-Rust/0.1 (https://github.com/uamo11/YR)")
+            .query(&[
+                ("track_name", clean_title.as_str()),
+                ("artist_name", primary_artist.as_str()),
+            ])
+            .send()
+            .await
+        {
+            if sresp.status().is_success() {
+                if let Ok(arr) = sresp.json::<Vec<Value>>().await {
+                    if let Some(best) = pick_best_lrclib_entry(&arr, track.duration_secs) {
+                        if let Some(data) = extract_lrclib_data(&best) {
+                            return Some(data);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let q = if primary_artist.is_empty() {
+        clean_title.clone()
+    } else {
+        format!("{clean_title} {primary_artist}")
+    };
+    let sresp = http
+        .get("https://lrclib.net/api/search")
+        .timeout(std::time::Duration::from_secs(4))
+        .header(USER_AGENT, "YR-Music-Rust/0.1 (https://github.com/uamo11/YR)")
+        .query(&[("q", q.as_str())])
+        .send()
+        .await
+        .ok()?;
+    if !sresp.status().is_success() {
+        return None;
+    }
+    let arr: Vec<Value> = sresp.json().await.ok()?;
+    let best = pick_best_lrclib_entry(&arr, track.duration_secs)?;
+    extract_lrclib_data(&best)
 }
 
 pub async fn fetch_sponsor_segments(
@@ -1597,5 +1770,53 @@ mod tests {
                 eprintln!("Explore feed skipped in CI/datacenter IP: {e}");
             }
         }
+    }
+
+    #[test]
+    fn clean_lyrics_title_and_artist_strip_noise() {
+        assert_eq!(
+            clean_lyrics_title("Ella (Video Oficial) [HD] - Official Music Video"),
+            "Ella"
+        );
+        assert_eq!(
+            clean_lyrics_title("Desde Mis Ojos feat. Sech (Remix)"),
+            "Desde Mis Ojos"
+        );
+        assert_eq!(
+            clean_lyrics_artist("Cali Y El Dandee - Topic"),
+            "Cali Y El Dandee"
+        );
+        assert_eq!(clean_lyrics_artist("CamilaVEVO"), "Camila");
+        assert_eq!(
+            primary_lyrics_artist("Cali Y El Dandee, Sebastián Yatra & Mau"),
+            "Cali Y El Dandee"
+        );
+    }
+
+    #[test]
+    fn pick_best_lrclib_entry_prefers_synced_and_matching_duration() {
+        let entries = vec![
+            json!({
+                "plainLyrics": "Only plain text",
+                "syncedLyrics": null,
+                "duration": 197.0
+            }),
+            json!({
+                "plainLyrics": "Wrong duration synced",
+                "syncedLyrics": "[00:10.00] Far duration line",
+                "duration": 290.0
+            }),
+            json!({
+                "plainLyrics": "Right duration synced",
+                "syncedLyrics": "[00:12.00] Exact line",
+                "duration": 198.0
+            }),
+            json!({
+                "plainLyrics": "   ",
+                "syncedLyrics": ""
+            }),
+        ];
+        let best = pick_best_lrclib_entry(&entries, Some(197)).expect("picked best");
+        assert_eq!(best["plainLyrics"], "Right duration synced");
     }
 }
