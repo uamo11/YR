@@ -20,6 +20,7 @@ import android.graphics.Outline;
 import android.graphics.Paint;
 import android.graphics.Path;
 import android.graphics.PixelFormat;
+import android.graphics.PorterDuff;
 import android.graphics.SurfaceTexture;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
@@ -58,12 +59,14 @@ import android.widget.Button;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.ProgressBar;
+import android.widget.SeekBar;
 import android.widget.TextView;
 import java.io.InputStream;
 import java.lang.ref.WeakReference;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.util.HashMap;
+import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -124,6 +127,14 @@ public class YrPlaybackService extends Service {
     private static volatile int sCompactH = 0;
     private static volatile int sSeekSeconds = 10;
     private static volatile int sSavedSystemUiVisibility = -1;
+    private static volatile LinearLayout sFsHudBottom = null;
+    private static volatile TextView sFsTimeCur = null;
+    private static volatile TextView sFsTimeDur = null;
+    private static volatile SeekBar sFsSeekBar = null;
+    private static volatile HudIconView sFsPlayPauseBtn = null;
+    private static volatile boolean sFsHudVisible = false;
+    private static volatile boolean sFsSeeking = false;
+    private static Runnable sAutoHideFsHudRunnable = null;
     private static volatile WeakReference<Activity> sVideoActivityRef = null;
     private static volatile boolean sTriedFallback = false;
     private static volatile boolean sVideoWantedVisible = false;
@@ -560,14 +571,146 @@ public class YrPlaybackService extends Service {
         sUiHandler.postDelayed(sHideSeekBadgeRunnable, 850L);
     }
 
+    private static class HudIconView extends View {
+        static final int KIND_PLAY = 0;
+        static final int KIND_PAUSE = 1;
+        static final int KIND_PREV = 2;
+        static final int KIND_NEXT = 3;
+
+        private int kind;
+        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Path path = new Path();
+
+        HudIconView(Context ctx, int kind) {
+            super(ctx);
+            this.kind = kind;
+            paint.setColor(0xFFFFFFFF);
+            paint.setStyle(Paint.Style.FILL);
+        }
+
+        void setKind(int kind) {
+            if (this.kind != kind) {
+                this.kind = kind;
+                invalidate();
+            }
+        }
+
+        @Override
+        protected void onDraw(Canvas canvas) {
+            super.onDraw(canvas);
+            float w = getWidth();
+            float h = getHeight();
+            if (w <= 0f || h <= 0f) return;
+            path.reset();
+            if (kind == KIND_PLAY) {
+                path.moveTo(w * 0.36f, h * 0.25f);
+                path.lineTo(w * 0.36f, h * 0.75f);
+                path.lineTo(w * 0.74f, h * 0.50f);
+                path.close();
+                canvas.drawPath(path, paint);
+            } else if (kind == KIND_PAUSE) {
+                canvas.drawRect(w * 0.32f, h * 0.26f, w * 0.44f, h * 0.74f, paint);
+                canvas.drawRect(w * 0.56f, h * 0.26f, w * 0.68f, h * 0.74f, paint);
+            } else if (kind == KIND_PREV) {
+                canvas.drawRect(w * 0.26f, h * 0.28f, w * 0.34f, h * 0.72f, paint);
+                path.moveTo(w * 0.72f, h * 0.28f);
+                path.lineTo(w * 0.72f, h * 0.72f);
+                path.lineTo(w * 0.38f, h * 0.50f);
+                path.close();
+                canvas.drawPath(path, paint);
+            } else if (kind == KIND_NEXT) {
+                path.moveTo(w * 0.28f, h * 0.28f);
+                path.lineTo(w * 0.28f, h * 0.72f);
+                path.lineTo(w * 0.62f, h * 0.50f);
+                path.close();
+                canvas.drawPath(path, paint);
+                canvas.drawRect(w * 0.66f, h * 0.28f, w * 0.74f, h * 0.72f, paint);
+            }
+        }
+    }
+
     public static void setSeekSeconds(final int seconds) {
         sSeekSeconds = Math.max(5, Math.min(60, seconds));
     }
 
     private static void updateVideoPauseIcon() {
         if (sVideoPauseIcon == null) return;
-        boolean show = sVideoPrepared && !sPendingPlaying;
+        boolean show = sVideoPrepared && !sPendingPlaying && (!sVideoFullscreen || !sFsHudVisible);
         sVideoPauseIcon.setVisibility(show ? View.VISIBLE : View.GONE);
+    }
+
+    private static String formatTimeMs(long ms) {
+        long totalSecs = Math.max(0L, ms / 1000L);
+        long mins = totalSecs / 60L;
+        long secs = totalSecs % 60L;
+        return String.format(Locale.US, "%d:%02d", mins, secs);
+    }
+
+    private static void scheduleFsHudAutoHide() {
+        if (sAutoHideFsHudRunnable != null) {
+            sUiHandler.removeCallbacks(sAutoHideFsHudRunnable);
+            sAutoHideFsHudRunnable = null;
+        }
+        if (sVideoFullscreen && sPendingPlaying && !sFsSeeking) {
+            sAutoHideFsHudRunnable = () -> setFullscreenHudVisible(false);
+            sUiHandler.postDelayed(sAutoHideFsHudRunnable, 3500L);
+        }
+    }
+
+    private static void syncFsHudControls() {
+        if (sFsPlayPauseBtn != null) {
+            sFsPlayPauseBtn.setKind(sPendingPlaying ? HudIconView.KIND_PAUSE : HudIconView.KIND_PLAY);
+        }
+        if (sVideoFullscreenTitle != null) {
+            String artist = (currentArtist != null && !currentArtist.isEmpty())
+                    ? ("  \u2022  " + currentArtist)
+                    : "";
+            sVideoFullscreenTitle.setText(currentTitle + artist);
+        }
+        if (!sFsSeeking && sFsSeekBar != null) {
+            long pos = (sPendingPosMs > 0) ? sPendingPosMs : currentPosMs;
+            long dur = currentDurMs;
+            if (sFsTimeCur != null) {
+                sFsTimeCur.setText(formatTimeMs(pos));
+            }
+            if (sFsTimeDur != null) {
+                sFsTimeDur.setText(formatTimeMs(dur));
+            }
+            int prog = (dur > 0L) ? (int) Math.min(1000L, Math.max(0L, (pos * 1000L) / dur)) : 0;
+            sFsSeekBar.setProgress(prog);
+        }
+    }
+
+    private static void setFullscreenHudVisible(boolean visible) {
+        if (!sVideoFullscreen) {
+            sFsHudVisible = false;
+            if (sAutoHideFsHudRunnable != null) {
+                sUiHandler.removeCallbacks(sAutoHideFsHudRunnable);
+                sAutoHideFsHudRunnable = null;
+            }
+            if (sFsHudBottom != null) sFsHudBottom.setVisibility(View.GONE);
+            if (sVideoFullscreenTitle != null) sVideoFullscreenTitle.setVisibility(View.GONE);
+            updateVideoPauseIcon();
+            return;
+        }
+        sFsHudVisible = visible;
+        if (sVideoFullscreenTitle != null) {
+            sVideoFullscreenTitle.setVisibility(visible ? View.VISIBLE : View.GONE);
+        }
+        if (sVideoFullscreenBtn != null) {
+            sVideoFullscreenBtn.setVisibility(visible ? View.VISIBLE : View.GONE);
+        }
+        if (sFsHudBottom != null) {
+            sFsHudBottom.setVisibility(visible ? View.VISIBLE : View.GONE);
+        }
+        if (visible) {
+            syncFsHudControls();
+            scheduleFsHudAutoHide();
+        } else if (sAutoHideFsHudRunnable != null) {
+            sUiHandler.removeCallbacks(sAutoHideFsHudRunnable);
+            sAutoHideFsHudRunnable = null;
+        }
+        updateVideoPauseIcon();
     }
 
     public static boolean exitFullscreenIfActive(final Activity act) {
@@ -588,6 +731,7 @@ public class YrPlaybackService extends Service {
         if (wm == null) return;
 
         sVideoFullscreen = fullscreen;
+        final float fsDensity = targetAct.getResources().getDisplayMetrics().density;
         View decor = (targetAct.getWindow() != null) ? targetAct.getWindow().getDecorView() : null;
         if (fullscreen) {
             try {
@@ -615,14 +759,15 @@ public class YrPlaybackService extends Service {
             sVideoParams.height = WindowManager.LayoutParams.MATCH_PARENT;
             if (sVideoFullscreenBtn != null) {
                 sVideoFullscreenBtn.setText("\u2715");
+                FrameLayout.LayoutParams topExitLp = new FrameLayout.LayoutParams(
+                        (int) (36f * fsDensity),
+                        (int) (36f * fsDensity)
+                );
+                topExitLp.gravity = Gravity.TOP | Gravity.END;
+                topExitLp.setMargins(0, (int) (14f * fsDensity), (int) (18f * fsDensity), 0);
+                sVideoFullscreenBtn.setLayoutParams(topExitLp);
             }
-            if (sVideoFullscreenTitle != null) {
-                String artist = (currentArtist != null && !currentArtist.isEmpty())
-                        ? ("  \u2022  " + currentArtist)
-                        : "";
-                sVideoFullscreenTitle.setText(currentTitle + artist);
-                sVideoFullscreenTitle.setVisibility(View.VISIBLE);
-            }
+            setFullscreenHudVisible(true);
         } else {
             try {
                 targetAct.setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_PORTRAIT);
@@ -641,10 +786,17 @@ public class YrPlaybackService extends Service {
             sVideoParams.height = Math.max(1, sCompactH);
             if (sVideoFullscreenBtn != null) {
                 sVideoFullscreenBtn.setText("\u26F6");
+                FrameLayout.LayoutParams compactLp = new FrameLayout.LayoutParams(
+                        (int) (36f * fsDensity),
+                        (int) (36f * fsDensity)
+                );
+                compactLp.gravity = Gravity.BOTTOM | Gravity.END;
+                int compactMargin = (int) (10f * fsDensity);
+                compactLp.setMargins(0, 0, compactMargin, compactMargin);
+                sVideoFullscreenBtn.setLayoutParams(compactLp);
+                sVideoFullscreenBtn.setVisibility(View.VISIBLE);
             }
-            if (sVideoFullscreenTitle != null) {
-                sVideoFullscreenTitle.setVisibility(View.GONE);
-            }
+            setFullscreenHudVisible(false);
         }
         try {
             wm.updateViewLayout(sVideoOverlayRoot, sVideoParams);
@@ -847,11 +999,15 @@ public class YrPlaybackService extends Service {
 
                         @Override
                         public boolean onSingleTapConfirmed(MotionEvent e) {
-                            sPendingPlaying = !sPendingPlaying;
-                            updateVideoPauseIcon();
-                            try {
-                                nativeOnMediaAction(NATIVE_TOGGLE, 0);
-                            } catch (Throwable ignored) {
+                            if (sVideoFullscreen) {
+                                setFullscreenHudVisible(!sFsHudVisible);
+                            } else {
+                                sPendingPlaying = !sPendingPlaying;
+                                updateVideoPauseIcon();
+                                try {
+                                    nativeOnMediaAction(NATIVE_TOGGLE, 0);
+                                } catch (Throwable ignored) {
+                                }
                             }
                             return true;
                         }
@@ -1066,6 +1222,162 @@ public class YrPlaybackService extends Service {
                     fsLp.setMargins(0, 0, fsMargin, fsMargin);
                     sVideoOverlayRoot.addView(sVideoFullscreenBtn, fsLp);
 
+                    sFsHudBottom = new LinearLayout(act);
+                    sFsHudBottom.setOrientation(LinearLayout.VERTICAL);
+                    sFsHudBottom.setBackgroundColor(0xCC0A0A0E);
+                    sFsHudBottom.setPadding(
+                            (int) (18f * badgeDensity),
+                            (int) (10f * badgeDensity),
+                            (int) (18f * badgeDensity),
+                            (int) (12f * badgeDensity)
+                    );
+                    sFsHudBottom.setClickable(true);
+                    sFsHudBottom.setVisibility(View.GONE);
+
+                    LinearLayout scrubRow = new LinearLayout(act);
+                    scrubRow.setOrientation(LinearLayout.HORIZONTAL);
+                    scrubRow.setGravity(Gravity.CENTER_VERTICAL);
+
+                    sFsTimeCur = new TextView(act);
+                    sFsTimeCur.setText("0:00");
+                    sFsTimeCur.setTextColor(0xFFFFFFFF);
+                    sFsTimeCur.setTextSize(12f);
+                    sFsTimeCur.setTypeface(Typeface.DEFAULT_BOLD);
+                    sFsTimeCur.setPadding(0, 0, (int) (8f * badgeDensity), 0);
+                    scrubRow.addView(sFsTimeCur);
+
+                    sFsSeekBar = new SeekBar(act);
+                    sFsSeekBar.setMax(1000);
+                    if (Build.VERSION.SDK_INT >= 21) {
+                        sFsSeekBar.setProgressTintList(ColorStateList.valueOf(0xFFFF0033));
+                        sFsSeekBar.setProgressBackgroundTintList(ColorStateList.valueOf(0x55FFFFFF));
+                        sFsSeekBar.setThumbTintList(ColorStateList.valueOf(0xFFFFFFFF));
+                    } else {
+                        if (sFsSeekBar.getProgressDrawable() != null) {
+                            sFsSeekBar.getProgressDrawable().setColorFilter(0xFFFF0033, PorterDuff.Mode.SRC_IN);
+                        }
+                        if (sFsSeekBar.getThumb() != null) {
+                            sFsSeekBar.getThumb().setColorFilter(0xFFFFFFFF, PorterDuff.Mode.SRC_IN);
+                        }
+                    }
+                    sFsSeekBar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+                        @Override
+                        public void onProgressChanged(SeekBar sb, int progress, boolean fromUser) {
+                            if (fromUser && currentDurMs > 0L && sFsTimeCur != null) {
+                                long preview = (currentDurMs * progress) / 1000L;
+                                sFsTimeCur.setText(formatTimeMs(preview));
+                            }
+                        }
+
+                        @Override
+                        public void onStartTrackingTouch(SeekBar sb) {
+                            sFsSeeking = true;
+                            if (sAutoHideFsHudRunnable != null) {
+                                sUiHandler.removeCallbacks(sAutoHideFsHudRunnable);
+                            }
+                        }
+
+                        @Override
+                        public void onStopTrackingTouch(SeekBar sb) {
+                            sFsSeeking = false;
+                            long target = (currentDurMs > 0L)
+                                    ? ((currentDurMs * sb.getProgress()) / 1000L)
+                                    : 0L;
+                            sPendingPosMs = target;
+                            currentPosMs = target;
+                            try {
+                                nativeOnMediaAction(NATIVE_SEEK, target);
+                            } catch (Throwable ignored) {
+                            }
+                            if (sMediaPlayer != null && sVideoPrepared) {
+                                seekMediaPlayerTo(sMediaPlayer, target, true);
+                            }
+                            scheduleFsHudAutoHide();
+                        }
+                    });
+                    LinearLayout.LayoutParams sbLp = new LinearLayout.LayoutParams(
+                            0,
+                            LinearLayout.LayoutParams.WRAP_CONTENT,
+                            1f
+                    );
+                    scrubRow.addView(sFsSeekBar, sbLp);
+
+                    sFsTimeDur = new TextView(act);
+                    sFsTimeDur.setText("0:00");
+                    sFsTimeDur.setTextColor(0xFFB8B8C0);
+                    sFsTimeDur.setTextSize(12f);
+                    sFsTimeDur.setTypeface(Typeface.DEFAULT_BOLD);
+                    sFsTimeDur.setPadding((int) (8f * badgeDensity), 0, 0, 0);
+                    scrubRow.addView(sFsTimeDur);
+
+                    sFsHudBottom.addView(scrubRow, new LinearLayout.LayoutParams(
+                            LinearLayout.LayoutParams.MATCH_PARENT,
+                            LinearLayout.LayoutParams.WRAP_CONTENT
+                    ));
+
+                    LinearLayout ctrlRow = new LinearLayout(act);
+                    ctrlRow.setOrientation(LinearLayout.HORIZONTAL);
+                    ctrlRow.setGravity(Gravity.CENTER);
+                    int btnW = (int) (44f * badgeDensity);
+                    int btnH = (int) (40f * badgeDensity);
+                    int btnGap = (int) (24f * badgeDensity);
+
+                    HudIconView prevBtn = new HudIconView(act, HudIconView.KIND_PREV);
+                    prevBtn.setClickable(true);
+                    prevBtn.setOnClickListener(v -> {
+                        try {
+                            nativeOnMediaAction(NATIVE_PREV, 0);
+                        } catch (Throwable ignored) {
+                        }
+                        scheduleFsHudAutoHide();
+                    });
+                    ctrlRow.addView(prevBtn, new LinearLayout.LayoutParams(btnW, btnH));
+
+                    sFsPlayPauseBtn = new HudIconView(act, HudIconView.KIND_PAUSE);
+                    GradientDrawable ppBg = new GradientDrawable();
+                    ppBg.setShape(GradientDrawable.OVAL);
+                    ppBg.setColor(0x33FFFFFF);
+                    sFsPlayPauseBtn.setBackground(ppBg);
+                    sFsPlayPauseBtn.setClickable(true);
+                    sFsPlayPauseBtn.setOnClickListener(v -> {
+                        sPendingPlaying = !sPendingPlaying;
+                        updateVideoPauseIcon();
+                        syncFsHudControls();
+                        try {
+                            nativeOnMediaAction(NATIVE_TOGGLE, 0);
+                        } catch (Throwable ignored) {
+                        }
+                        scheduleFsHudAutoHide();
+                    });
+                    LinearLayout.LayoutParams ppLp = new LinearLayout.LayoutParams(btnW, btnW);
+                    ppLp.setMargins(btnGap, 0, btnGap, 0);
+                    ctrlRow.addView(sFsPlayPauseBtn, ppLp);
+
+                    HudIconView nextBtn = new HudIconView(act, HudIconView.KIND_NEXT);
+                    nextBtn.setClickable(true);
+                    nextBtn.setOnClickListener(v -> {
+                        try {
+                            nativeOnMediaAction(NATIVE_NEXT, 0);
+                        } catch (Throwable ignored) {
+                        }
+                        scheduleFsHudAutoHide();
+                    });
+                    ctrlRow.addView(nextBtn, new LinearLayout.LayoutParams(btnW, btnH));
+
+                    LinearLayout.LayoutParams ctrlRowLp = new LinearLayout.LayoutParams(
+                            LinearLayout.LayoutParams.MATCH_PARENT,
+                            LinearLayout.LayoutParams.WRAP_CONTENT
+                    );
+                    ctrlRowLp.topMargin = (int) (6f * badgeDensity);
+                    sFsHudBottom.addView(ctrlRow, ctrlRowLp);
+
+                    FrameLayout.LayoutParams hudLp = new FrameLayout.LayoutParams(
+                            FrameLayout.LayoutParams.MATCH_PARENT,
+                            FrameLayout.LayoutParams.WRAP_CONTENT
+                    );
+                    hudLp.gravity = Gravity.BOTTOM;
+                    sVideoOverlayRoot.addView(sFsHudBottom, hudLp);
+
                     sVideoParams = new WindowManager.LayoutParams(
                             width,
                             height,
@@ -1097,6 +1409,11 @@ public class YrPlaybackService extends Service {
                         sVideoPauseIcon = null;
                         sVideoFullscreenBtn = null;
                         sVideoFullscreenTitle = null;
+                        sFsHudBottom = null;
+                        sFsTimeCur = null;
+                        sFsTimeDur = null;
+                        sFsSeekBar = null;
+                        sFsPlayPauseBtn = null;
                         sVideoParams = null;
                         sVideoAdded = false;
                         return;
@@ -1158,11 +1475,8 @@ public class YrPlaybackService extends Service {
                 sPendingPosMs = posMs;
                 sPendingSpeed = speed;
                 updateVideoPauseIcon();
-                if (sVideoFullscreen && sVideoFullscreenTitle != null) {
-                    String artist = (currentArtist != null && !currentArtist.isEmpty())
-                            ? ("  \u2022  " + currentArtist)
-                            : "";
-                    sVideoFullscreenTitle.setText(currentTitle + artist);
+                if (sVideoFullscreen && sFsHudVisible) {
+                    syncFsHudControls();
                 }
                 MediaPlayer mp = sMediaPlayer;
                 if (mp == null || !sVideoPrepared || sActivityPaused || !sVideoWantedVisible) {
@@ -1283,8 +1597,19 @@ public class YrPlaybackService extends Service {
                 sVideoPauseIcon = null;
                 sVideoFullscreenBtn = null;
                 sVideoFullscreenTitle = null;
+                sFsHudBottom = null;
+                sFsTimeCur = null;
+                sFsTimeDur = null;
+                sFsSeekBar = null;
+                sFsPlayPauseBtn = null;
                 sVideoActivityRef = null;
                 sVideoFullscreen = false;
+                sFsHudVisible = false;
+                sFsSeeking = false;
+                if (sAutoHideFsHudRunnable != null) {
+                    sUiHandler.removeCallbacks(sAutoHideFsHudRunnable);
+                    sAutoHideFsHudRunnable = null;
+                }
                 if (sHideSeekBadgeRunnable != null) {
                     sUiHandler.removeCallbacks(sHideSeekBadgeRunnable);
                     sHideSeekBadgeRunnable = null;

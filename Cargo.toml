@@ -9,7 +9,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.9.6"
+version = "0.9.7"
 edition = "2021"
 license = "MIT"
 authors = ["Antony <300692660+uamo11@users.noreply.github.com>"]
@@ -33,7 +33,7 @@ rodio = { version = "0.20", default-features = false, features = ["symphonia-aac
 symphonia = { version = "0.5", features = ["aac", "isomp4", "mp3", "flac", "ogg", "vorbis", "wav"] }
 eframe = { version = "0.31", default-features = false, features = ["default_fonts", "glow"] }
 egui = "0.31"
-egui_extras = { version = "0.31", features = ["image", "http"] }
+egui_extras = { version = "0.31", features = ["image", "http", "file"] }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 
 [patch.crates-io]

@@ -156,6 +156,27 @@ pub fn track_thumb_url(thumb: Option<&str>, track_id: &str) -> Option<String> {
     }
 }
 
+/// Returns the local disk path for a cached offline track cover (`<cover_dir>/<safe_id>.jpg`).
+pub fn offline_cover_path(cover_dir: &std::path::Path, track_id: &str) -> std::path::PathBuf {
+    let safe: String = track_id
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .take(64)
+        .collect();
+    let name = if safe.is_empty() { "track" } else { safe.as_str() };
+    cover_dir.join(format!("{name}.jpg"))
+}
+
+/// Formats a local filesystem path as a `file://` URI accepted by `egui_extras` file loader.
+pub fn file_uri_for_path(path: &std::path::Path) -> String {
+    let s = path.to_string_lossy().replace('\\', "/");
+    if s.starts_with('/') {
+        format!("file://{s}")
+    } else {
+        format!("file:///{s}")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -228,5 +249,16 @@ mod tests {
         let evicted_stale = lru.advance_and_collect_evictions_at(t2);
         assert_eq!(evicted_stale.len(), MAX_CACHED_IMAGES);
         assert!(lru.is_empty());
+    }
+
+    #[test]
+    fn offline_cover_path_sanitizes_and_formats_file_uri() {
+        let dir = std::path::Path::new("/tmp/covers");
+        let p = offline_cover_path(dir, "../a/b");
+        assert_eq!(p, dir.join("ab.jpg"));
+
+        let clean = offline_cover_path(dir, "abc123");
+        assert_eq!(clean, dir.join("abc123.jpg"));
+        assert_eq!(file_uri_for_path(&clean), "file:///tmp/covers/abc123.jpg");
     }
 }

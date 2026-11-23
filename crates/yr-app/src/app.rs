@@ -527,6 +527,9 @@ impl YrApp {
             Arc::new(YtMusicProvider::with_cache_dir(data_dir.join("rustypipe_cache")));
         let download_dir = data_dir.join("downloads");
         let cache_dir = data_dir.join("stream_cache");
+        let cover_dir = data_dir.join("cover_cache");
+        let _ = std::fs::create_dir_all(&cover_dir);
+        let _ = COVER_CACHE_DIR.set(cover_dir.clone());
 
         let dl_builder = DownloadManager::new(
             download_dir,
@@ -734,6 +737,14 @@ impl YrApp {
                 }
             });
         }
+        let dl_cov = Arc::clone(&app.downloader);
+        let prov_cov = Arc::clone(&app.provider);
+        let cov_dir_init = cover_dir.clone();
+        app.runtime.spawn(async move {
+            for t in dl_cov.completed_tracks().await.into_iter().take(20) {
+                cache_track_cover_async(Arc::clone(&prov_cov), cov_dir_init.clone(), t).await;
+            }
+        });
         let audio_bg = app.audio.clone();
         let queue_bg = Arc::clone(&app.queue);
         let dl_bg = Arc::clone(&app.downloader);
@@ -750,24 +761,68 @@ impl YrApp {
                 let show_notif = notif_bg.load(Ordering::Relaxed);
                 match act {
                     MediaAction::Play | MediaAction::Pause | MediaAction::Toggle => {
+                        let st = audio_bg.snapshot().status;
                         let playing_now = match act {
                             MediaAction::Play => {
-                                audio_bg.resume();
-                                true
+                                if st == PlaybackStatus::Paused {
+                                    audio_bg.resume();
+                                    true
+                                } else if st != PlaybackStatus::Playing {
+                                    let track_opt =
+                                        queue_bg.lock().ok().and_then(|q| q.current_track().cloned());
+                                    if let Some(track) = track_opt {
+                                        play_track_bg(
+                                            track,
+                                            quality_bg,
+                                            Arc::clone(&dl_bg),
+                                            Arc::clone(&provider_bg),
+                                            audio_bg.clone(),
+                                            ev_tx_bg.clone(),
+                                            ctx_bg.clone(),
+                                            cache_dir_bg.clone(),
+                                            show_notif,
+                                        )
+                                        .await;
+                                        true
+                                    } else {
+                                        false
+                                    }
+                                } else {
+                                    true
+                                }
                             }
                             MediaAction::Pause => {
                                 audio_bg.pause();
                                 false
                             }
                             MediaAction::Toggle => {
-                                let was_playing =
-                                    audio_bg.snapshot().status == PlaybackStatus::Playing;
-                                if was_playing {
+                                if st == PlaybackStatus::Playing {
                                     audio_bg.pause();
-                                } else {
+                                    false
+                                } else if st == PlaybackStatus::Paused {
                                     audio_bg.resume();
+                                    true
+                                } else {
+                                    let track_opt =
+                                        queue_bg.lock().ok().and_then(|q| q.current_track().cloned());
+                                    if let Some(track) = track_opt {
+                                        play_track_bg(
+                                            track,
+                                            quality_bg,
+                                            Arc::clone(&dl_bg),
+                                            Arc::clone(&provider_bg),
+                                            audio_bg.clone(),
+                                            ev_tx_bg.clone(),
+                                            ctx_bg.clone(),
+                                            cache_dir_bg.clone(),
+                                            show_notif,
+                                        )
+                                        .await;
+                                        true
+                                    } else {
+                                        false
+                                    }
                                 }
-                                !was_playing
                             }
                             _ => false,
                         };
@@ -864,6 +919,7 @@ impl YrApp {
         let sleep_tick = Arc::clone(&app.sleep_after_track);
         let timer_tick = Arc::clone(&app.sleep_timer_until);
         let cache_dir_tick = app.data_dir.join("stream_cache");
+        let cov_dir_tick = app.data_dir.join("cover_cache");
         let smart_dl_tick = Arc::clone(&app.smart_downloads_flag);
         let notif_tick = Arc::clone(&app.notifications_flag);
         let max_smart_tick = Arc::clone(&app.max_smart_songs_atomic);
@@ -906,8 +962,13 @@ impl YrApp {
                                                     .and_then(|m| m.get(id).cloned())
                                             });
                                         if let Some(track) = track_opt {
-                                            if dl_tick.register_cached_track(track, &path).await.is_ok() {
+                                            if dl_tick.register_cached_track(track.clone(), &path).await.is_ok() {
                                                 promoted_any = true;
+                                                tokio::spawn(cache_track_cover_async(
+                                                    Arc::clone(&provider_tick),
+                                                    cov_dir_tick.clone(),
+                                                    track,
+                                                ));
                                             }
                                         }
                                     }
@@ -1404,6 +1465,8 @@ impl YrApp {
         let quality = self.store.data.config.download_quality;
         let track_cloned = track.clone();
         let tx = self.event_tx.clone();
+        let cov_dir = self.data_dir.join("cover_cache");
+        let prov_cov = Arc::clone(&self.provider);
         self.runtime.spawn(async move {
             if dl.find_local_path(&track_cloned.id).await.is_some() {
                 return;
@@ -1413,7 +1476,8 @@ impl YrApp {
                     .map(|m| m.len() > 32_768)
                     .unwrap_or(false)
             {
-                if dl.register_cached_track(track_cloned, &cache_file).await.is_ok() {
+                if dl.register_cached_track(track_cloned.clone(), &cache_file).await.is_ok() {
+                    tokio::spawn(cache_track_cover_async(prov_cov, cov_dir, track_cloned));
                     let tasks = dl.list_tasks().await;
                     let total_bytes = dl.total_downloaded_bytes().await;
                     let _ = tx.send(AppEvent::DownloadsRefreshed { tasks, total_bytes });
@@ -1426,7 +1490,8 @@ impl YrApp {
             if !manual && dl.completed_count().await >= max_songs {
                 return;
             }
-            dl.enqueue(track_cloned, quality).await;
+            dl.enqueue(track_cloned.clone(), quality).await;
+            tokio::spawn(cache_track_cover_async(prov_cov, cov_dir, track_cloned));
         });
     }
 
@@ -1468,7 +1533,12 @@ impl YrApp {
         let tx = self.event_tx.clone();
         let ctx = ctx.clone();
         self.runtime.spawn(async move {
-            if let Ok(bytes) = provider.fetch_bytes(&u).await {
+            let bytes_opt = if let Some(path_str) = u.strip_prefix("file://") {
+                std::fs::read(path_str).ok()
+            } else {
+                provider.fetch_bytes(&u).await.ok()
+            };
+            if let Some(bytes) = bytes_opt {
                 if let Some(color) = color_extract::dominant_ambient_color(&bytes) {
                     let _ = tx.send(AppEvent::TrackAccentColorLoaded { url: u, color });
                     ctx.request_repaint();
@@ -6882,7 +6952,7 @@ impl YrApp {
             return;
         };
 
-        let resolved_cover = track_thumb_url(track.thumbnail_url.as_deref(), &track.id);
+        let resolved_cover = resolve_track_cover_uri(&track);
         if let Some(url) = resolved_cover.as_deref() {
             self.ensure_cover_color(Some(url), ctx);
         }
@@ -7982,7 +8052,7 @@ impl YrApp {
                                             snap.speed,
                                         );
                                     }
-                                    _ => {}
+                                    _ => self.play_current_queue_track(ctx),
                                 }
                             }
 
@@ -9510,7 +9580,7 @@ impl YrApp {
                     ui.label(RichText::new("Ajusta los mixes de inicio según tu historial de reproducción, canciones favoritas y artistas seguidos.").size(12.0).color(TEXT_SECONDARY));
                 }
                 SettingsCategory::About => {
-                    ui.heading("YR Music v0.9.6");
+                    ui.heading("YR Music v0.9.7");
                     ui.label("Cliente nativo de música 100% en Rust para Android y escritorio.");
                     ui.add_space(6.0);
                     ui.label(RichText::new("Motor de audio Symphonia PCM con DSP Morphe 3D binaural, reproductor integrado de video en la app, auto-scroll inteligente de cola, prefetch predictivo en disco y compatibilidad completa con YouTube Music.").size(12.0).color(TEXT_SECONDARY));
@@ -10689,7 +10759,7 @@ impl YrApp {
                         }
                         if menu_row(ui, icons::Icon::Help, "Ayuda y comentarios").clicked() {
                             self.show_account_modal = false;
-                            self.set_banner("YR Music v0.9.6 • Pure Rust");
+                            self.set_banner("YR Music v0.9.7 • Pure Rust");
                         }
 
                         #[cfg(target_os = "android")]
@@ -11631,7 +11701,7 @@ fn paint_antony_avatar(
     }
 }
 
-/// Paints a high-res remote image if ready, otherwise falling back to an already-cached 160px thumbnail.
+/// Paints a local/high-res image if ready, otherwise falling back to an already-cached 160px thumbnail.
 fn paint_progressive_image(
     ui: &mut egui::Ui,
     rect: egui::Rect,
@@ -11640,6 +11710,11 @@ fn paint_progressive_image(
     size: Vec2,
     corner_radius: CornerRadius,
 ) {
+    if url.starts_with("file://") {
+        let uri = tracked_thumb_uri(url, preferred_max_px);
+        paint_ready_image(ui, rect, uri, size, corner_radius);
+        return;
+    }
     let hi_uri = tracked_thumb_uri(url, preferred_max_px);
     if !paint_ready_image(ui, rect, hi_uri, size, corner_radius) {
         let fallback_uri = tracked_thumb_uri(url, 160);
@@ -11648,7 +11723,7 @@ fn paint_progressive_image(
 }
 
 fn render_track_thumb(ui: &mut egui::Ui, track: &Track, size: f32) {
-    let url = track_thumb_url(track.thumbnail_url.as_deref(), &track.id);
+    let url = resolve_track_cover_uri(track);
     render_thumb(ui, url.as_deref(), size);
 }
 
@@ -11689,12 +11764,51 @@ fn render_thumb(ui: &mut egui::Ui, url: Option<&str>, size: f32) {
 }
 
 static IMAGE_LRU: OnceLock<Mutex<ImageLru>> = OnceLock::new();
+static COVER_CACHE_DIR: OnceLock<PathBuf> = OnceLock::new();
 
 fn image_lru() -> &'static Mutex<ImageLru> {
     IMAGE_LRU.get_or_init(|| Mutex::new(ImageLru::default()))
 }
 
+fn resolve_track_cover_uri(track: &Track) -> Option<String> {
+    if let Some(dir) = COVER_CACHE_DIR.get() {
+        let p = yr_core::image_cache::offline_cover_path(dir, &track.id);
+        if p.exists() && std::fs::metadata(&p).map(|m| m.len() > 512).unwrap_or(false) {
+            return Some(yr_core::image_cache::file_uri_for_path(&p));
+        }
+    }
+    track_thumb_url(track.thumbnail_url.as_deref(), &track.id)
+}
+
+async fn cache_track_cover_async(
+    provider: Arc<dyn MusicProvider>,
+    cover_dir: PathBuf,
+    track: Track,
+) {
+    let dst = yr_core::image_cache::offline_cover_path(&cover_dir, &track.id);
+    if dst.exists() && std::fs::metadata(&dst).map(|m| m.len() > 512).unwrap_or(false) {
+        return;
+    }
+    let Some(raw_url) = track_thumb_url(track.thumbnail_url.as_deref(), &track.id) else {
+        return;
+    };
+    let url = optimize_thumb_url(&raw_url, 360);
+    if let Ok(bytes) = provider.fetch_bytes(&url).await {
+        if bytes.len() > 512 {
+            let _ = std::fs::create_dir_all(&cover_dir);
+            let tmp = dst.with_extension("jpg.tmp");
+            if std::fs::write(&tmp, &bytes).is_ok() {
+                let _ = std::fs::rename(&tmp, &dst);
+            }
+        }
+    }
+}
+
 fn tracked_thumb_uri(url: &str, max_px: u32) -> String {
+    if url.starts_with("file://") {
+        image_lru().lock().unwrap().touch(url);
+        return url.to_string();
+    }
     let uri = optimize_thumb_url(url, max_px);
     if !uri.is_empty() {
         image_lru().lock().unwrap().touch(&uri);
