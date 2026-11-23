@@ -42,6 +42,12 @@ public class YrMainActivity extends NativeActivity {
     @Override
     public void onBackPressed() {
         try {
+            if (YrPlaybackService.exitFullscreenIfActive(this)) {
+                return;
+            }
+        } catch (Throwable ignored) {
+        }
+        try {
             if (nativeOnBackPressed()) {
                 return;
             }

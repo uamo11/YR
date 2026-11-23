@@ -1028,6 +1028,7 @@ impl YrApp {
             app.audio.set_speed(app.store.data.config.playback_speed);
         }
         app.audio.set_equalizer(app.store.data.config.equalizer.clone());
+        crate::android_media::set_video_seek_seconds(app.store.data.config.seek_seconds);
         if !app.store.data.last_queue.is_empty() {
             let idx = app
                 .store
@@ -5707,13 +5708,15 @@ impl YrApp {
                                                 .size(15.0)
                                                 .color(TEXT_PRIMARY),
                                         );
+                                        let liked_meta = if liked_count == 1 {
+                                            "Playlist autogenerada • 1 canción".to_string()
+                                        } else {
+                                            format!("Playlist autogenerada • {liked_count} canciones")
+                                        };
                                         ui.label(
-                                            RichText::new(format!(
-                                                "Playlist autogenerada • {} canciones",
-                                                liked_count
-                                            ))
-                                            .size(12.0)
-                                            .color(TEXT_SECONDARY),
+                                            RichText::new(liked_meta)
+                                                .size(12.0)
+                                                .color(TEXT_SECONDARY),
                                         );
                                     });
                                 });
@@ -6096,9 +6099,9 @@ impl YrApp {
     }
 
     fn render_downloads(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        let mb = self.total_downloaded_bytes as f64 / (1024.0 * 1024.0);
         ui.horizontal(|ui| {
             ui.heading("Descargas");
-            let mb = self.total_downloaded_bytes as f64 / (1024.0 * 1024.0);
             if mb > 0.0 {
                 ui.label(
                     RichText::new(format!("({mb:.1} MB)"))
@@ -6123,20 +6126,6 @@ impl YrApp {
             });
         });
 
-        if self.store.data.config.smart_downloads {
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 6.0;
-                let (dot_r, _) = ui.allocate_exact_size(Vec2::splat(8.0), Sense::hover());
-                ui.painter().circle_filled(dot_r.center(), 4.0, GREEN_OK);
-                ui.label(
-                    RichText::new("Descargas inteligentes activas • Música guardada automáticamente para escuchar sin conexión")
-                        .size(11.5)
-                        .color(TEXT_SECONDARY),
-                );
-            });
-            ui.add_space(4.0);
-        }
-
         let dl_q = self.library_search.trim().to_lowercase();
         let completed: Vec<Track> = self
             .downloads
@@ -6149,6 +6138,92 @@ impl YrApp {
                     || t.artist.to_lowercase().contains(&dl_q)
             })
             .collect();
+        let total_completed = self
+            .downloads
+            .iter()
+            .filter(|d| d.status == DownloadStatus::Completed)
+            .count();
+        let max_songs = self.store.data.config.max_smart_download_songs.max(1);
+        let smart_on = self.store.data.config.smart_downloads;
+
+        ui.add_space(4.0);
+        egui::Frame::new()
+            .fill(BG_SURFACE)
+            .stroke(Stroke::new(0.8_f32, Color32::from_rgb(48, 48, 56)))
+            .corner_radius(CornerRadius::same(12))
+            .inner_margin(egui::Margin::symmetric(12, 10))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 6.0;
+                    let (dot_r, _) = ui.allocate_exact_size(Vec2::splat(8.0), Sense::hover());
+                    ui.painter().circle_filled(
+                        dot_r.center(),
+                        4.0,
+                        if smart_on { GREEN_OK } else { TEXT_SECONDARY },
+                    );
+                    ui.label(
+                        RichText::new(if smart_on {
+                            "Descargas inteligentes activas"
+                        } else {
+                            "Descargas inteligentes pausadas"
+                        })
+                        .size(13.0)
+                        .strong()
+                        .color(Color32::WHITE),
+                    );
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if icons::icon_pill_button(
+                            ui,
+                            icons::Icon::Settings,
+                            "Ajustes",
+                            BG_ELEVATED,
+                            Color32::WHITE,
+                        )
+                        .clicked()
+                        {
+                            self.show_settings = true;
+                            self.settings_category = SettingsCategory::DownloadsStorage;
+                        }
+                    });
+                });
+                ui.add_space(3.0);
+                let quota_color = if total_completed > 0 {
+                    GREEN_OK
+                } else {
+                    TEXT_SECONDARY
+                };
+                ui.label(
+                    RichText::new(format!(
+                        "{total_completed} / {max_songs} canciones offline • {mb:.1} MB"
+                    ))
+                    .size(12.0)
+                    .color(quota_color),
+                );
+                ui.add_space(6.0);
+                let ratio = (total_completed as f32 / max_songs as f32).clamp(0.0, 1.0);
+                let (bar_rect, _) =
+                    ui.allocate_exact_size(Vec2::new(ui.available_width(), 5.0), Sense::hover());
+                ui.painter().rect_filled(
+                    bar_rect,
+                    CornerRadius::same(3),
+                    Color32::from_rgb(38, 38, 44),
+                );
+                if ratio > 0.0 {
+                    let filled_rect = Rect::from_min_max(
+                        bar_rect.left_top(),
+                        Pos2::new(
+                            bar_rect.left() + bar_rect.width() * ratio,
+                            bar_rect.bottom(),
+                        ),
+                    );
+                    ui.painter().rect_filled(
+                        filled_rect,
+                        CornerRadius::same(3),
+                        if ratio >= 0.9 { ACCENT_RED } else { GREEN_OK },
+                    );
+                }
+            });
+        ui.add_space(6.0);
 
         if !completed.is_empty() {
             ui.horizontal(|ui| {
@@ -6175,6 +6250,7 @@ impl YrApp {
                     self.play_tracks_shuffled(completed.clone(), ctx);
                 }
             });
+            ui.add_space(6.0);
         }
 
         let dl_viewport = ui.available_rect_before_wrap();
@@ -9069,6 +9145,7 @@ impl YrApp {
                             let selected = self.store.data.config.seek_seconds == secs;
                             if settings_choice_pill(ui, selected, &label) {
                                 self.store.data.config.seek_seconds = secs;
+                                crate::android_media::set_video_seek_seconds(secs);
                                 let _ = self.store.save();
                             }
                         }
@@ -9433,7 +9510,7 @@ impl YrApp {
                     ui.label(RichText::new("Ajusta los mixes de inicio según tu historial de reproducción, canciones favoritas y artistas seguidos.").size(12.0).color(TEXT_SECONDARY));
                 }
                 SettingsCategory::About => {
-                    ui.heading("YR Music v0.9.5");
+                    ui.heading("YR Music v0.9.6");
                     ui.label("Cliente nativo de música 100% en Rust para Android y escritorio.");
                     ui.add_space(6.0);
                     ui.label(RichText::new("Motor de audio Symphonia PCM con DSP Morphe 3D binaural, reproductor integrado de video en la app, auto-scroll inteligente de cola, prefetch predictivo en disco y compatibilidad completa con YouTube Music.").size(12.0).color(TEXT_SECONDARY));
@@ -10612,7 +10689,7 @@ impl YrApp {
                         }
                         if menu_row(ui, icons::Icon::Help, "Ayuda y comentarios").clicked() {
                             self.show_account_modal = false;
-                            self.set_banner("YR Music v0.9.5 • Pure Rust");
+                            self.set_banner("YR Music v0.9.6 • Pure Rust");
                         }
 
                         #[cfg(target_os = "android")]

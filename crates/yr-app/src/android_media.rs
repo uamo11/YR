@@ -429,6 +429,25 @@ mod imp {
         }
     }
 
+    pub fn set_video_seek_seconds(secs: u32) {
+        let Some(bridge) = bridge() else {
+            return;
+        };
+        let Ok(mut env) = bridge.vm.attach_current_thread() else {
+            return;
+        };
+        let service_cls: &JClass = bridge.service_class.as_obj().into();
+        if let Err(e) = env.call_static_method(
+            service_cls,
+            "setSeekSeconds",
+            "(I)V",
+            &[JValue::Int(secs as jint)],
+        ) {
+            log::warn!("android_media: setSeekSeconds failed: {e:?}");
+            let _ = env.exception_clear();
+        }
+    }
+
     #[no_mangle]
     pub extern "system" fn Java_com_yr_music_YrPlaybackService_nativeOnGoogleCookie(
         mut env: JNIEnv,
@@ -488,6 +507,7 @@ mod imp {
     }
     pub fn hide_embedded_video() {}
     pub fn sync_native_video(_playing: bool, _pos_ms: u64, _speed: f32) {}
+    pub fn set_video_seek_seconds(_secs: u32) {}
     pub fn is_wifi_connected() -> bool {
         true
     }
@@ -508,6 +528,6 @@ pub use imp::init;
 pub use imp::{
     attach_native_video, hide_embedded_video, is_metered_network, is_wifi_connected,
     open_google_login, resolve_audio_url, set_action_sender, set_artwork_url, set_cookie_sender,
-    set_egui_ctx, set_ui_at_root, share_text, stop_service, sync_native_video, take_back_pressed,
-    update_playback,
+    set_egui_ctx, set_ui_at_root, set_video_seek_seconds, share_text, stop_service,
+    sync_native_video, take_back_pressed, update_playback,
 };

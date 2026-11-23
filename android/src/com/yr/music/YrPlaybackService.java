@@ -9,6 +9,7 @@ import android.app.PendingIntent;
 import android.app.Service;
 import android.content.Context;
 import android.content.Intent;
+import android.content.pm.ActivityInfo;
 import android.content.pm.ServiceInfo;
 import android.content.res.ColorStateList;
 import android.graphics.Bitmap;
@@ -56,6 +57,7 @@ import android.widget.LinearLayout;
 import android.widget.ProgressBar;
 import android.widget.TextView;
 import java.io.InputStream;
+import java.lang.ref.WeakReference;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.util.HashMap;
@@ -109,6 +111,16 @@ public class YrPlaybackService extends Service {
     private static volatile TextView sVideoSeekBadge = null;
     private static final Handler sUiHandler = new Handler(Looper.getMainLooper());
     private static Runnable sHideSeekBadgeRunnable = null;
+    private static volatile TextView sVideoPauseIcon = null;
+    private static volatile TextView sVideoFullscreenBtn = null;
+    private static volatile TextView sVideoFullscreenTitle = null;
+    private static volatile boolean sVideoFullscreen = false;
+    private static volatile int sCompactX = 0;
+    private static volatile int sCompactY = 0;
+    private static volatile int sCompactW = 0;
+    private static volatile int sCompactH = 0;
+    private static volatile int sSeekSeconds = 10;
+    private static volatile WeakReference<Activity> sVideoActivityRef = null;
     private static volatile boolean sTriedFallback = false;
     private static volatile boolean sVideoWantedVisible = false;
     private static volatile boolean sPendingPlaying = false;
@@ -544,6 +556,96 @@ public class YrPlaybackService extends Service {
         sUiHandler.postDelayed(sHideSeekBadgeRunnable, 850L);
     }
 
+    public static void setSeekSeconds(final int seconds) {
+        sSeekSeconds = Math.max(5, Math.min(60, seconds));
+    }
+
+    private static void updateVideoPauseIcon() {
+        if (sVideoPauseIcon == null) return;
+        boolean show = sVideoPrepared && !sPendingPlaying;
+        sVideoPauseIcon.setVisibility(show ? View.VISIBLE : View.GONE);
+    }
+
+    public static boolean exitFullscreenIfActive(final Activity act) {
+        if (!sVideoFullscreen) return false;
+        sUiHandler.post(() -> setVideoFullscreen(act, false));
+        return true;
+    }
+
+    private static void setVideoFullscreen(final Activity act, final boolean fullscreen) {
+        Activity targetAct = (act != null)
+                ? act
+                : (sVideoActivityRef != null ? sVideoActivityRef.get() : null);
+        if (targetAct == null || sVideoOverlayRoot == null || sVideoParams == null || !sVideoAdded) {
+            sVideoFullscreen = false;
+            return;
+        }
+        WindowManager wm = (WindowManager) targetAct.getSystemService(Context.WINDOW_SERVICE);
+        if (wm == null) return;
+
+        sVideoFullscreen = fullscreen;
+        View decor = (targetAct.getWindow() != null) ? targetAct.getWindow().getDecorView() : null;
+        if (fullscreen) {
+            try {
+                targetAct.setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE);
+            } catch (Throwable ignored) {
+            }
+            if (decor != null) {
+                decor.setSystemUiVisibility(
+                        View.SYSTEM_UI_FLAG_FULLSCREEN
+                                | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                                | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                                | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                                | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                                | View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                );
+            }
+            sVideoOverlayRoot.setClipToOutline(false);
+            sVideoOverlayRoot.setBackgroundColor(0xFF000000);
+            sVideoParams.x = 0;
+            sVideoParams.y = 0;
+            sVideoParams.width = WindowManager.LayoutParams.MATCH_PARENT;
+            sVideoParams.height = WindowManager.LayoutParams.MATCH_PARENT;
+            if (sVideoFullscreenBtn != null) {
+                sVideoFullscreenBtn.setText("\u2715");
+            }
+            if (sVideoFullscreenTitle != null) {
+                String artist = (currentArtist != null && !currentArtist.isEmpty())
+                        ? ("  \u2022  " + currentArtist)
+                        : "";
+                sVideoFullscreenTitle.setText(currentTitle + artist);
+                sVideoFullscreenTitle.setVisibility(View.VISIBLE);
+            }
+        } else {
+            try {
+                targetAct.setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED);
+            } catch (Throwable ignored) {
+            }
+            if (decor != null) {
+                decor.setSystemUiVisibility(View.SYSTEM_UI_FLAG_VISIBLE);
+            }
+            sVideoOverlayRoot.setClipToOutline(true);
+            sVideoOverlayRoot.setBackgroundColor(0xFF0A0A0C);
+            sVideoParams.x = sCompactX;
+            sVideoParams.y = sCompactY;
+            sVideoParams.width = Math.max(1, sCompactW);
+            sVideoParams.height = Math.max(1, sCompactH);
+            if (sVideoFullscreenBtn != null) {
+                sVideoFullscreenBtn.setText("\u26F6");
+            }
+            if (sVideoFullscreenTitle != null) {
+                sVideoFullscreenTitle.setVisibility(View.GONE);
+            }
+        }
+        try {
+            wm.updateViewLayout(sVideoOverlayRoot, sVideoParams);
+        } catch (Throwable updErr) {
+            Log.w("YrPlaybackService", "setVideoFullscreen updateViewLayout failed: " + updErr);
+        }
+        sVideoOverlayRoot.post(YrPlaybackService::applyVideoAspectTransform);
+        Log.i("YrPlaybackService", "setVideoFullscreen=" + fullscreen);
+    }
+
     private static void applySpeedToMediaPlayer(MediaPlayer mp, float speed) {
         if (mp == null || Build.VERSION.SDK_INT < 23) return;
         float clamped = Math.max(0.5f, Math.min(2.0f, speed));
@@ -564,6 +666,7 @@ public class YrPlaybackService extends Service {
         sVideoWidth = 0;
         sVideoHeight = 0;
         sLastAppliedSpeed = 1.0f;
+        updateVideoPauseIcon();
         MediaPlayer old = sMediaPlayer;
         sMediaPlayer = null;
         if (old != null) {
@@ -640,6 +743,7 @@ public class YrPlaybackService extends Service {
                     } catch (Throwable ignored) {
                     }
                 }
+                updateVideoPauseIcon();
                 Log.i("YrPlaybackService", "Native MediaPlayer prepared: " + sVideoWidth + "x" + sVideoHeight);
             });
             mp.setOnErrorListener((player, what, extra) -> {
@@ -708,6 +812,11 @@ public class YrPlaybackService extends Service {
                 decor.getLocationOnScreen(loc);
                 final int wx = loc[0] + x;
                 final int wy = loc[1] + y;
+                sVideoActivityRef = new WeakReference<Activity>(act);
+                sCompactX = wx;
+                sCompactY = wy;
+                sCompactW = width;
+                sCompactH = height;
                 Log.i("YrPlaybackService", "attachNativeVideo rect=(" + wx + "," + wy + "," + width + "x" + height + ")");
 
                 if (sVideoOverlayRoot == null) {
@@ -729,6 +838,8 @@ public class YrPlaybackService extends Service {
 
                         @Override
                         public boolean onSingleTapConfirmed(MotionEvent e) {
+                            sPendingPlaying = !sPendingPlaying;
+                            updateVideoPauseIcon();
                             try {
                                 nativeOnMediaAction(NATIVE_TOGGLE, 0);
                             } catch (Throwable ignored) {
@@ -740,9 +851,11 @@ public class YrPlaybackService extends Service {
                         public boolean onDoubleTap(MotionEvent e) {
                             int vw = sVideoOverlayRoot != null ? sVideoOverlayRoot.getWidth() : 0;
                             float tx = e.getX();
+                            int secs = Math.max(5, Math.min(60, sSeekSeconds));
+                            long deltaMs = secs * 1000L;
                             if (vw > 0 && tx < vw * 0.45f) {
                                 long basePos = (sPendingPosMs > 0) ? sPendingPosMs : currentPosMs;
-                                long target = Math.max(0L, basePos - 10000L);
+                                long target = Math.max(0L, basePos - deltaMs);
                                 sPendingPosMs = target;
                                 currentPosMs = target;
                                 try {
@@ -752,12 +865,12 @@ public class YrPlaybackService extends Service {
                                 if (sMediaPlayer != null && sVideoPrepared) {
                                     seekMediaPlayerTo(sMediaPlayer, target, true);
                                 }
-                                showVideoSeekBadge(act, "\u00AB\u00AB -10 s", false);
+                                showVideoSeekBadge(act, "\u00AB\u00AB -" + secs + " s", false);
                             } else if (vw > 0 && tx > vw * 0.55f) {
                                 long basePos = (sPendingPosMs > 0) ? sPendingPosMs : currentPosMs;
                                 long target = (currentDurMs > 0)
-                                        ? Math.min(currentDurMs, basePos + 10000L)
-                                        : (basePos + 10000L);
+                                        ? Math.min(currentDurMs, basePos + deltaMs)
+                                        : (basePos + deltaMs);
                                 sPendingPosMs = target;
                                 currentPosMs = target;
                                 try {
@@ -767,8 +880,10 @@ public class YrPlaybackService extends Service {
                                 if (sMediaPlayer != null && sVideoPrepared) {
                                     seekMediaPlayerTo(sMediaPlayer, target, true);
                                 }
-                                showVideoSeekBadge(act, "+10 s \u00BB\u00BB", true);
+                                showVideoSeekBadge(act, "+" + secs + " s \u00BB\u00BB", true);
                             } else {
+                                sPendingPlaying = !sPendingPlaying;
+                                updateVideoPauseIcon();
                                 try {
                                     nativeOnMediaAction(NATIVE_TOGGLE, 0);
                                 } catch (Throwable ignored) {
@@ -865,6 +980,68 @@ public class YrPlaybackService extends Service {
                     sVideoSeekBadge.setVisibility(View.GONE);
                     sVideoOverlayRoot.addView(sVideoSeekBadge);
 
+                    int pauseSz = (int) (52f * badgeDensity);
+                    sVideoPauseIcon = new TextView(act);
+                    sVideoPauseIcon.setText("\u25B6");
+                    sVideoPauseIcon.setTextColor(0xFFFFFFFF);
+                    sVideoPauseIcon.setTextSize(22f);
+                    sVideoPauseIcon.setTypeface(Typeface.DEFAULT_BOLD);
+                    sVideoPauseIcon.setGravity(Gravity.CENTER);
+                    GradientDrawable pauseBg = new GradientDrawable();
+                    pauseBg.setShape(GradientDrawable.OVAL);
+                    pauseBg.setColor(0xAA0A0A0E);
+                    sVideoPauseIcon.setBackground(pauseBg);
+                    sVideoPauseIcon.setVisibility(View.GONE);
+                    FrameLayout.LayoutParams pauseLp = new FrameLayout.LayoutParams(pauseSz, pauseSz);
+                    pauseLp.gravity = Gravity.CENTER;
+                    sVideoOverlayRoot.addView(sVideoPauseIcon, pauseLp);
+
+                    sVideoFullscreenTitle = new TextView(act);
+                    sVideoFullscreenTitle.setTextColor(0xFFFFFFFF);
+                    sVideoFullscreenTitle.setTextSize(14f);
+                    sVideoFullscreenTitle.setTypeface(Typeface.DEFAULT_BOLD);
+                    sVideoFullscreenTitle.setSingleLine(true);
+                    sVideoFullscreenTitle.setEllipsize(TextUtils.TruncateAt.END);
+                    GradientDrawable titleBg = new GradientDrawable();
+                    titleBg.setColor(0x88101014);
+                    titleBg.setCornerRadius(10f * badgeDensity);
+                    sVideoFullscreenTitle.setBackground(titleBg);
+                    int tPadH = (int) (10f * badgeDensity);
+                    int tPadV = (int) (5f * badgeDensity);
+                    sVideoFullscreenTitle.setPadding(tPadH, tPadV, tPadH, tPadV);
+                    sVideoFullscreenTitle.setVisibility(View.GONE);
+                    FrameLayout.LayoutParams titleLp = new FrameLayout.LayoutParams(
+                            FrameLayout.LayoutParams.WRAP_CONTENT,
+                            FrameLayout.LayoutParams.WRAP_CONTENT
+                    );
+                    titleLp.gravity = Gravity.TOP | Gravity.START;
+                    titleLp.setMargins(
+                            (int) (18f * badgeDensity),
+                            (int) (14f * badgeDensity),
+                            (int) (68f * badgeDensity),
+                            0
+                    );
+                    sVideoOverlayRoot.addView(sVideoFullscreenTitle, titleLp);
+
+                    int fsSz = (int) (36f * badgeDensity);
+                    sVideoFullscreenBtn = new TextView(act);
+                    sVideoFullscreenBtn.setText("\u26F6");
+                    sVideoFullscreenBtn.setTextColor(0xFFFFFFFF);
+                    sVideoFullscreenBtn.setTextSize(18f);
+                    sVideoFullscreenBtn.setTypeface(Typeface.DEFAULT_BOLD);
+                    sVideoFullscreenBtn.setGravity(Gravity.CENTER);
+                    GradientDrawable fsBg = new GradientDrawable();
+                    fsBg.setColor(0x99121216);
+                    fsBg.setCornerRadius(10f * badgeDensity);
+                    sVideoFullscreenBtn.setBackground(fsBg);
+                    sVideoFullscreenBtn.setClickable(true);
+                    sVideoFullscreenBtn.setOnClickListener(v -> setVideoFullscreen(act, !sVideoFullscreen));
+                    FrameLayout.LayoutParams fsLp = new FrameLayout.LayoutParams(fsSz, fsSz);
+                    fsLp.gravity = Gravity.BOTTOM | Gravity.END;
+                    int fsMargin = (int) (10f * badgeDensity);
+                    fsLp.setMargins(0, 0, fsMargin, fsMargin);
+                    sVideoOverlayRoot.addView(sVideoFullscreenBtn, fsLp);
+
                     sVideoParams = new WindowManager.LayoutParams(
                             width,
                             height,
@@ -892,20 +1069,26 @@ public class YrPlaybackService extends Service {
                         sVideoOverlayRoot = null;
                         sVideoTextureView = null;
                         sVideoSpinner = null;
+                        sVideoSeekBadge = null;
+                        sVideoPauseIcon = null;
+                        sVideoFullscreenBtn = null;
+                        sVideoFullscreenTitle = null;
                         sVideoParams = null;
                         sVideoAdded = false;
                         return;
                     }
                 } else if (sVideoAdded && sVideoParams != null) {
-                    sVideoParams.token = token;
-                    sVideoParams.x = wx;
-                    sVideoParams.y = wy;
-                    sVideoParams.width = width;
-                    sVideoParams.height = height;
-                    try {
-                        wm.updateViewLayout(sVideoOverlayRoot, sVideoParams);
-                    } catch (Throwable updErr) {
-                        Log.w("YrPlaybackService", "WindowManager.updateViewLayout failed: " + updErr);
+                    if (!sVideoFullscreen) {
+                        sVideoParams.token = token;
+                        sVideoParams.x = wx;
+                        sVideoParams.y = wy;
+                        sVideoParams.width = width;
+                        sVideoParams.height = height;
+                        try {
+                            wm.updateViewLayout(sVideoOverlayRoot, sVideoParams);
+                        } catch (Throwable updErr) {
+                            Log.w("YrPlaybackService", "WindowManager.updateViewLayout failed: " + updErr);
+                        }
                     }
                 }
 
@@ -913,6 +1096,7 @@ public class YrPlaybackService extends Service {
                 sPendingPlaying = playing;
                 sPendingPosMs = startMs;
                 sPendingSpeed = speed;
+                updateVideoPauseIcon();
                 if (!sActivityPaused && sVideoOverlayRoot != null) {
                     sVideoOverlayRoot.setVisibility(View.VISIBLE);
                 }
@@ -949,6 +1133,13 @@ public class YrPlaybackService extends Service {
                 sPendingPlaying = playing;
                 sPendingPosMs = posMs;
                 sPendingSpeed = speed;
+                updateVideoPauseIcon();
+                if (sVideoFullscreen && sVideoFullscreenTitle != null) {
+                    String artist = (currentArtist != null && !currentArtist.isEmpty())
+                            ? ("  \u2022  " + currentArtist)
+                            : "";
+                    sVideoFullscreenTitle.setText(currentTitle + artist);
+                }
                 MediaPlayer mp = sMediaPlayer;
                 if (mp == null || !sVideoPrepared || sActivityPaused || !sVideoWantedVisible) {
                     return;
@@ -976,6 +1167,9 @@ public class YrPlaybackService extends Service {
         new Handler(Looper.getMainLooper()).post(() -> {
             try {
                 sVideoWantedVisible = false;
+                if (sVideoFullscreen) {
+                    setVideoFullscreen(null, false);
+                }
                 if (sMediaPlayer != null && sVideoPrepared) {
                     try {
                         if (sMediaPlayer.isPlaying()) {
@@ -1034,6 +1228,9 @@ public class YrPlaybackService extends Service {
         new Handler(Looper.getMainLooper()).post(() -> {
             try {
                 sVideoWantedVisible = false;
+                if (sVideoFullscreen) {
+                    setVideoFullscreen(null, false);
+                }
                 sVideoUrl = null;
                 sVideoFallbackUrl = null;
                 sVideoUserAgent = null;
@@ -1059,6 +1256,11 @@ public class YrPlaybackService extends Service {
                 sVideoTextureView = null;
                 sVideoSpinner = null;
                 sVideoSeekBadge = null;
+                sVideoPauseIcon = null;
+                sVideoFullscreenBtn = null;
+                sVideoFullscreenTitle = null;
+                sVideoActivityRef = null;
+                sVideoFullscreen = false;
                 if (sHideSeekBadgeRunnable != null) {
                     sUiHandler.removeCallbacks(sHideSeekBadgeRunnable);
                     sHideSeekBadgeRunnable = null;
