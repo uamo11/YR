@@ -380,6 +380,7 @@ pub struct YrApp {
     smart_downloads_flag: Arc<std::sync::atomic::AtomicBool>,
     wifi_only_dl_flag: Arc<std::sync::atomic::AtomicBool>,
     notifications_flag: Arc<std::sync::atomic::AtomicBool>,
+    max_smart_songs_atomic: Arc<std::sync::atomic::AtomicUsize>,
     known_tracks: Arc<std::sync::Mutex<HashMap<String, Track>>>,
 }
 
@@ -556,6 +557,9 @@ impl YrApp {
         let notifications_flag = Arc::new(std::sync::atomic::AtomicBool::new(
             store.data.config.notifications_enabled,
         ));
+        let max_smart_songs_atomic = Arc::new(std::sync::atomic::AtomicUsize::new(
+            store.data.config.max_smart_download_songs,
+        ));
         let mut initial_known: HashMap<String, Track> = HashMap::new();
         for t in store
             .data
@@ -665,6 +669,7 @@ impl YrApp {
             smart_downloads_flag,
             wifi_only_dl_flag,
             notifications_flag,
+            max_smart_songs_atomic,
             known_tracks,
         };
 
@@ -861,6 +866,7 @@ impl YrApp {
         let cache_dir_tick = app.data_dir.join("stream_cache");
         let smart_dl_tick = Arc::clone(&app.smart_downloads_flag);
         let notif_tick = Arc::clone(&app.notifications_flag);
+        let max_smart_tick = Arc::clone(&app.max_smart_songs_atomic);
         let known_tick = Arc::clone(&app.known_tracks);
         app.runtime.spawn(async move {
             use std::sync::atomic::Ordering;
@@ -909,6 +915,14 @@ impl YrApp {
                             }
                         }
                         if promoted_any {
+                            let mut protected_cur = HashSet::new();
+                            if let Ok(q) = queue_tick.lock() {
+                                if let Some(t) = q.current_track() {
+                                    protected_cur.insert(t.id.clone());
+                                }
+                            }
+                            let max_limit = max_smart_tick.load(Ordering::Relaxed);
+                            let _ = dl_tick.prune_to_limit(max_limit, &protected_cur).await;
                             let tasks = dl_tick.list_tasks().await;
                             let total_bytes = dl_tick.total_downloaded_bytes().await;
                             let _ = ev_tx_tick.send(AppEvent::DownloadsRefreshed { tasks, total_bytes });
@@ -1308,6 +1322,10 @@ impl YrApp {
     }
 
     fn effective_video_max_height(&self) -> u32 {
+        let manual = self.store.data.config.video_quality_max_height;
+        if manual > 0 {
+            return manual;
+        }
         if self.store.data.config.mobile_data_saver
             && crate::android_media::is_metered_network()
             && !crate::android_media::is_wifi_connected()
@@ -1317,6 +1335,18 @@ impl YrApp {
             480
         } else {
             720
+        }
+    }
+
+    fn video_quality_label(max_h: u32, active_h: Option<u32>) -> String {
+        match max_h {
+            0 => match active_h {
+                Some(h) if h > 0 => format!("Auto · {h}p"),
+                _ => "Auto".to_string(),
+            },
+            720 => "720p HD".to_string(),
+            1080 => "1080p HD".to_string(),
+            h => format!("{h}p"),
         }
     }
 
@@ -7882,7 +7912,11 @@ impl YrApp {
 
                             ui.add_space(8.0);
                             ui.horizontal(|ui| {
-                                let pad = (video_w - 200.0).max(0.0) * 0.5;
+                                let pad = if self.video_stream_error.is_some() {
+                                    0.0
+                                } else {
+                                    (video_w - 278.0).max(0.0) * 0.5
+                                };
                                 if pad > 0.0 {
                                     ui.add_space(pad);
                                 }
@@ -7900,6 +7934,43 @@ impl YrApp {
                                     self.video_stream_error = None;
                                     self.resolve_video_for_track(track.id.clone(), ctx);
                                 }
+                                let active_h = self
+                                    .video_stream_info
+                                    .as_ref()
+                                    .filter(|v| v.track_id == track.id)
+                                    .map(|v| v.height);
+                                let q_label = Self::video_quality_label(
+                                    self.store.data.config.video_quality_max_height,
+                                    active_h,
+                                );
+                                if icons::icon_pill_button(
+                                    ui,
+                                    icons::Icon::Settings,
+                                    &q_label,
+                                    Color32::from_white_alpha(26),
+                                    Color32::WHITE,
+                                )
+                                .clicked()
+                                {
+                                    const STEPS: [u32; 5] = [0, 360, 480, 720, 1080];
+                                    let cur_idx = STEPS
+                                        .iter()
+                                        .position(|&h| h == self.store.data.config.video_quality_max_height)
+                                        .unwrap_or(0);
+                                    let next_q = STEPS[(cur_idx + 1) % STEPS.len()];
+                                    self.store.data.config.video_quality_max_height = next_q;
+                                    let _ = self.store.save();
+                                    self.video_stream_track_id = None;
+                                    self.video_stream_info = None;
+                                    self.video_stream_error = None;
+                                    self.last_video_attached = None;
+                                    self.resolve_video_for_track(track.id.clone(), ctx);
+                                    self.set_banner(format!(
+                                        "Calidad de video: {}",
+                                        Self::video_quality_label(next_q, None)
+                                    ));
+                                }
+                                ui.add_space(6.0);
                                 if icons::icon_pill_button(
                                     ui,
                                     icons::Icon::Headphones,
@@ -9016,6 +9087,28 @@ impl YrApp {
                             }
                         }
                     });
+                    ui.add_space(10.0);
+                    ui.label("Calidad de video (modo Video):");
+                    ui.add_space(4.0);
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing = Vec2::new(8.0, 8.0);
+                        for (h, label) in [
+                            (0_u32, "Auto"),
+                            (360, "360p"),
+                            (480, "480p"),
+                            (720, "720p HD"),
+                            (1080, "1080p HD"),
+                        ] {
+                            let selected = self.store.data.config.video_quality_max_height == h;
+                            if settings_choice_pill(ui, selected, label) {
+                                self.store.data.config.video_quality_max_height = h;
+                                let _ = self.store.save();
+                                self.video_stream_track_id = None;
+                                self.video_stream_info = None;
+                                self.last_video_attached = None;
+                            }
+                        }
+                    });
                     ui.add_space(12.0);
                     let eq_active = self.store.data.config.equalizer.enabled;
                     let eq_preset = self.store.data.config.equalizer.preset_name.clone();
@@ -9252,7 +9345,39 @@ impl YrApp {
                             let selected = self.store.data.config.max_smart_download_songs == count;
                             if settings_choice_pill(ui, selected, &label) {
                                 self.store.data.config.max_smart_download_songs = count;
+                                self.max_smart_songs_atomic
+                                    .store(count, std::sync::atomic::Ordering::Relaxed);
                                 let _ = self.store.save();
+                                let dl = Arc::clone(&self.downloader);
+                                let tx = self.event_tx.clone();
+                                let ctx_dl = ctx.clone();
+                                let mut protected: HashSet<String> = self
+                                    .store
+                                    .data
+                                    .liked_tracks
+                                    .iter()
+                                    .map(|t| t.id.clone())
+                                    .collect();
+                                if let Ok(q) = self.queue.lock() {
+                                    if let Some(t) = q.current_track() {
+                                        protected.insert(t.id.clone());
+                                    }
+                                }
+                                self.runtime.spawn(async move {
+                                    let pruned = dl.prune_to_limit(count, &protected).await;
+                                    if pruned > 0 {
+                                        let tasks = dl.list_tasks().await;
+                                        let total_bytes = dl.total_downloaded_bytes().await;
+                                        let _ = tx.send(AppEvent::DownloadsRefreshed {
+                                            tasks,
+                                            total_bytes,
+                                        });
+                                        ctx_dl.request_repaint();
+                                    }
+                                });
+                                self.set_banner(format!(
+                                    "Auto-descargas ajustadas al límite de {count}"
+                                ));
                             }
                         }
                     });
@@ -9308,7 +9433,7 @@ impl YrApp {
                     ui.label(RichText::new("Ajusta los mixes de inicio según tu historial de reproducción, canciones favoritas y artistas seguidos.").size(12.0).color(TEXT_SECONDARY));
                 }
                 SettingsCategory::About => {
-                    ui.heading("YR Music v0.9.4");
+                    ui.heading("YR Music v0.9.5");
                     ui.label("Cliente nativo de música 100% en Rust para Android y escritorio.");
                     ui.add_space(6.0);
                     ui.label(RichText::new("Motor de audio Symphonia PCM con DSP Morphe 3D binaural, reproductor integrado de video en la app, auto-scroll inteligente de cola, prefetch predictivo en disco y compatibilidad completa con YouTube Music.").size(12.0).color(TEXT_SECONDARY));
@@ -10487,7 +10612,7 @@ impl YrApp {
                         }
                         if menu_row(ui, icons::Icon::Help, "Ayuda y comentarios").clicked() {
                             self.show_account_modal = false;
-                            self.set_banner("YR Music v0.9.4 • Pure Rust");
+                            self.set_banner("YR Music v0.9.5 • Pure Rust");
                         }
 
                         #[cfg(target_os = "android")]

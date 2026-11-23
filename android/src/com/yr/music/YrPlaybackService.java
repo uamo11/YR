@@ -18,6 +18,7 @@ import android.graphics.Outline;
 import android.graphics.PixelFormat;
 import android.graphics.SurfaceTexture;
 import android.graphics.Typeface;
+import android.graphics.drawable.GradientDrawable;
 import android.media.MediaMetadata;
 import android.media.MediaPlayer;
 import android.media.PlaybackParams;
@@ -32,9 +33,12 @@ import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
 import android.os.PowerManager;
+import android.os.SystemClock;
 import android.text.TextUtils;
 import android.util.Log;
+import android.view.GestureDetector;
 import android.view.Gravity;
+import android.view.MotionEvent;
 import android.view.Surface;
 import android.view.TextureView;
 import android.view.View;
@@ -100,6 +104,11 @@ public class YrPlaybackService extends Service {
     private static volatile String sVideoUserAgent = null;
     private static volatile boolean sVideoPrepared = false;
     private static volatile boolean sVideoRenderedFirstFrame = false;
+    private static volatile boolean sSeekInFlight = false;
+    private static volatile long sLastSeekStartedElapsedMs = 0L;
+    private static volatile TextView sVideoSeekBadge = null;
+    private static final Handler sUiHandler = new Handler(Looper.getMainLooper());
+    private static Runnable sHideSeekBadgeRunnable = null;
     private static volatile boolean sTriedFallback = false;
     private static volatile boolean sVideoWantedVisible = false;
     private static volatile boolean sPendingPlaying = false;
@@ -482,17 +491,57 @@ public class YrPlaybackService extends Service {
         sVideoTextureView.setTransform(matrix);
     }
 
-    private static void seekMediaPlayerTo(MediaPlayer mp, long posMs) {
+    private static void seekMediaPlayerTo(MediaPlayer mp, long posMs, boolean force) {
         if (mp == null) return;
+        long now = SystemClock.elapsedRealtime();
+        if (!force) {
+            if (sSeekInFlight && (now - sLastSeekStartedElapsedMs) < 7000L) {
+                return;
+            }
+            if ((now - sLastSeekStartedElapsedMs) < 3500L) {
+                return;
+            }
+        }
         long clamped = Math.max(0L, posMs);
+        sSeekInFlight = true;
+        sLastSeekStartedElapsedMs = now;
         try {
             if (Build.VERSION.SDK_INT >= 26) {
-                mp.seekTo(clamped, MediaPlayer.SEEK_CLOSEST);
+                mp.seekTo(clamped, MediaPlayer.SEEK_CLOSEST_SYNC);
             } else {
                 mp.seekTo((int) Math.min(Integer.MAX_VALUE, clamped));
             }
         } catch (Throwable ignored) {
+            sSeekInFlight = false;
         }
+    }
+
+    private static void showVideoSeekBadge(final Activity act, final String label, final boolean rightSide) {
+        if (act == null || sVideoSeekBadge == null) return;
+        final float density = act.getResources().getDisplayMetrics().density;
+        final int marginPx = (int) (22f * density);
+        FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT
+        );
+        lp.gravity = Gravity.CENTER_VERTICAL | (rightSide ? Gravity.END : Gravity.START);
+        if (rightSide) {
+            lp.setMargins(0, 0, marginPx, 0);
+        } else {
+            lp.setMargins(marginPx, 0, 0, 0);
+        }
+        sVideoSeekBadge.setLayoutParams(lp);
+        sVideoSeekBadge.setText(label);
+        sVideoSeekBadge.setVisibility(View.VISIBLE);
+        if (sHideSeekBadgeRunnable != null) {
+            sUiHandler.removeCallbacks(sHideSeekBadgeRunnable);
+        }
+        sHideSeekBadgeRunnable = () -> {
+            if (sVideoSeekBadge != null) {
+                sVideoSeekBadge.setVisibility(View.GONE);
+            }
+        };
+        sUiHandler.postDelayed(sHideSeekBadgeRunnable, 850L);
     }
 
     private static void applySpeedToMediaPlayer(MediaPlayer mp, float speed) {
@@ -510,6 +559,8 @@ public class YrPlaybackService extends Service {
     private static void releaseMediaPlayerLocked() {
         sVideoPrepared = false;
         sVideoRenderedFirstFrame = false;
+        sSeekInFlight = false;
+        sLastSeekStartedElapsedMs = 0L;
         sVideoWidth = 0;
         sVideoHeight = 0;
         sLastAppliedSpeed = 1.0f;
@@ -566,6 +617,7 @@ public class YrPlaybackService extends Service {
             });
             mp.setOnSeekCompleteListener(player -> {
                 if (player != sMediaPlayer) return;
+                sSeekInFlight = false;
                 if (sVideoSpinner != null) sVideoSpinner.setVisibility(View.GONE);
             });
             mp.setOnPreparedListener(player -> {
@@ -575,8 +627,8 @@ public class YrPlaybackService extends Service {
                 if (sVideoSpinner != null) {
                     sVideoSpinner.setVisibility(View.GONE);
                 }
-                if (sPendingPosMs > 250) {
-                    seekMediaPlayerTo(player, sPendingPosMs);
+                if (sPendingPosMs > 1200) {
+                    seekMediaPlayerTo(player, sPendingPosMs, true);
                 }
                 if (Math.abs(sPendingSpeed - 1.0f) > 0.03f) {
                     applySpeedToMediaPlayer(player, sPendingSpeed);
@@ -669,12 +721,63 @@ public class YrPlaybackService extends Service {
                             outline.setRoundRect(0, 0, view.getWidth(), view.getHeight(), radiusPx);
                         }
                     });
-                    sVideoOverlayRoot.setOnClickListener(v -> {
-                        try {
-                            nativeOnMediaAction(NATIVE_TOGGLE, 0);
-                        } catch (Throwable ignored) {
+                    final GestureDetector gd = new GestureDetector(act, new GestureDetector.SimpleOnGestureListener() {
+                        @Override
+                        public boolean onDown(MotionEvent e) {
+                            return true;
+                        }
+
+                        @Override
+                        public boolean onSingleTapConfirmed(MotionEvent e) {
+                            try {
+                                nativeOnMediaAction(NATIVE_TOGGLE, 0);
+                            } catch (Throwable ignored) {
+                            }
+                            return true;
+                        }
+
+                        @Override
+                        public boolean onDoubleTap(MotionEvent e) {
+                            int vw = sVideoOverlayRoot != null ? sVideoOverlayRoot.getWidth() : 0;
+                            float tx = e.getX();
+                            if (vw > 0 && tx < vw * 0.45f) {
+                                long basePos = (sPendingPosMs > 0) ? sPendingPosMs : currentPosMs;
+                                long target = Math.max(0L, basePos - 10000L);
+                                sPendingPosMs = target;
+                                currentPosMs = target;
+                                try {
+                                    nativeOnMediaAction(NATIVE_SEEK, target);
+                                } catch (Throwable ignored) {
+                                }
+                                if (sMediaPlayer != null && sVideoPrepared) {
+                                    seekMediaPlayerTo(sMediaPlayer, target, true);
+                                }
+                                showVideoSeekBadge(act, "\u00AB\u00AB -10 s", false);
+                            } else if (vw > 0 && tx > vw * 0.55f) {
+                                long basePos = (sPendingPosMs > 0) ? sPendingPosMs : currentPosMs;
+                                long target = (currentDurMs > 0)
+                                        ? Math.min(currentDurMs, basePos + 10000L)
+                                        : (basePos + 10000L);
+                                sPendingPosMs = target;
+                                currentPosMs = target;
+                                try {
+                                    nativeOnMediaAction(NATIVE_SEEK, target);
+                                } catch (Throwable ignored) {
+                                }
+                                if (sMediaPlayer != null && sVideoPrepared) {
+                                    seekMediaPlayerTo(sMediaPlayer, target, true);
+                                }
+                                showVideoSeekBadge(act, "+10 s \u00BB\u00BB", true);
+                            } else {
+                                try {
+                                    nativeOnMediaAction(NATIVE_TOGGLE, 0);
+                                } catch (Throwable ignored) {
+                                }
+                            }
+                            return true;
                         }
                     });
+                    sVideoOverlayRoot.setOnTouchListener((v, ev) -> gd.onTouchEvent(ev));
 
                     sVideoTextureView = new TextureView(act);
                     sVideoTextureView.setSurfaceTextureListener(new TextureView.SurfaceTextureListener() {
@@ -747,6 +850,21 @@ public class YrPlaybackService extends Service {
                     spLp.gravity = Gravity.CENTER;
                     sVideoOverlayRoot.addView(sVideoSpinner, spLp);
 
+                    sVideoSeekBadge = new TextView(act);
+                    sVideoSeekBadge.setTextColor(0xFFFFFFFF);
+                    sVideoSeekBadge.setTextSize(14f);
+                    sVideoSeekBadge.setTypeface(Typeface.DEFAULT_BOLD);
+                    final float badgeDensity = act.getResources().getDisplayMetrics().density;
+                    GradientDrawable badgeBg = new GradientDrawable();
+                    badgeBg.setColor(0xCC121216);
+                    badgeBg.setCornerRadius(18f * badgeDensity);
+                    sVideoSeekBadge.setBackground(badgeBg);
+                    int padH = (int) (14f * badgeDensity);
+                    int padV = (int) (7f * badgeDensity);
+                    sVideoSeekBadge.setPadding(padH, padV, padH, padV);
+                    sVideoSeekBadge.setVisibility(View.GONE);
+                    sVideoOverlayRoot.addView(sVideoSeekBadge);
+
                     sVideoParams = new WindowManager.LayoutParams(
                             width,
                             height,
@@ -813,8 +931,8 @@ public class YrPlaybackService extends Service {
                         } else if (!playing && sMediaPlayer.isPlaying()) {
                             sMediaPlayer.pause();
                         }
-                        if (Math.abs(sMediaPlayer.getCurrentPosition() - startMs) > 450) {
-                            seekMediaPlayerTo(sMediaPlayer, startMs);
+                        if (Math.abs(sMediaPlayer.getCurrentPosition() - startMs) > 2200) {
+                            seekMediaPlayerTo(sMediaPlayer, startMs, false);
                         }
                     } catch (Throwable ignored) {
                     }
@@ -841,8 +959,10 @@ public class YrPlaybackService extends Service {
                     mp.pause();
                 }
                 long cur = mp.getCurrentPosition();
-                if (Math.abs(cur - posMs) > 450) {
-                    seekMediaPlayerTo(mp, posMs);
+                long now = SystemClock.elapsedRealtime();
+                boolean waitingFirstFrame = !sVideoRenderedFirstFrame && (now - sLastSeekStartedElapsedMs) < 5000L;
+                if (!waitingFirstFrame && Math.abs(cur - posMs) > 2200) {
+                    seekMediaPlayerTo(mp, posMs, false);
                 }
                 if (Math.abs(sLastAppliedSpeed - speed) > 0.03f) {
                     applySpeedToMediaPlayer(mp, speed);
@@ -938,6 +1058,11 @@ public class YrPlaybackService extends Service {
                 sVideoOverlayRoot = null;
                 sVideoTextureView = null;
                 sVideoSpinner = null;
+                sVideoSeekBadge = null;
+                if (sHideSeekBadgeRunnable != null) {
+                    sUiHandler.removeCallbacks(sHideSeekBadgeRunnable);
+                    sHideSeekBadgeRunnable = null;
+                }
                 sVideoParams = null;
             } catch (Throwable ignored) {
             }

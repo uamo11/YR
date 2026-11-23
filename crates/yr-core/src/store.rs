@@ -88,6 +88,7 @@ impl EqualizerConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct AppConfig {
     pub stream_quality: AudioQuality,
     pub download_quality: AudioQuality,
@@ -111,6 +112,8 @@ pub struct AppConfig {
     pub battery_saver: bool,
     #[serde(default)]
     pub prefer_video_mode: bool,
+    #[serde(default)]
+    pub video_quality_max_height: u32,
 
     // Descargas y almacenamiento
     #[serde(default = "default_true")]
@@ -192,6 +195,7 @@ impl Default for AppConfig {
             mobile_data_saver: true,
             battery_saver: false,
             prefer_video_mode: false,
+            video_quality_max_height: 0,
             smart_downloads: true,
             wifi_only_downloads: false,
             max_stream_cache_mb: default_max_stream_cache_mb(),
@@ -841,6 +845,21 @@ mod tests {
         assert_eq!(reloaded.data.config.equalizer.preset_name, "Rock");
         assert_eq!(reloaded.data.config.equalizer.bands_db[0], 4.5);
         assert_eq!(reloaded.data.config.equalizer.bass_boost_db, 2.0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn video_quality_max_height_defaults_to_zero_and_roundtrips() {
+        let cfg: AppConfig = serde_json::from_str("{}").expect("empty JSON deserializes");
+        assert_eq!(cfg.video_quality_max_height, 0);
+
+        let dir = std::env::temp_dir().join(format!("yr_vq_test_{}", Uuid::new_v4()));
+        let mut store = LibraryStore::load_or_default(&dir);
+        store.data.config.video_quality_max_height = 1080;
+        store.save().unwrap();
+
+        let reloaded = LibraryStore::load_or_default(&dir);
+        assert_eq!(reloaded.data.config.video_quality_max_height, 1080);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -1,12 +1,12 @@
 use futures_util::StreamExt;
 use reqwest::header::{CONTENT_RANGE, RANGE};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 use tokio::fs::{self, OpenOptions};
 use tokio::io::{AsyncWriteExt, BufWriter};
 use tokio::sync::{watch, Mutex, Semaphore};
@@ -381,6 +381,59 @@ impl DownloadManager {
                 let _ = fs::remove_file(sidecar).await;
             }
         }
+    }
+
+    /// Evicts oldest unprotected completed downloads (by file mtime) until completed count <= `max_songs`.
+    pub async fn prune_to_limit(
+        &self,
+        max_songs: usize,
+        protected_ids: &HashSet<String>,
+    ) -> usize {
+        let mut to_remove_paths: Vec<PathBuf> = Vec::new();
+        let removed_count = {
+            let mut guard = self.tasks.lock().await;
+            let completed_total = guard
+                .values()
+                .filter(|t| t.status == DownloadStatus::Completed)
+                .count();
+            if completed_total <= max_songs {
+                return 0;
+            }
+            let excess = completed_total - max_songs;
+            let mut candidates: Vec<(SystemTime, String)> = guard
+                .iter()
+                .filter(|(id, t)| {
+                    t.status == DownloadStatus::Completed && !protected_ids.contains(id.as_str())
+                })
+                .map(|(id, t)| {
+                    let mtime = t
+                        .output_path
+                        .as_ref()
+                        .and_then(|p| std::fs::metadata(p).ok())
+                        .and_then(|m| m.modified().ok())
+                        .unwrap_or(SystemTime::UNIX_EPOCH);
+                    (mtime, id.clone())
+                })
+                .collect();
+            candidates.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+
+            let mut removed = 0usize;
+            for (_, id) in candidates.into_iter().take(excess) {
+                if let Some(task) = guard.remove(&id) {
+                    removed += 1;
+                    if let Some(path) = task.output_path {
+                        to_remove_paths.push(path);
+                    }
+                }
+            }
+            removed
+        };
+
+        for path in to_remove_paths {
+            let _ = fs::remove_file(&path).await;
+            let _ = fs::remove_file(sidecar_path_for(&path)).await;
+        }
+        removed_count
     }
 
     async fn run_download(
@@ -939,6 +992,59 @@ mod tests {
         let mgr2 = DownloadManager::new(dl_dir, provider, 2);
         assert_eq!(mgr2.completed_count().await, 1);
         assert_eq!(mgr2.find_local_path("test123").await, Some(registered));
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn prune_to_limit_evicts_oldest_and_keeps_protected() {
+        let base = std::env::temp_dir().join(format!("yr_prune_test_{}", std::process::id()));
+        let dl_dir = base.join("downloads");
+        let cache_dir = base.join("stream_cache");
+        let _ = std::fs::remove_dir_all(&base);
+        let _ = std::fs::create_dir_all(&cache_dir);
+
+        let provider: Arc<dyn MusicProvider> = Arc::new(yr_provider::YtMusicProvider::new());
+        let mgr = DownloadManager::new(dl_dir, provider, 2);
+
+        let make_track = |id: &str| Track {
+            id: id.into(),
+            title: format!("Title {id}"),
+            artist: "Artist".into(),
+            artist_id: None,
+            album: None,
+            album_id: None,
+            duration_secs: Some(120),
+            thumbnail_url: None,
+            local_path: None,
+        };
+
+        let mut registered_paths = Vec::new();
+        for (idx, id) in ["old_protected", "old_unprotected", "newest"].iter().enumerate() {
+            let src = cache_dir.join(format!("stream_{id}.audio"));
+            std::fs::write(&src, vec![0xCD_u8; 40_000]).unwrap();
+            let dst = mgr
+                .register_cached_track(make_track(id), &src)
+                .await
+                .unwrap();
+            let ts = SystemTime::UNIX_EPOCH + Duration::from_secs((idx as u64 + 1) * 1_000);
+            let f = std::fs::OpenOptions::new().write(true).open(&dst).unwrap();
+            f.set_modified(ts).unwrap();
+            registered_paths.push(dst);
+        }
+
+        assert_eq!(mgr.completed_count().await, 3);
+        let mut protected = HashSet::new();
+        protected.insert("old_protected".to_string());
+
+        let pruned = mgr.prune_to_limit(2, &protected).await;
+        assert_eq!(pruned, 1);
+        assert_eq!(mgr.completed_count().await, 2);
+        assert!(mgr.find_local_path("old_protected").await.is_some());
+        assert!(mgr.find_local_path("old_unprotected").await.is_none());
+        assert!(mgr.find_local_path("newest").await.is_some());
+        assert!(!registered_paths[1].exists());
+        assert!(!sidecar_path_for(&registered_paths[1]).exists());
 
         let _ = std::fs::remove_dir_all(&base);
     }
