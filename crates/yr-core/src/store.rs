@@ -255,7 +255,11 @@ impl LibraryStore {
             .unwrap_or_default();
         data.recent_tracks
             .retain(|t| !t.id.starts_with("local_demo_"));
-        Self { path, data }
+        let mut store = Self { path, data };
+        if store.sanitize_view_count_artists() {
+            let _ = store.save();
+        }
+        store
     }
 
     pub fn save(&self) -> std::io::Result<()> {
@@ -663,6 +667,95 @@ impl LibraryStore {
         }
         out
     }
+
+    fn sanitize_view_count_artists(&mut self) -> bool {
+        let mut changed = false;
+        let sanitize_track = |t: &mut Track, changed: &mut bool| {
+            if is_view_count_artist(&t.artist) {
+                t.artist = "YouTube Music".to_string();
+                *changed = true;
+            }
+        };
+        for t in &mut self.data.liked_tracks {
+            sanitize_track(t, &mut changed);
+        }
+        for t in &mut self.data.recent_tracks {
+            sanitize_track(t, &mut changed);
+        }
+        for t in &mut self.data.last_queue {
+            sanitize_track(t, &mut changed);
+        }
+        for pl in &mut self.data.playlists {
+            for t in &mut pl.tracks {
+                sanitize_track(t, &mut changed);
+            }
+        }
+        changed
+    }
+
+    /// Replaces empty, placeholder, or view-count artists in stored lists when fresh metadata arrives.
+    pub fn backfill_missing_artists(&mut self, incoming: &[Track]) -> bool {
+        let valid: HashMap<&str, (&str, Option<&str>)> = incoming
+            .iter()
+            .filter(|t| !is_placeholder_or_view_artist(&t.artist))
+            .map(|t| (t.id.as_str(), (t.artist.trim(), t.artist_id.as_deref())))
+            .collect();
+        if valid.is_empty() {
+            return false;
+        }
+        let mut changed = false;
+        let heal_track = |t: &mut Track, changed: &mut bool| {
+            if is_placeholder_or_view_artist(&t.artist) {
+                if let Some(&(artist, artist_id)) = valid.get(t.id.as_str()) {
+                    t.artist = artist.to_string();
+                    if t.artist_id.is_none() {
+                        t.artist_id = artist_id.map(str::to_string);
+                    }
+                    *changed = true;
+                }
+            }
+        };
+        for t in &mut self.data.liked_tracks {
+            heal_track(t, &mut changed);
+        }
+        for t in &mut self.data.recent_tracks {
+            heal_track(t, &mut changed);
+        }
+        for t in &mut self.data.last_queue {
+            heal_track(t, &mut changed);
+        }
+        for pl in &mut self.data.playlists {
+            for t in &mut pl.tracks {
+                heal_track(t, &mut changed);
+            }
+        }
+        if changed {
+            let _ = self.save();
+        }
+        changed
+    }
+}
+
+/// Returns `true` when an artist string is actually a view/play counter leaked by a feed card.
+pub fn is_view_count_artist(artist: &str) -> bool {
+    let s = artist.trim().to_lowercase();
+    if s.is_empty() || !s.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+        return false;
+    }
+    s.contains("de vistas")
+        || s.contains(" views")
+        || s.contains("visualizaciones")
+        || s.contains("reproducciones")
+        || s.contains(" plays")
+        || s.ends_with(" vistas")
+        || s.ends_with("views")
+}
+
+fn is_placeholder_or_view_artist(artist: &str) -> bool {
+    let trimmed = artist.trim();
+    trimmed.is_empty()
+        || matches!(trimmed, "YouTube Music" | "Desconocido" | "Unknown")
+        || is_view_count_artist(trimmed)
 }
 
 fn normalize_key(s: &str) -> String {
@@ -860,6 +953,43 @@ mod tests {
 
         let reloaded = LibraryStore::load_or_default(&dir);
         assert_eq!(reloaded.data.config.video_quality_max_height, 1080);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn is_view_count_artist_detects_metrics_and_allows_artist_names() {
+        assert!(is_view_count_artist("213 M de vistas"));
+        assert!(is_view_count_artist("1.2M views"));
+        assert!(is_view_count_artist("850 K visualizaciones"));
+        assert!(!is_view_count_artist("Beéle"));
+        assert!(!is_view_count_artist("21 Savage"));
+        assert!(!is_view_count_artist(""));
+    }
+
+    #[test]
+    fn backfill_missing_artists_heals_stale_view_count_and_placeholder_entries() {
+        let dir = std::env::temp_dir().join(format!("yr_heal_test_{}", Uuid::new_v4()));
+        let mut store = LibraryStore::load_or_default(&dir);
+        store.toggle_like(make_track("vid1", "morena (Video Oficial)", "213 M de vistas"));
+        store.record_play(make_track("vid2", "Otra", "YouTube Music"));
+        store.save().unwrap();
+
+        // Reload sanitizes raw view-count string to neutral fallback immediately
+        let mut reloaded = LibraryStore::load_or_default(&dir);
+        assert_eq!(reloaded.data.liked_tracks[0].artist, "YouTube Music");
+
+        // Fresh feed backfill replaces placeholders with authentic artist names
+        let mut fresh = make_track("vid1", "morena (Video Oficial)", "Beéle");
+        fresh.artist_id = Some("UC_beele".to_string());
+        let healed = reloaded.backfill_missing_artists(&[fresh]);
+        assert!(healed);
+        assert_eq!(reloaded.data.liked_tracks[0].artist, "Beéle");
+        assert_eq!(
+            reloaded.data.liked_tracks[0].artist_id.as_deref(),
+            Some("UC_beele")
+        );
+        assert_eq!(reloaded.data.recent_tracks[0].artist, "YouTube Music");
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

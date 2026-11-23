@@ -270,6 +270,33 @@ mod imp {
         }
     }
 
+    pub fn open_audio_output_panel() -> Option<String> {
+        let bridge = bridge()?;
+        let mut env = bridge.vm.attach_current_thread().ok()?;
+        let service_cls: &JClass = bridge.service_class.as_obj().into();
+        let res = env.call_static_method(
+            service_cls,
+            "openAudioOutputPanel",
+            "(Landroid/content/Context;)Ljava/lang/String;",
+            &[JValue::Object(bridge.app_ctx.as_obj())],
+        );
+        match res {
+            Ok(val) => {
+                let obj = val.l().ok()?;
+                if obj.is_null() {
+                    return None;
+                }
+                let jstr: jni::objects::JString = obj.into();
+                env.get_string(&jstr).ok().map(|s| s.into())
+            }
+            Err(e) => {
+                log::warn!("android_media: openAudioOutputPanel failed: {e:?}");
+                let _ = env.exception_clear();
+                None
+            }
+        }
+    }
+
     pub fn share_text(title: &str, text: &str) {
         let Some(bridge) = bridge() else {
             return;
@@ -534,6 +561,9 @@ mod imp {
         false
     }
     pub fn open_google_login() {}
+    pub fn open_audio_output_panel() -> Option<String> {
+        None
+    }
     pub fn share_text(_title: &str, _text: &str) {}
     pub fn attach_native_video(
         _video_url: &str,
@@ -572,8 +602,8 @@ mod imp {
 pub use imp::init;
 pub use imp::{
     attach_native_video, hide_embedded_video, is_metered_network, is_wifi_connected,
-    open_google_login, prepare_next_embedded_video, resolve_audio_url, set_action_sender,
-    set_artwork_url, set_cookie_sender, set_egui_ctx, set_ui_at_root, set_video_quality_label,
-    set_video_seek_seconds, share_text, stop_service, sync_native_video, take_back_pressed,
-    update_playback,
+    open_audio_output_panel, open_google_login, prepare_next_embedded_video, resolve_audio_url,
+    set_action_sender, set_artwork_url, set_cookie_sender, set_egui_ctx, set_ui_at_root,
+    set_video_quality_label, set_video_seek_seconds, share_text, stop_service, sync_native_video,
+    take_back_pressed, update_playback,
 };

@@ -177,6 +177,36 @@ pub fn file_uri_for_path(path: &std::path::Path) -> String {
     }
 }
 
+/// Computes `(u0, v0, u1, v1)` center-crop UV coordinates so cover art fills `dst_w × dst_h`
+/// without stretching or showing YouTube's baked-in 4:3 letterbox bars (`hqdefault`/`sddefault`).
+pub fn compute_cover_crop_uv(tex_w: f32, tex_h: f32, dst_w: f32, dst_h: f32) -> (f32, f32, f32, f32) {
+    if tex_w <= 0.0 || tex_h <= 0.0 || dst_w <= 0.0 || dst_h <= 0.0 {
+        return (0.0, 0.0, 1.0, 1.0);
+    }
+    let is_yt_letterbox_4_3 = ((tex_w - 480.0).abs() < 1.5 && (tex_h - 360.0).abs() < 1.5)
+        || ((tex_w - 640.0).abs() < 1.5 && (tex_h - 480.0).abs() < 1.5);
+    let (base_v0, base_v1, eff_h) = if is_yt_letterbox_4_3 {
+        (0.125_f32, 0.875_f32, tex_h * 0.75)
+    } else {
+        (0.0_f32, 1.0_f32, tex_h)
+    };
+    let tex_aspect = tex_w / eff_h;
+    let dst_aspect = dst_w / dst_h;
+    if (tex_aspect - dst_aspect).abs() <= 0.02 {
+        return (0.0, base_v0, 1.0, base_v1);
+    }
+    if tex_aspect > dst_aspect {
+        let keep = (dst_aspect / tex_aspect).clamp(0.1, 1.0);
+        let margin = (1.0 - keep) * 0.5;
+        (margin, base_v0, 1.0 - margin, base_v1)
+    } else {
+        let keep = (tex_aspect / dst_aspect).clamp(0.1, 1.0);
+        let base_h = base_v1 - base_v0;
+        let margin = base_h * (1.0 - keep) * 0.5;
+        (0.0, base_v0 + margin, 1.0, base_v1 - margin)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -260,5 +290,33 @@ mod tests {
         let clean = offline_cover_path(dir, "abc123");
         assert_eq!(clean, dir.join("abc123.jpg"));
         assert_eq!(file_uri_for_path(&clean), "file:///tmp/covers/abc123.jpg");
+    }
+
+    #[test]
+    fn compute_cover_crop_uv_removes_yt_letterbox_bars_and_crops_16_9() {
+        assert_eq!(
+            compute_cover_crop_uv(544.0, 544.0, 148.0, 148.0),
+            (0.0, 0.0, 1.0, 1.0)
+        );
+
+        let (u0, v0, u1, v1) = compute_cover_crop_uv(320.0, 180.0, 100.0, 100.0);
+        assert!((u0 - 0.21875).abs() < 1e-4);
+        assert!((u1 - 0.78125).abs() < 1e-4);
+        assert_eq!(v0, 0.0);
+        assert_eq!(v1, 1.0);
+
+        // 480x360 hqdefault into 1:1 strips top/bottom 12.5% black bars AND crops 16:9 sides to square
+        let (u0, v0, u1, v1) = compute_cover_crop_uv(480.0, 360.0, 100.0, 100.0);
+        assert!((v0 - 0.125).abs() < 1e-5);
+        assert!((v1 - 0.875).abs() < 1e-5);
+        assert!((u0 - 0.21875).abs() < 1e-4);
+        assert!((u1 - 0.78125).abs() < 1e-4);
+
+        // 480x360 hqdefault into 16:9 leaves only the active 16:9 band
+        let (u0, v0, u1, v1) = compute_cover_crop_uv(480.0, 360.0, 320.0, 180.0);
+        assert_eq!(u0, 0.0);
+        assert_eq!(u1, 1.0);
+        assert!((v0 - 0.125).abs() < 1e-5);
+        assert!((v1 - 0.875).abs() < 1e-5);
     }
 }

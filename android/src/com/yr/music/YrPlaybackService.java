@@ -27,6 +27,7 @@ import android.graphics.SurfaceTexture;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.media.AudioAttributes;
+import android.media.AudioDeviceInfo;
 import android.media.AudioFocusRequest;
 import android.media.AudioManager;
 import android.media.MediaMetadata;
@@ -561,6 +562,68 @@ public class YrPlaybackService extends Service {
             } catch (Throwable ignored) {
             }
         });
+    }
+
+    public static String openAudioOutputPanel(final Context ctx) {
+        if (ctx == null) return "Altavoz del teléfono";
+        String label = "Altavoz del teléfono";
+        try {
+            final AudioManager am = (AudioManager) ctx.getSystemService(Context.AUDIO_SERVICE);
+            if (am != null) {
+                AudioDeviceInfo[] outputs = am.getDevices(AudioManager.GET_DEVICES_OUTPUTS);
+                int bestPriority = 99;
+                if (outputs != null) {
+                    for (int i = 0; i < outputs.length; i++) {
+                        AudioDeviceInfo dev = outputs[i];
+                        if (dev == null) continue;
+                        int type = dev.getType();
+                        CharSequence pname = dev.getProductName();
+                        String prod = pname != null ? pname.toString().trim() : "";
+                        if (type == AudioDeviceInfo.TYPE_BLUETOOTH_A2DP
+                                || type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO
+                                || (Build.VERSION.SDK_INT >= 31
+                                    && (type == AudioDeviceInfo.TYPE_BLE_HEADSET
+                                        || type == AudioDeviceInfo.TYPE_BLE_SPEAKER))) {
+                            if (1 < bestPriority) {
+                                bestPriority = 1;
+                                label = !prod.isEmpty() ? ("Bluetooth (" + prod + ")") : "Bluetooth";
+                            }
+                        } else if (type == AudioDeviceInfo.TYPE_WIRED_HEADPHONES
+                                || type == AudioDeviceInfo.TYPE_WIRED_HEADSET) {
+                            if (2 < bestPriority) {
+                                bestPriority = 2;
+                                label = "Auriculares con cable";
+                            }
+                        } else if (type == AudioDeviceInfo.TYPE_USB_DEVICE
+                                || (Build.VERSION.SDK_INT >= 26
+                                    && type == AudioDeviceInfo.TYPE_USB_HEADSET)) {
+                            if (3 < bestPriority) {
+                                bestPriority = 3;
+                                label = "Audio USB";
+                            }
+                        } else if (type == AudioDeviceInfo.TYPE_HDMI) {
+                            if (4 < bestPriority) {
+                                bestPriority = 4;
+                                label = "Salida HDMI";
+                            }
+                        }
+                    }
+                }
+                new Handler(Looper.getMainLooper()).post(() -> {
+                    try {
+                        am.adjustStreamVolume(
+                                AudioManager.STREAM_MUSIC,
+                                AudioManager.ADJUST_SAME,
+                                AudioManager.FLAG_SHOW_UI
+                        );
+                    } catch (Throwable ignored) {
+                    }
+                });
+            }
+        } catch (Throwable t) {
+            Log.w("YrPlaybackService", "openAudioOutputPanel failed: " + t);
+        }
+        return label;
     }
 
     public static boolean isWifiConnected(final Context ctx) {

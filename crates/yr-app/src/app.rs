@@ -2005,6 +2005,13 @@ impl YrApp {
                                 );
                             }
                             self.store.personalize_home_feed(&mut feed);
+                            let mut heal_pool = feed.quick_picks.clone();
+                            heal_pool.extend(feed.recommended_tracks.iter().cloned());
+                            heal_pool.extend(feed.listen_again.iter().cloned());
+                            for s in &feed.shelves {
+                                heal_pool.extend(s.tracks.iter().cloned());
+                            }
+                            self.store.backfill_missing_artists(&heal_pool);
                             self.home_feed = feed;
                             self.rebuild_samples_deck();
                             if !self.explore_loaded_once {
@@ -2025,6 +2032,7 @@ impl YrApp {
                 AppEvent::ExploreLoaded(res) => {
                     self.explore_loading = false;
                     if let Ok(feed) = res {
+                        self.store.backfill_missing_artists(&feed.trending_tracks);
                         if !feed.trending_tracks.is_empty()
                             || !feed.new_albums.is_empty()
                             || !feed.moods.is_empty()
@@ -3633,13 +3641,8 @@ impl YrApp {
                 let mut thumb_painted = false;
                 if let Some(url) = resolved_thumb {
                     let thumb_uri = tracked_thumb_uri(&url, 160);
-                    let img = Image::new(thumb_uri)
-                        .fit_to_exact_size(Vec2::splat(thumb_sz))
-                        .corner_radius(radius);
-                    if let Ok(egui::load::TexturePoll::Ready { .. }) = img.load_for_size(ui.ctx(), Vec2::splat(thumb_sz)) {
-                        img.paint_at(ui, thumb_rect);
-                        thumb_painted = true;
-                    }
+                    thumb_painted =
+                        paint_ready_image(ui, thumb_rect, thumb_uri, Vec2::splat(thumb_sz), radius);
                 }
                 if !thumb_painted {
                     ui.painter().rect_filled(thumb_rect, radius, Color32::from_rgb(30, 30, 34));
@@ -6024,14 +6027,18 @@ impl YrApp {
                                                 .color(TEXT_PRIMARY),
                                         );
                                         let liked_meta = if liked_count == 1 {
-                                            "Playlist autogenerada • 1 canción".to_string()
+                                            "1 canción • Autogenerada".to_string()
                                         } else {
-                                            format!("Playlist autogenerada • {liked_count} canciones")
+                                            format!("{liked_count} canciones • Autogenerada")
                                         };
-                                        ui.label(
-                                            RichText::new(liked_meta)
-                                                .size(12.0)
-                                                .color(TEXT_SECONDARY),
+                                        ui.add(
+                                            egui::Label::new(
+                                                RichText::new(liked_meta)
+                                                    .size(12.0)
+                                                    .color(TEXT_SECONDARY),
+                                            )
+                                            .truncate()
+                                            .selectable(false),
                                         );
                                     });
                                 });
@@ -6374,35 +6381,41 @@ impl YrApp {
             LibraryFilter::All | LibraryFilter::Playlists
         ) {
             let screen = ctx.screen_rect();
-            let fab_x = screen.right() - 120.0;
+            let fab_x = screen.right() - 112.0;
             let has_track = self
                 .queue
                 .lock()
                 .map(|q| q.current_track().is_some())
                 .unwrap_or(false);
             #[cfg(target_os = "android")]
-            let clearance = if has_track { 234.0 } else { 158.0 };
+            let clearance = if has_track { 222.0 } else { 150.0 };
             #[cfg(not(target_os = "android"))]
-            let clearance = if has_track { 168.0 } else { 96.0 };
+            let clearance = if has_track { 162.0 } else { 92.0 };
             let fab_y = screen.bottom() - clearance;
             egui::Area::new(egui::Id::new("yr_lib_fab"))
                 .fixed_pos(egui::pos2(fab_x, fab_y))
                 .order(egui::Order::Foreground)
                 .show(ctx, |ui| {
                     let (rect, resp) =
-                        ui.allocate_exact_size(Vec2::new(104.0, 40.0), Sense::click());
+                        ui.allocate_exact_size(Vec2::new(96.0, 36.0), Sense::click());
                     if ui.is_rect_visible(rect) {
                         let bg = if resp.hovered() {
                             Color32::from_rgb(235, 235, 240)
                         } else {
                             Color32::WHITE
                         };
-                        ui.painter().rect_filled(rect, CornerRadius::same(20), bg);
+                        ui.painter().rect_filled(rect, CornerRadius::same(18), bg);
+                        ui.painter().rect_stroke(
+                            rect,
+                            CornerRadius::same(18),
+                            Stroke::new(0.8_f32, Color32::from_white_alpha(40)),
+                            egui::StrokeKind::Outside,
+                        );
                         ui.painter().text(
                             rect.center(),
                             Align2::CENTER_CENTER,
                             "+ Nueva",
-                            egui::FontId::proportional(14.0),
+                            egui::FontId::proportional(13.5),
                             Color32::BLACK,
                         );
                     }
@@ -7136,8 +7149,7 @@ impl YrApp {
             .inner_margin(egui::Margin::symmetric(10, 8))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    let row_start = ui.next_widget_position();
-                    render_track_thumb(ui, track, 42.0);
+                    let thumb_rect = render_track_thumb(ui, track, 42.0);
                     ui.add_space(6.0);
 
                     let text_width = (ui.available_width() - 122.0).max(80.0);
@@ -7167,7 +7179,7 @@ impl YrApp {
                     });
 
                     let tap_rect = egui::Rect::from_min_size(
-                        row_start,
+                        thumb_rect.min,
                         Vec2::new(42.0 + 6.0 + text_width, 42.0),
                     );
                     let open_resp = ui.interact(
@@ -7442,7 +7454,11 @@ impl YrApp {
                     )
                     .clicked()
                     {
-                        self.set_banner("Transmitiendo a dispositivo...");
+                        if let Some(dev) = crate::android_media::open_audio_output_panel() {
+                            self.set_banner(format!("Salida de audio: {dev}"));
+                        } else {
+                            self.set_banner("Salida de audio del sistema");
+                        }
                     }
                     if let Some(t_str) = timer_text.as_ref() {
                         if ui
@@ -7743,18 +7759,17 @@ impl YrApp {
                                                         .move_in_order(order_pos, step as isize);
                                                 }
 
-                                                let row_start = ui.next_widget_position();
-                                                render_track_thumb(ui, &t, 44.0);
+                                                let thumb_rect = render_track_thumb(ui, &t, 44.0);
                                                 let is_dl = t.local_path.is_some()
                                                     || self.downloads.iter().any(|d| d.track.id == t.id && d.status == DownloadStatus::Completed)
                                                     || self.data_dir.join("stream_cache").join(format!("stream_{}.audio", t.id)).exists();
                                                 if is_dl {
-                                                    let badge_r = Rect::from_center_size(
-                                                        Pos2::new(row_start.x + 36.0, row_start.y + 36.0),
-                                                        Vec2::splat(14.0),
+                                                    let badge_center = Pos2::new(
+                                                        thumb_rect.right() - 6.0,
+                                                        thumb_rect.bottom() - 6.0,
                                                     );
-                                                    ui.painter().circle_filled(badge_r.center(), 7.0, Color32::from_rgb(18, 18, 22));
-                                                    icons::draw_icon(ui.painter(), Rect::from_center_size(badge_r.center(), Vec2::splat(10.0)), icons::Icon::DownloadDone, GREEN_OK);
+                                                    ui.painter().circle_filled(badge_center, 7.0, Color32::from_rgb(18, 18, 22));
+                                                    icons::draw_icon(ui.painter(), Rect::from_center_size(badge_center, Vec2::splat(10.0)), icons::Icon::DownloadDone, GREEN_OK);
                                                 }
                                                 ui.add_space(6.0);
                                                 let right_reserve = if is_curr { 66.0 } else { 98.0 };
@@ -7807,7 +7822,7 @@ impl YrApp {
                                                     });
                                                 });
                                                 let hit_rect = egui::Rect::from_min_size(
-                                                    row_start,
+                                                    Pos2::new(thumb_rect.left(), thumb_rect.center().y - 24.0),
                                                     Vec2::new(44.0 + 6.0 + tw, 48.0),
                                                 );
                                                 let row_resp = ui.interact(
@@ -9094,11 +9109,11 @@ impl YrApp {
                     ui.columns(5, |cols| {
                         cols[0].vertical_centered(|ui| {
                             let shuf_fg = if shuffle_on {
-                                Color32::WHITE
+                                ACCENT_RED
                             } else {
                                 Color32::from_white_alpha(150)
                             };
-                            if icons::icon_button(
+                            let shuf_resp = icons::icon_button(
                                 ui,
                                 icons::Icon::Shuffle,
                                 46.0,
@@ -9106,10 +9121,28 @@ impl YrApp {
                                 Color32::TRANSPARENT,
                                 shuf_fg,
                                 22.0,
-                            )
-                            .clicked()
-                            {
-                                self.queue.lock().unwrap().toggle_shuffle();
+                            );
+                            if shuffle_on {
+                                ui.painter().circle_filled(
+                                    Pos2::new(
+                                        shuf_resp.rect.center().x,
+                                        shuf_resp.rect.bottom() - 4.0,
+                                    ),
+                                    2.5,
+                                    ACCENT_RED,
+                                );
+                            }
+                            if shuf_resp.clicked() {
+                                let now_shuf = {
+                                    let mut q = self.queue.lock().unwrap();
+                                    q.toggle_shuffle();
+                                    q.shuffle
+                                };
+                                self.set_banner(if now_shuf {
+                                    "Modo aleatorio activado"
+                                } else {
+                                    "Modo aleatorio desactivado"
+                                });
                             }
                         });
                         cols[1].vertical_centered(|ui| {
@@ -9184,13 +9217,13 @@ impl YrApp {
                                     (icons::Icon::Repeat, Color32::from_white_alpha(150))
                                 }
                                 yr_core::queue::RepeatMode::All => {
-                                    (icons::Icon::Repeat, Color32::WHITE)
+                                    (icons::Icon::Repeat, ACCENT_RED)
                                 }
                                 yr_core::queue::RepeatMode::One => {
-                                    (icons::Icon::RepeatOne, Color32::WHITE)
+                                    (icons::Icon::RepeatOne, ACCENT_RED)
                                 }
                             };
-                            if icons::icon_button(
+                            let rep_resp = icons::icon_button(
                                 ui,
                                 rep_icon,
                                 46.0,
@@ -9198,11 +9231,29 @@ impl YrApp {
                                 Color32::TRANSPARENT,
                                 rep_fg,
                                 22.0,
-                            )
-                            .clicked()
-                            {
-                                let mut q = self.queue.lock().unwrap();
-                                q.repeat = q.repeat.cycle();
+                            );
+                            if repeat_mode != yr_core::queue::RepeatMode::Off {
+                                ui.painter().circle_filled(
+                                    Pos2::new(
+                                        rep_resp.rect.center().x,
+                                        rep_resp.rect.bottom() - 4.0,
+                                    ),
+                                    2.5,
+                                    ACCENT_RED,
+                                );
+                            }
+                            if rep_resp.clicked() {
+                                let new_rep = {
+                                    let mut q = self.queue.lock().unwrap();
+                                    q.repeat = q.repeat.cycle();
+                                    q.repeat
+                                };
+                                let msg = match new_rep {
+                                    yr_core::queue::RepeatMode::Off => "Repetición desactivada",
+                                    yr_core::queue::RepeatMode::All => "Repetir cola",
+                                    yr_core::queue::RepeatMode::One => "Repetir esta canción",
+                                };
+                                self.set_banner(msg);
                             }
                         });
                     });
@@ -9955,7 +10006,7 @@ impl YrApp {
                     }
                 }
                 SettingsCategory::About => {
-                    ui.heading("YR Music v0.9.11");
+                    ui.heading("YR Music v0.9.12");
                     ui.label("Cliente nativo de música 100% en Rust para Android y escritorio.");
                     ui.add_space(6.0);
                     ui.label(RichText::new("Motor de audio Symphonia PCM con DSP Morphe 3D binaural, reproductor integrado de video en la app, auto-scroll inteligente de cola, prefetch predictivo en disco y compatibilidad completa con YouTube Music.").size(12.0).color(TEXT_SECONDARY));
@@ -11153,7 +11204,7 @@ impl YrApp {
                         }
                         if menu_row(ui, icons::Icon::Help, "Ayuda y comentarios").clicked() {
                             self.show_account_modal = false;
-                            self.set_banner("YR Music v0.9.11 • Pure Rust");
+                            self.set_banner("YR Music v0.9.12 • Pure Rust");
                         }
 
                         #[cfg(target_os = "android")]
@@ -11378,6 +11429,15 @@ impl YrApp {
 
                                 ui.add_space(14.0);
 
+                                fn truncate_chars(s: &str, max_chars: usize) -> String {
+                                    if s.chars().count() > max_chars {
+                                        let p: String = s.chars().take(max_chars.saturating_sub(1)).collect();
+                                        format!("{}…", p.trim_end())
+                                    } else {
+                                        s.to_string()
+                                    }
+                                }
+
                                 // Card: Tu Top Canción
                                 if let Some(top) = &top_track {
                                     ui.label(RichText::new("Tu tema más escuchado").size(15.0).strong().color(Color32::WHITE));
@@ -11420,11 +11480,8 @@ impl YrApp {
                                         }
 
                                         let text_x = thumb_r.right() + 10.0;
-                                        let short_title = if top.title.len() > 32 {
-                                            format!("{}...", &top.title[..30])
-                                        } else {
-                                            top.title.clone()
-                                        };
+                                        let short_title = truncate_chars(&top.title, 28);
+                                        let short_artist = truncate_chars(&top.artist, 32);
                                         ui.painter().text(
                                             Pos2::new(text_x, t_rect.top() + 24.0),
                                             Align2::LEFT_CENTER,
@@ -11435,7 +11492,7 @@ impl YrApp {
                                         ui.painter().text(
                                             Pos2::new(text_x, t_rect.top() + 46.0),
                                             Align2::LEFT_CENTER,
-                                            &top.artist,
+                                            short_artist,
                                             egui::FontId::proportional(12.5),
                                             TEXT_SECONDARY,
                                         );
@@ -11480,10 +11537,11 @@ impl YrApp {
                                                 egui::FontId::proportional(14.0),
                                                 badge_color,
                                             );
+                                            let short_name = truncate_chars(artist_name, 22);
                                             ui.painter().text(
                                                 Pos2::new(row_r.left() + 48.0, row_r.center().y),
                                                 Align2::LEFT_CENTER,
-                                                artist_name,
+                                                short_name,
                                                 egui::FontId::proportional(13.5),
                                                 Color32::WHITE,
                                             );
@@ -12153,27 +12211,13 @@ fn paint_ready_image(
                 && rect.width() > 0.0
                 && rect.height() > 0.0
             {
-                let tex_aspect = texture.size.x / texture.size.y;
-                let dst_aspect = rect.width() / rect.height();
-                let uv = if (tex_aspect - dst_aspect).abs() > 0.02 {
-                    if tex_aspect > dst_aspect {
-                        let keep = (dst_aspect / tex_aspect).clamp(0.1, 1.0);
-                        let margin = (1.0 - keep) * 0.5;
-                        egui::Rect::from_min_max(
-                            egui::pos2(margin, 0.0),
-                            egui::pos2(1.0 - margin, 1.0),
-                        )
-                    } else {
-                        let keep = (tex_aspect / dst_aspect).clamp(0.1, 1.0);
-                        let margin = (1.0 - keep) * 0.5;
-                        egui::Rect::from_min_max(
-                            egui::pos2(0.0, margin),
-                            egui::pos2(1.0, 1.0 - margin),
-                        )
-                    }
-                } else {
-                    egui::Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0))
-                };
+                let (u0, v0, u1, v1) = yr_core::image_cache::compute_cover_crop_uv(
+                    texture.size.x,
+                    texture.size.y,
+                    rect.width(),
+                    rect.height(),
+                );
+                let uv = egui::Rect::from_min_max(egui::pos2(u0, v0), egui::pos2(u1, v1));
                 Image::from_texture(texture)
                     .maintain_aspect_ratio(false)
                     .uv(uv)
@@ -12238,17 +12282,17 @@ fn paint_progressive_image(
     }
 }
 
-fn render_track_thumb(ui: &mut egui::Ui, track: &Track, size: f32) {
+fn render_track_thumb(ui: &mut egui::Ui, track: &Track, size: f32) -> egui::Rect {
     let url = resolve_track_cover_uri(track);
-    render_thumb(ui, url.as_deref(), size);
+    render_thumb(ui, url.as_deref(), size)
 }
 
-fn render_thumb(ui: &mut egui::Ui, url: Option<&str>, size: f32) {
+fn render_thumb(ui: &mut egui::Ui, url: Option<&str>, size: f32) -> egui::Rect {
     let (rect, _) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
     ui.painter()
         .rect_filled(rect, CornerRadius::same(8), BG_ELEVATED);
     if !ui.is_rect_visible(rect) {
-        return;
+        return rect;
     }
     let note_rect = egui::Rect::from_center_size(
         rect.center(),
@@ -12277,6 +12321,7 @@ fn render_thumb(ui: &mut egui::Ui, url: Option<&str>, size: f32) {
             CornerRadius::same(8),
         );
     }
+    rect
 }
 
 static IMAGE_LRU: OnceLock<Mutex<ImageLru>> = OnceLock::new();
