@@ -734,6 +734,147 @@ impl LibraryStore {
         }
         changed
     }
+
+    /// Computes unlock state and progress for all listening achievement badges.
+    pub fn compute_listening_badges(&self, offline_count: usize) -> Vec<ListeningBadge> {
+        let recent_count = self.data.recent_tracks.len();
+        let liked_count = self.data.liked_tracks.len();
+        let playlists_count = self.data.playlists.len();
+        let total_dur_secs: u64 = self
+            .data
+            .recent_tracks
+            .iter()
+            .map(|t| t.duration_secs.unwrap_or(210))
+            .sum();
+        let total_mins = (total_dur_secs / 60).max(recent_count as u64 * 3);
+
+        let mut artist_counts: HashMap<String, usize> = HashMap::new();
+        for t in self
+            .data
+            .recent_tracks
+            .iter()
+            .chain(self.data.liked_tracks.iter())
+        {
+            let trimmed = t.artist.trim();
+            if !is_placeholder_or_view_artist(trimmed) {
+                *artist_counts.entry(trimmed.to_string()).or_insert(0) += 1;
+            }
+        }
+        let unique_artists = artist_counts.len();
+        let top_artist = artist_counts
+            .into_iter()
+            .max_by(|(na, ca), (nb, cb)| ca.cmp(cb).then_with(|| nb.cmp(na)));
+
+        let quality_str = match self.data.config.stream_quality {
+            AudioQuality::Low => "96 kbps",
+            AudioQuality::Medium => "160 kbps",
+            AudioQuality::High => "256 kbps OPUS",
+            AudioQuality::Best => "320 kbps HQ",
+        };
+
+        let offline_unlocked = offline_count >= 10;
+        let hifi_unlocked = recent_count >= 5 || offline_count >= 5;
+        let (fan_unlocked, fan_title, fan_subtitle, fan_detail, fan_progress) =
+            match &top_artist {
+                Some((name, cnt)) if *cnt >= 2 => (
+                    true,
+                    format!("Fan de {name}"),
+                    "Tu artista más escuchado en YR Music".to_string(),
+                    format!("{cnt} reproducciones"),
+                    1.0,
+                ),
+                Some((_, cnt)) => (
+                    false,
+                    "Fan Top de Artista".to_string(),
+                    "Escucha al menos 2 temas de tu artista favorito".to_string(),
+                    format!("{cnt} / 2 pistas"),
+                    (*cnt as f32 / 2.0).clamp(0.0, 1.0),
+                ),
+                None => (
+                    false,
+                    "Fan Top de Artista".to_string(),
+                    "Escucha al menos 2 temas de tu artista favorito".to_string(),
+                    "0 / 2 pistas".to_string(),
+                    0.0,
+                ),
+            };
+        let collector_unlocked = liked_count >= 1 || playlists_count >= 1;
+        let marathon_unlocked = total_mins >= 60;
+        let explorer_unlocked = unique_artists >= 5;
+
+        vec![
+            ListeningBadge {
+                id: "offline_pro",
+                title: "Modo Offline Pro".to_string(),
+                subtitle: "Música lista sin internet ni cortes de luz".to_string(),
+                detail: if offline_unlocked {
+                    format!("{offline_count} canciones offline")
+                } else {
+                    format!("{offline_count} / 10 offline")
+                },
+                unlocked: offline_unlocked,
+                progress: (offline_count as f32 / 10.0).clamp(0.0, 1.0),
+            },
+            ListeningBadge {
+                id: "hifi_audiophile",
+                title: "Audiófilo Hi-Fi Rust".to_string(),
+                subtitle: "Motor Symphonia PCM en alta fidelidad".to_string(),
+                detail: format!("Calidad: {quality_str}"),
+                unlocked: hifi_unlocked,
+                progress: (recent_count.max(offline_count) as f32 / 5.0).clamp(0.0, 1.0),
+            },
+            ListeningBadge {
+                id: "top_artist_fan",
+                title: fan_title,
+                subtitle: fan_subtitle,
+                detail: fan_detail,
+                unlocked: fan_unlocked,
+                progress: fan_progress,
+            },
+            ListeningBadge {
+                id: "collector",
+                title: "Coleccionista Musical".to_string(),
+                subtitle: "Guarda tus temas y playlists favoritas".to_string(),
+                detail: format!("{liked_count} favoritas • {playlists_count} listas"),
+                unlocked: collector_unlocked,
+                progress: if collector_unlocked { 1.0 } else { 0.0 },
+            },
+            ListeningBadge {
+                id: "marathon",
+                title: "Maratón Musical".to_string(),
+                subtitle: "Más de una hora de escucha acumulada".to_string(),
+                detail: if marathon_unlocked {
+                    format!("{total_mins} min escuchados")
+                } else {
+                    format!("{total_mins} / 60 min")
+                },
+                unlocked: marathon_unlocked,
+                progress: (total_mins as f32 / 60.0).clamp(0.0, 1.0),
+            },
+            ListeningBadge {
+                id: "explorer",
+                title: "Explorador de Ritmos".to_string(),
+                subtitle: "Descubre variedad de artistas y géneros".to_string(),
+                detail: if explorer_unlocked {
+                    format!("{unique_artists} artistas únicos")
+                } else {
+                    format!("{unique_artists} / 5 artistas")
+                },
+                unlocked: explorer_unlocked,
+                progress: (unique_artists as f32 / 5.0).clamp(0.0, 1.0),
+            },
+        ]
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ListeningBadge {
+    pub id: &'static str,
+    pub title: String,
+    pub subtitle: String,
+    pub detail: String,
+    pub unlocked: bool,
+    pub progress: f32,
 }
 
 /// Returns `true` when an artist string is actually a view/play counter leaked by a feed card.
@@ -990,6 +1131,44 @@ mod tests {
         );
         assert_eq!(reloaded.data.recent_tracks[0].artist, "YouTube Music");
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn compute_listening_badges_empty_store_starts_locked() {
+        let dir = std::env::temp_dir().join(format!("yr_badges_empty_{}", Uuid::new_v4()));
+        let store = LibraryStore::load_or_default(&dir);
+        let badges = store.compute_listening_badges(0);
+        assert_eq!(badges.len(), 6);
+        assert!(badges.iter().all(|b| !b.unlocked));
+        assert!(badges.iter().all(|b| (0.0..=1.0).contains(&b.progress)));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn compute_listening_badges_unlocks_active_listener() {
+        let dir = std::env::temp_dir().join(format!("yr_badges_active_{}", Uuid::new_v4()));
+        let mut store = LibraryStore::load_or_default(&dir);
+        for i in 0..4 {
+            store.record_play(make_track(&format!("cl_{i}"), "Hit", "Chris Lebron"));
+        }
+        for (i, art) in ["Beéle", "Camila", "Tainy", "Remy", "Shakira"].into_iter().enumerate() {
+            for j in 0..3 {
+                store.record_play(make_track(&format!("t_{i}_{j}"), "Song", art));
+            }
+        }
+        // Plus one single extra recent track -> 20 total recent tracks (~70 mins).
+        store.record_play(make_track("extra1", "Extra", "Danny Ocean"));
+        store.toggle_like(make_track("like1", "Fav1", "Chris Lebron"));
+        store.toggle_like(make_track("like2", "Fav2", "Beéle"));
+        let pl = store.create_playlist("Mix");
+        store.add_to_playlist(&pl.id, make_track("like1", "Fav1", "Chris Lebron"));
+
+        let badges = store.compute_listening_badges(15);
+        assert_eq!(badges.len(), 6);
+        assert!(badges.iter().all(|b| b.unlocked));
+        let fan = badges.iter().find(|b| b.id == "top_artist_fan").unwrap();
+        assert_eq!(fan.title, "Fan de Chris Lebron");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -350,6 +350,7 @@ pub struct YrApp {
     show_sleep_timer_sheet: bool,
     show_equalizer_modal: bool,
     show_recap_modal: bool,
+    show_badges_modal: bool,
     prewarmed_next_track_id: Option<String>,
     stream_cache_bytes: u64,
     playlist_picker_track: Option<Track>,
@@ -648,6 +649,7 @@ impl YrApp {
             show_sleep_timer_sheet: false,
             show_equalizer_modal: false,
             show_recap_modal: false,
+            show_badges_modal: false,
             prewarmed_next_track_id: None,
             stream_cache_bytes,
             playlist_picker_track: None,
@@ -2657,6 +2659,7 @@ impl eframe::App for YrApp {
         self.render_playlist_picker_modal(ctx);
         self.render_account_modal(ctx);
         self.render_recap_modal(ctx);
+        self.render_badges_modal(ctx);
         self.render_google_login_modal(ctx);
         let video_obscured = !self.is_video_mode
             || !self.now_playing_open
@@ -2670,6 +2673,7 @@ impl eframe::App for YrApp {
             || self.playlist_picker_track.is_some()
             || self.show_account_modal
             || self.show_recap_modal
+            || self.show_badges_modal
             || self.show_google_login;
         if video_obscured && self.last_video_attached.is_some() {
             self.last_video_attached = None;
@@ -2799,6 +2803,8 @@ impl YrApp {
     fn is_at_root(&self) -> bool {
         !self.show_settings
             && !self.show_account_modal
+            && !self.show_recap_modal
+            && !self.show_badges_modal
             && !self.now_playing_open
             && matches!(self.detail_view, DetailView::None)
             && self.active_tab == NavTab::Home
@@ -2816,7 +2822,11 @@ impl YrApp {
             || !self.search_results.artists.is_empty()
             || !self.search_results.playlists.is_empty();
 
-        if self.show_account_modal {
+        if self.show_badges_modal {
+            self.show_badges_modal = false;
+        } else if self.show_recap_modal {
+            self.show_recap_modal = false;
+        } else if self.show_account_modal {
             self.show_account_modal = false;
         } else if self.show_equalizer_modal {
             self.show_equalizer_modal = false;
@@ -3085,6 +3095,18 @@ impl YrApp {
                 && !tracks.is_empty()
             {
                 self.play_tracks_shuffled(tracks.to_vec(), ctx);
+            }
+            if !tracks.is_empty()
+                && icons::icon_pill_button(
+                    ui,
+                    icons::Icon::Radio,
+                    "Radio",
+                    BG_ELEVATED,
+                    TEXT_PRIMARY,
+                )
+                .clicked()
+            {
+                self.start_radio(tracks[0].id.clone(), ctx);
             }
             if show_download
                 && icons::icon_pill_button(
@@ -3456,7 +3478,7 @@ impl YrApp {
                         }
                         if !artist.top_tracks.is_empty() {
                             ui.add_space(10.0);
-                            self.render_collection_actions(ui, ctx, &artist.top_tracks, false, None);
+                            self.render_collection_actions(ui, ctx, &artist.top_tracks, true, None);
                         }
                     });
                     if !artist.top_tracks.is_empty() {
@@ -8275,6 +8297,7 @@ impl YrApp {
                             || self.playlist_picker_track.is_some()
                             || self.show_account_modal
                             || self.show_recap_modal
+                            || self.show_badges_modal
                             || self.show_google_login;
 
                         if self.video_stream_track_id.as_deref() != Some(&track.id)
@@ -10006,7 +10029,7 @@ impl YrApp {
                     }
                 }
                 SettingsCategory::About => {
-                    ui.heading("YR Music v0.9.12");
+                    ui.heading("YR Music v0.9.13");
                     ui.label("Cliente nativo de música 100% en Rust para Android y escritorio.");
                     ui.add_space(6.0);
                     ui.label(RichText::new("Motor de audio Symphonia PCM con DSP Morphe 3D binaural, reproductor integrado de video en la app, auto-scroll inteligente de cola, prefetch predictivo en disco y compatibilidad completa con YouTube Music.").size(12.0).color(TEXT_SECONDARY));
@@ -10282,9 +10305,43 @@ impl YrApp {
                     self.store.toggle_like(track.clone());
                     self.action_sheet_track = None;
                 }
-                if !is_downloaded && sheet_row(ui, icons::Icon::Download, "Descargar") {
-                    self.enqueue_download(track.clone(), ctx);
-                    self.action_sheet_track = None;
+                if !is_downloaded {
+                    if sheet_row(ui, icons::Icon::Download, "Descargar") {
+                        self.enqueue_download(track.clone(), ctx);
+                        self.action_sheet_track = None;
+                    }
+                } else {
+                    let row_w = ui.available_width();
+                    let (r, resp) = ui.allocate_exact_size(Vec2::new(row_w, 40.0), Sense::click());
+                    if ui.is_rect_visible(r) {
+                        if resp.hovered() {
+                            ui.painter().rect_filled(
+                                r,
+                                CornerRadius::same(8),
+                                Color32::from_white_alpha(14),
+                            );
+                        }
+                        icons::draw_icon(
+                            ui.painter(),
+                            egui::Rect::from_center_size(
+                                egui::pos2(r.left() + 18.0, r.center().y),
+                                Vec2::splat(18.0),
+                            ),
+                            icons::Icon::DownloadDone,
+                            GREEN_OK,
+                        );
+                        ui.painter().text(
+                            egui::pos2(r.left() + 48.0, r.center().y),
+                            egui::Align2::LEFT_CENTER,
+                            "Descargada • Lista sin conexión",
+                            egui::FontId::proportional(14.5),
+                            GREEN_OK,
+                        );
+                    }
+                    if resp.clicked() {
+                        self.set_banner("Canción guardada y disponible sin conexión");
+                        self.action_sheet_track = None;
+                    }
                 }
                 if let Some(aid) = track.album_id.clone() {
                     if sheet_row(ui, icons::Icon::Album, "Ir al álbum") {
@@ -10348,18 +10405,41 @@ impl YrApp {
                 }
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 6.0;
+                    ui.spacing_mut().item_spacing.x = 4.0;
                     let (ic_r, _) = ui.allocate_exact_size(Vec2::splat(18.0), Sense::hover());
                     icons::draw_icon(ui.painter(), ic_r, icons::Icon::Play, Color32::WHITE);
                     ui.label(RichText::new("Velocidad:").size(13.5).color(Color32::WHITE));
                     let cur_speed = self.audio.snapshot().speed;
-                    for &(spd, lbl) in &[(0.75_f32, "0.75x"), (1.0, "1.0x"), (1.25, "1.25x"), (1.5, "1.5x")] {
-                        let selected = (cur_speed - spd).abs() < 0.05;
-                        if settings_choice_pill(ui, selected, lbl) {
-                            self.audio.set_speed(spd);
-                            self.set_banner(format!("Velocidad ajustada a {lbl}"));
-                        }
-                    }
+                    egui::ScrollArea::horizontal()
+                        .id_salt("action_sheet_speed_pills")
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = 4.0;
+                                for &(spd, lbl) in &[
+                                    (0.75_f32, "0.75x"),
+                                    (1.0, "1.0x"),
+                                    (1.25, "1.25x"),
+                                    (1.5, "1.5x"),
+                                    (2.0, "2.0x"),
+                                ] {
+                                    let selected = (cur_speed - spd).abs() < 0.05;
+                                    if settings_choice_pill(ui, selected, lbl) {
+                                        self.audio.set_speed(spd);
+                                        self.store.data.config.playback_speed = spd;
+                                        let _ = self.store.save();
+                                        if self.is_video_mode {
+                                            let s = self.audio.snapshot();
+                                            crate::android_media::sync_native_video(
+                                                s.status == PlaybackStatus::Playing,
+                                                (s.position_secs * 1000.0).max(0.0) as u64,
+                                                spd,
+                                            );
+                                        }
+                                        self.set_banner(format!("Velocidad ajustada a {lbl}"));
+                                    }
+                                }
+                            });
+                        });
                 });
                 ui.add_space(6.0);
                 let timer_active = self.sleep_timer_until.lock().unwrap().is_some()
@@ -11181,7 +11261,7 @@ impl YrApp {
                         }
                         if menu_row(ui, icons::Icon::Badge, "Insignias").clicked() {
                             self.show_account_modal = false;
-                            self.set_banner("Insignia: Oyente Audiófilo Hi-Fi Rust");
+                            self.show_badges_modal = true;
                         }
                         if menu_row(ui, icons::Icon::SwitchAccount, "Cambiar de cuenta").clicked() {
                             self.show_account_modal = false;
@@ -11204,7 +11284,7 @@ impl YrApp {
                         }
                         if menu_row(ui, icons::Icon::Help, "Ayuda y comentarios").clicked() {
                             self.show_account_modal = false;
-                            self.set_banner("YR Music v0.9.12 • Pure Rust");
+                            self.set_banner("YR Music v0.9.13 • Pure Rust");
                         }
 
                         #[cfg(target_os = "android")]
@@ -11237,6 +11317,24 @@ impl YrApp {
         let mut track_to_play: Option<Track> = None;
         let mut trigger_share = false;
 
+        let account_info = self
+            .home_feed
+            .account
+            .as_ref()
+            .or(self.store.data.google_account.as_ref());
+        let avatar_url = account_info.and_then(|a| a.avatar_url.clone());
+        let user_name = account_info
+            .map(|a| a.name.clone())
+            .unwrap_or_else(|| "Antony".to_string());
+        let user_handle = account_info
+            .and_then(|a| a.handle.clone())
+            .unwrap_or_else(|| "@IsAntonyVs".to_string());
+        let total_offline = self
+            .downloads
+            .iter()
+            .filter(|d| d.status == DownloadStatus::Completed)
+            .count();
+
         let total_recent = self.store.data.recent_tracks.len();
         let total_liked = self.store.data.liked_tracks.len();
         let total_dur_secs: u64 = self
@@ -11251,12 +11349,13 @@ impl YrApp {
         // Calculate top artists
         let mut artist_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
         for t in self.store.data.recent_tracks.iter().chain(self.store.data.liked_tracks.iter()) {
-            if !t.artist.trim().is_empty() {
-                *artist_counts.entry(t.artist.clone()).or_insert(0) += 1;
+            let trimmed = t.artist.trim();
+            if !trimmed.is_empty() && !matches!(trimmed, "YouTube Music" | "Desconocido" | "Unknown") {
+                *artist_counts.entry(trimmed.to_string()).or_insert(0) += 1;
             }
         }
         let mut top_artists: Vec<(String, usize)> = artist_counts.into_iter().collect();
-        top_artists.sort_by(|a, b| b.1.cmp(&a.1));
+        top_artists.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
         top_artists.truncate(4);
 
         let top_track = self
@@ -11268,8 +11367,7 @@ impl YrApp {
             .cloned();
 
         let recap_share_text = format!(
-            "🎵 Mi Recap en YR Music (Antony):\n• {} minutos de música escuchada\n• {} canciones reproducidas\n• {} temas favoritos marcados\n#YRMusic #AntonyRecap",
-            total_mins, total_recent, total_liked
+            "🎵 Mi Recap en YR Music ({user_name}):\n• {total_mins} minutos de música escuchada\n• {total_recent} canciones reproducidas\n• {total_liked} temas favoritos marcados\n• {total_offline} canciones listas sin conexión\n#YRMusic #Recap"
         );
 
         egui::Area::new(egui::Id::new("yr_recap_modal_area"))
@@ -11277,6 +11375,11 @@ impl YrApp {
             .order(egui::Order::Foreground)
             .interactable(true)
             .show(ctx, |ui| {
+                ui.painter().rect_filled(screen, CornerRadius::ZERO, Color32::from_rgb(14, 14, 18));
+                ui.set_width(screen.width());
+                ui.set_max_width(screen.width());
+                ui.set_height(screen.height());
+                ui.set_max_height(screen.height());
                 egui::Frame::new()
                     .fill(Color32::from_rgb(14, 14, 18))
                     .inner_margin(egui::Margin::symmetric(16, 12))
@@ -11284,6 +11387,7 @@ impl YrApp {
                         let inner_w = (screen.width() - 32.0).max(200.0);
                         ui.set_width(inner_w);
                         ui.set_max_width(inner_w);
+                        ui.set_min_height((screen.height() - 24.0).max(200.0));
 
                         #[cfg(target_os = "android")]
                         ui.add_space(32.0);
@@ -11329,7 +11433,10 @@ impl YrApp {
 
                         ui.add_space(14.0);
 
+                        let scroll_h = (screen.bottom() - ui.cursor().top() - 12.0).max(200.0);
                         egui::ScrollArea::vertical()
+                            .id_salt("yr_recap_scroll")
+                            .max_height(scroll_h)
                             .auto_shrink([false, false])
                             .show(ui, |ui| {
                                 // Profile badge
@@ -11337,14 +11444,26 @@ impl YrApp {
                                     let av_sz = 38.0;
                                     let (av_r, _) = ui.allocate_exact_size(Vec2::splat(av_sz), Sense::hover());
                                     let rad = CornerRadius::same((av_sz * 0.5) as u8);
-                                    let p = paint_antony_avatar(ui, av_r, Vec2::splat(av_sz), rad);
-                                    if !p {
+                                    let mut painted = false;
+                                    if let Some(url) = &avatar_url {
+                                        painted = paint_ready_image(
+                                            ui,
+                                            av_r,
+                                            tracked_thumb_uri(url, 192),
+                                            Vec2::splat(av_sz),
+                                            rad,
+                                        );
+                                    }
+                                    if !painted {
+                                        painted = paint_antony_avatar(ui, av_r, Vec2::splat(av_sz), rad);
+                                    }
+                                    if !painted {
                                         ui.painter().rect_filled(av_r, rad, Color32::from_rgb(45, 45, 52));
                                     }
                                     ui.add_space(10.0);
                                     ui.vertical(|ui| {
-                                        ui.label(RichText::new("Antony").size(16.0).strong().color(Color32::WHITE));
-                                        ui.label(RichText::new("@IsAntonyVs • Tu resumen musical").size(12.5).color(TEXT_SECONDARY));
+                                        ui.label(RichText::new(&user_name).size(16.0).strong().color(Color32::WHITE));
+                                        ui.label(RichText::new(format!("{user_handle} • Tu resumen musical")).size(12.5).color(TEXT_SECONDARY));
                                     });
                                 });
 
@@ -11379,51 +11498,35 @@ impl YrApp {
 
                                 ui.add_space(12.0);
 
-                                // Two Stats Columns
+                                // Three Stats Columns: Favoritas, Escuchadas, Offline
                                 ui.horizontal(|ui| {
-                                    let col_w = (inner_w - 10.0) * 0.5;
-                                    // Left Card: Favoritas
-                                    let (l_rect, _) = ui.allocate_exact_size(Vec2::new(col_w, 80.0), Sense::hover());
-                                    if ui.is_rect_visible(l_rect) {
-                                        ui.painter().rect_filled(l_rect, CornerRadius::same(12), Color32::from_rgb(28, 28, 34));
-                                        let ic_r = Rect::from_center_size(Pos2::new(l_rect.left() + 22.0, l_rect.top() + 26.0), Vec2::splat(18.0));
-                                        icons::draw_icon(ui.painter(), ic_r, icons::Icon::HeartFilled, ACCENT_RED);
-                                        ui.painter().text(
-                                            Pos2::new(l_rect.left() + 40.0, l_rect.top() + 26.0),
-                                            Align2::LEFT_CENTER,
-                                            format!("{total_liked}"),
-                                            egui::FontId::proportional(20.0),
-                                            Color32::WHITE,
-                                        );
-                                        ui.painter().text(
-                                            Pos2::new(l_rect.left() + 14.0, l_rect.top() + 58.0),
-                                            Align2::LEFT_CENTER,
-                                            "Canciones favoritas",
-                                            egui::FontId::proportional(12.5),
-                                            TEXT_SECONDARY,
-                                        );
-                                    }
-
-                                    // Right Card: Pistas en Historial
-                                    let (r_rect, _) = ui.allocate_exact_size(Vec2::new(col_w, 80.0), Sense::hover());
-                                    if ui.is_rect_visible(r_rect) {
-                                        ui.painter().rect_filled(r_rect, CornerRadius::same(12), Color32::from_rgb(28, 28, 34));
-                                        let ic_r = Rect::from_center_size(Pos2::new(r_rect.left() + 22.0, r_rect.top() + 26.0), Vec2::splat(18.0));
-                                        icons::draw_icon(ui.painter(), ic_r, icons::Icon::History, Color32::from_rgb(108, 168, 255));
-                                        ui.painter().text(
-                                            Pos2::new(r_rect.left() + 40.0, r_rect.top() + 26.0),
-                                            Align2::LEFT_CENTER,
-                                            format!("{total_recent}"),
-                                            egui::FontId::proportional(20.0),
-                                            Color32::WHITE,
-                                        );
-                                        ui.painter().text(
-                                            Pos2::new(r_rect.left() + 14.0, r_rect.top() + 58.0),
-                                            Align2::LEFT_CENTER,
-                                            "Pistas reproducidas",
-                                            egui::FontId::proportional(12.5),
-                                            TEXT_SECONDARY,
-                                        );
+                                    ui.spacing_mut().item_spacing.x = 8.0;
+                                    let col_w = ((inner_w - 16.0) / 3.0).max(80.0);
+                                    for (icon, icon_col, val, lbl) in [
+                                        (icons::Icon::HeartFilled, ACCENT_RED, total_liked, "Favoritas"),
+                                        (icons::Icon::History, Color32::from_rgb(108, 168, 255), total_recent, "Escuchadas"),
+                                        (icons::Icon::DownloadDone, GREEN_OK, total_offline, "Offline"),
+                                    ] {
+                                        let (c_rect, _) = ui.allocate_exact_size(Vec2::new(col_w, 78.0), Sense::hover());
+                                        if ui.is_rect_visible(c_rect) {
+                                            ui.painter().rect_filled(c_rect, CornerRadius::same(12), Color32::from_rgb(28, 28, 34));
+                                            let ic_r = Rect::from_center_size(Pos2::new(c_rect.left() + 20.0, c_rect.top() + 26.0), Vec2::splat(17.0));
+                                            icons::draw_icon(ui.painter(), ic_r, icon, icon_col);
+                                            ui.painter().text(
+                                                Pos2::new(c_rect.left() + 36.0, c_rect.top() + 26.0),
+                                                Align2::LEFT_CENTER,
+                                                format!("{val}"),
+                                                egui::FontId::proportional(20.0),
+                                                Color32::WHITE,
+                                            );
+                                            ui.painter().text(
+                                                Pos2::new(c_rect.left() + 12.0, c_rect.top() + 56.0),
+                                                Align2::LEFT_CENTER,
+                                                lbl,
+                                                egui::FontId::proportional(12.0),
+                                                TEXT_SECONDARY,
+                                            );
+                                        }
                                     }
                                 });
 
@@ -11601,6 +11704,276 @@ impl YrApp {
 
         if let Some(track) = track_to_play {
             self.play_track_in_list(vec![track], 0, ctx);
+        }
+    }
+
+    fn render_badges_modal(&mut self, ctx: &egui::Context) {
+        if !self.show_badges_modal {
+            return;
+        }
+        let screen = ctx.screen_rect();
+        let mut close_modal = false;
+        let mut trigger_share = false;
+
+        let offline_count = self
+            .downloads
+            .iter()
+            .filter(|d| d.status == DownloadStatus::Completed)
+            .count();
+        let badges = self.store.compute_listening_badges(offline_count);
+        let unlocked_count = badges.iter().filter(|b| b.unlocked).count();
+        let unlocked_names: Vec<&str> = badges
+            .iter()
+            .filter(|b| b.unlocked)
+            .map(|b| b.title.as_str())
+            .collect();
+        let share_msg = if unlocked_names.is_empty() {
+            "Explorando música e insignias en YR Music".to_string()
+        } else {
+            format!(
+                "🏆 Mis Insignias en YR Music ({}/{}):\n• {}",
+                unlocked_count,
+                badges.len(),
+                unlocked_names.join("\n• ")
+            )
+        };
+
+        egui::Area::new(egui::Id::new("yr_badges_modal_area"))
+            .fixed_pos(screen.min)
+            .order(egui::Order::Foreground)
+            .interactable(true)
+            .show(ctx, |ui| {
+                ui.painter().rect_filled(screen, CornerRadius::ZERO, Color32::from_rgb(14, 14, 18));
+                ui.set_width(screen.width());
+                ui.set_max_width(screen.width());
+                ui.set_height(screen.height());
+                ui.set_max_height(screen.height());
+                egui::Frame::new()
+                    .fill(Color32::from_rgb(14, 14, 18))
+                    .inner_margin(egui::Margin::symmetric(16, 12))
+                    .show(ui, |ui| {
+                        let inner_w = (screen.width() - 32.0).max(200.0);
+                        ui.set_width(inner_w);
+                        ui.set_max_width(inner_w);
+                        ui.set_min_height((screen.height() - 24.0).max(200.0));
+
+                        #[cfg(target_os = "android")]
+                        ui.add_space(32.0);
+
+                        // Top bar
+                        ui.horizontal(|ui| {
+                            if icons::icon_button(
+                                ui,
+                                icons::Icon::Close,
+                                32.0,
+                                18.0,
+                                Color32::TRANSPARENT,
+                                Color32::WHITE,
+                                16.0,
+                            )
+                            .clicked()
+                            {
+                                close_modal = true;
+                            }
+                            ui.add_space(8.0);
+                            ui.label(
+                                RichText::new("Insignias")
+                                    .size(20.0)
+                                    .strong()
+                                    .color(Color32::WHITE),
+                            );
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                if icons::icon_button(
+                                    ui,
+                                    icons::Icon::Share,
+                                    32.0,
+                                    18.0,
+                                    Color32::from_white_alpha(20),
+                                    Color32::WHITE,
+                                    16.0,
+                                )
+                                .clicked()
+                                {
+                                    trigger_share = true;
+                                }
+                            });
+                        });
+
+                        ui.add_space(12.0);
+
+                        let scroll_h = (screen.bottom() - ui.cursor().top() - 12.0).max(200.0);
+                        egui::ScrollArea::vertical()
+                            .id_salt("yr_badges_scroll")
+                            .max_height(scroll_h)
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| {
+                                // Summary Hero Card
+                                egui::Frame::new()
+                                    .fill(BG_SURFACE)
+                                    .stroke(Stroke::new(0.8_f32, Color32::from_rgb(56, 56, 66)))
+                                    .corner_radius(CornerRadius::same(14))
+                                    .inner_margin(egui::Margin::symmetric(14, 12))
+                                    .show(ui, |ui| {
+                                        ui.set_width(ui.available_width());
+                                        ui.label(
+                                            RichText::new(format!(
+                                                "{unlocked_count} de {} insignias desbloqueadas",
+                                                badges.len()
+                                            ))
+                                            .size(17.0)
+                                            .strong()
+                                            .color(Color32::WHITE),
+                                        );
+                                        ui.add_space(2.0);
+                                        ui.add(
+                                            egui::Label::new(
+                                                RichText::new(
+                                                    "Escucha música, guarda offline y desbloquea logros en YR Music",
+                                                )
+                                                .size(12.5)
+                                                .color(TEXT_SECONDARY),
+                                            )
+                                            .wrap()
+                                            .selectable(false),
+                                        );
+                                        ui.add_space(8.0);
+                                        let frac = (unlocked_count as f32 / badges.len().max(1) as f32).clamp(0.0, 1.0);
+                                        let (bar_r, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 6.0), Sense::hover());
+                                        ui.painter().rect_filled(bar_r, CornerRadius::same(3), Color32::from_rgb(40, 40, 48));
+                                        if frac > 0.0 {
+                                            let fill_r = Rect::from_min_max(
+                                                bar_r.left_top(),
+                                                Pos2::new(bar_r.left() + bar_r.width() * frac, bar_r.bottom()),
+                                            );
+                                            ui.painter().rect_filled(fill_r, CornerRadius::same(3), ACCENT_RED);
+                                        }
+                                    });
+
+                                ui.add_space(12.0);
+
+                                for badge in &badges {
+                                    let (icon, accent) = match badge.id {
+                                        "offline_pro" => (icons::Icon::DownloadDone, GREEN_OK),
+                                        "hifi_audiophile" => (icons::Icon::Headphones, Color32::from_rgb(108, 168, 255)),
+                                        "top_artist_fan" => (icons::Icon::Artist, Color32::from_rgb(255, 193, 7)),
+                                        "collector" => (icons::Icon::HeartFilled, ACCENT_RED),
+                                        "marathon" => (icons::Icon::Recap, Color32::from_rgb(186, 104, 255)),
+                                        _ => (icons::Icon::Radio, Color32::from_rgb(76, 209, 175)),
+                                    };
+                                    let card_fill = if badge.unlocked {
+                                        Color32::from_rgb(24, 24, 30)
+                                    } else {
+                                        Color32::from_rgb(19, 19, 24)
+                                    };
+                                    let card_stroke = if badge.unlocked {
+                                        Stroke::new(
+                                            0.8_f32,
+                                            Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), 120),
+                                        )
+                                    } else {
+                                        Stroke::new(0.6_f32, Color32::from_rgb(40, 40, 46))
+                                    };
+                                    egui::Frame::new()
+                                        .fill(card_fill)
+                                        .stroke(card_stroke)
+                                        .corner_radius(CornerRadius::same(12))
+                                        .inner_margin(egui::Margin::symmetric(12, 10))
+                                        .show(ui, |ui| {
+                                            ui.set_width(ui.available_width());
+                                            ui.horizontal(|ui| {
+                                                let (ic_r, _) = ui.allocate_exact_size(Vec2::splat(44.0), Sense::hover());
+                                                let circle_bg = if badge.unlocked {
+                                                    Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), 42)
+                                                } else {
+                                                    Color32::from_rgb(32, 32, 38)
+                                                };
+                                                let ic_col = if badge.unlocked { accent } else { TEXT_SECONDARY };
+                                                ui.painter().circle_filled(ic_r.center(), 22.0, circle_bg);
+                                                icons::draw_icon(
+                                                    ui.painter(),
+                                                    Rect::from_center_size(ic_r.center(), Vec2::splat(20.0)),
+                                                    icon,
+                                                    ic_col,
+                                                );
+                                                ui.add_space(6.0);
+                                                let tw = (inner_w - 44.0 - 36.0).max(120.0);
+                                                ui.vertical(|ui| {
+                                                    ui.set_max_width(tw);
+                                                    ui.spacing_mut().item_spacing.y = 3.0;
+                                                    ui.add(
+                                                        egui::Label::new(
+                                                            RichText::new(&badge.title)
+                                                                .size(15.0)
+                                                                .strong()
+                                                                .color(if badge.unlocked { Color32::WHITE } else { Color32::from_white_alpha(180) }),
+                                                        )
+                                                        .truncate()
+                                                        .selectable(false),
+                                                    );
+                                                    ui.add(
+                                                        egui::Label::new(
+                                                            RichText::new(&badge.subtitle)
+                                                                .size(12.0)
+                                                                .color(TEXT_SECONDARY),
+                                                        )
+                                                        .wrap()
+                                                        .selectable(false),
+                                                    );
+                                                    ui.horizontal(|ui| {
+                                                        ui.label(
+                                                            RichText::new(&badge.detail)
+                                                                .size(11.5)
+                                                                .color(if badge.unlocked { accent } else { TEXT_SECONDARY }),
+                                                        );
+                                                        if badge.unlocked {
+                                                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                                                egui::Frame::new()
+                                                                    .fill(Color32::from_rgba_unmultiplied(46, 204, 113, 36))
+                                                                    .corner_radius(CornerRadius::same(10))
+                                                                    .inner_margin(egui::Margin::symmetric(8, 2))
+                                                                    .show(ui, |ui| {
+                                                                        ui.label(
+                                                                            RichText::new("Desbloqueada")
+                                                                                .size(10.5)
+                                                                                .strong()
+                                                                                .color(GREEN_OK),
+                                                                        );
+                                                                    });
+                                                            });
+                                                        }
+                                                    });
+                                                    if !badge.unlocked {
+                                                        let (pr_r, _) = ui.allocate_exact_size(Vec2::new(tw, 4.0), Sense::hover());
+                                                        ui.painter().rect_filled(pr_r, CornerRadius::same(2), Color32::from_rgb(38, 38, 44));
+                                                        let p_frac = badge.progress.clamp(0.0, 1.0);
+                                                        if p_frac > 0.0 {
+                                                            let pf = Rect::from_min_max(
+                                                                pr_r.left_top(),
+                                                                Pos2::new(pr_r.left() + pr_r.width() * p_frac, pr_r.bottom()),
+                                                            );
+                                                            ui.painter().rect_filled(pf, CornerRadius::same(2), accent);
+                                                        }
+                                                    }
+                                                });
+                                            });
+                                        });
+                                    ui.add_space(8.0);
+                                }
+
+                                #[cfg(target_os = "android")]
+                                ui.add_space(60.0);
+                                #[cfg(not(target_os = "android"))]
+                                ui.add_space(24.0);
+                            });
+                    });
+            });
+
+        if trigger_share {
+            crate::android_media::share_text("Mis Insignias • YR Music", &share_msg);
+            self.set_banner("Insignias compartidas");
+        }
+        if close_modal {
+            self.show_badges_modal = false;
         }
     }
 
