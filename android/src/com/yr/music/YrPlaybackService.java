@@ -123,6 +123,7 @@ public class YrPlaybackService extends Service {
     private static volatile int sCompactW = 0;
     private static volatile int sCompactH = 0;
     private static volatile int sSeekSeconds = 10;
+    private static volatile int sSavedSystemUiVisibility = -1;
     private static volatile WeakReference<Activity> sVideoActivityRef = null;
     private static volatile boolean sTriedFallback = false;
     private static volatile boolean sVideoWantedVisible = false;
@@ -594,6 +595,9 @@ public class YrPlaybackService extends Service {
             } catch (Throwable ignored) {
             }
             if (decor != null) {
+                if (sSavedSystemUiVisibility < 0) {
+                    sSavedSystemUiVisibility = decor.getSystemUiVisibility();
+                }
                 decor.setSystemUiVisibility(
                         View.SYSTEM_UI_FLAG_FULLSCREEN
                                 | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
@@ -625,7 +629,9 @@ public class YrPlaybackService extends Service {
             } catch (Throwable ignored) {
             }
             if (decor != null) {
-                decor.setSystemUiVisibility(View.SYSTEM_UI_FLAG_VISIBLE);
+                decor.setSystemUiVisibility(
+                        sSavedSystemUiVisibility >= 0 ? sSavedSystemUiVisibility : View.SYSTEM_UI_FLAG_VISIBLE
+                );
             }
             sVideoOverlayRoot.setClipToOutline(true);
             sVideoOverlayRoot.setBackgroundColor(0xFF0A0A0C);
@@ -811,10 +817,8 @@ public class YrPlaybackService extends Service {
                 WindowManager wm = (WindowManager) act.getSystemService(Context.WINDOW_SERVICE);
                 if (wm == null) return;
 
-                int[] loc = new int[]{0, 0};
-                decor.getLocationOnScreen(loc);
-                final int wx = loc[0] + x;
-                final int wy = loc[1] + y;
+                final int wx = x;
+                final int wy = y;
                 sVideoActivityRef = new WeakReference<Activity>(act);
                 if (!sVideoFullscreen) {
                     sCompactX = wx;
