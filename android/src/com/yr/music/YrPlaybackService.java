@@ -10,6 +10,7 @@ import android.app.Service;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.ServiceInfo;
+import android.content.res.ColorStateList;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Matrix;
@@ -98,6 +99,7 @@ public class YrPlaybackService extends Service {
     private static volatile String sVideoFallbackUrl = null;
     private static volatile String sVideoUserAgent = null;
     private static volatile boolean sVideoPrepared = false;
+    private static volatile boolean sVideoRenderedFirstFrame = false;
     private static volatile boolean sTriedFallback = false;
     private static volatile boolean sVideoWantedVisible = false;
     private static volatile boolean sPendingPlaying = false;
@@ -507,6 +509,7 @@ public class YrPlaybackService extends Service {
 
     private static void releaseMediaPlayerLocked() {
         sVideoPrepared = false;
+        sVideoRenderedFirstFrame = false;
         sVideoWidth = 0;
         sVideoHeight = 0;
         sLastAppliedSpeed = 1.0f;
@@ -552,11 +555,18 @@ public class YrPlaybackService extends Service {
                 if (player != sMediaPlayer) return false;
                 if (what == MediaPlayer.MEDIA_INFO_VIDEO_RENDERING_START
                         || what == MediaPlayer.MEDIA_INFO_BUFFERING_END) {
+                    sVideoRenderedFirstFrame = true;
                     if (sVideoSpinner != null) sVideoSpinner.setVisibility(View.GONE);
                 } else if (what == MediaPlayer.MEDIA_INFO_BUFFERING_START) {
-                    if (sVideoSpinner != null) sVideoSpinner.setVisibility(View.VISIBLE);
+                    if (!sVideoRenderedFirstFrame && sVideoSpinner != null) {
+                        sVideoSpinner.setVisibility(View.VISIBLE);
+                    }
                 }
                 return false;
+            });
+            mp.setOnSeekCompleteListener(player -> {
+                if (player != sMediaPlayer) return;
+                if (sVideoSpinner != null) sVideoSpinner.setVisibility(View.GONE);
             });
             mp.setOnPreparedListener(player -> {
                 if (player != sMediaPlayer) return;
@@ -642,13 +652,11 @@ public class YrPlaybackService extends Service {
                 WindowManager wm = (WindowManager) act.getSystemService(Context.WINDOW_SERVICE);
                 if (wm == null) return;
 
-                View content = act.findViewById(android.R.id.content);
                 int[] loc = new int[]{0, 0};
-                if (content != null) {
-                    content.getLocationOnScreen(loc);
-                }
+                decor.getLocationOnScreen(loc);
                 final int wx = loc[0] + x;
                 final int wy = loc[1] + y;
+                Log.i("YrPlaybackService", "attachNativeVideo rect=(" + wx + "," + wy + "," + width + "x" + height + ")");
 
                 if (sVideoOverlayRoot == null) {
                     final float radiusPx = 12f * act.getResources().getDisplayMetrics().density;
@@ -715,6 +723,12 @@ public class YrPlaybackService extends Service {
 
                         @Override
                         public void onSurfaceTextureUpdated(SurfaceTexture st) {
+                            if (sVideoPrepared) {
+                                sVideoRenderedFirstFrame = true;
+                                if (sVideoSpinner != null && sVideoSpinner.getVisibility() != View.GONE) {
+                                    sVideoSpinner.setVisibility(View.GONE);
+                                }
+                            }
                         }
                     });
                     sVideoOverlayRoot.addView(sVideoTextureView, new FrameLayout.LayoutParams(
@@ -723,6 +737,9 @@ public class YrPlaybackService extends Service {
                     ));
 
                     sVideoSpinner = new ProgressBar(act);
+                    if (Build.VERSION.SDK_INT >= 21) {
+                        sVideoSpinner.setIndeterminateTintList(ColorStateList.valueOf(0xFFFFFFFF));
+                    }
                     FrameLayout.LayoutParams spLp = new FrameLayout.LayoutParams(
                             FrameLayout.LayoutParams.WRAP_CONTENT,
                             FrameLayout.LayoutParams.WRAP_CONTENT
