@@ -2390,6 +2390,14 @@ impl YrApp {
                 let target_end = seg.end_secs;
                 let cat = seg.category.clone();
                 self.audio.seek(Duration::from_secs_f64(target_end));
+                self.last_media_sync = None;
+                if self.is_video_mode {
+                    crate::android_media::sync_native_video(
+                        true,
+                        (target_end * 1000.0).max(0.0) as u64,
+                        snap.speed,
+                    );
+                }
                 self.set_banner(format!("SponsorBlock: saltado segmento ({cat})"));
             }
         }
@@ -6541,10 +6549,11 @@ impl YrApp {
                     .id_salt("downloads_actions_row")
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 6.0;
                             if icons::icon_pill_button(
                                 ui,
                                 icons::Icon::Play,
-                                "Reproducir todo",
+                                "Reproducir",
                                 BG_ELEVATED,
                                 TEXT_PRIMARY,
                             )
@@ -9345,6 +9354,10 @@ impl YrApp {
 
         ui.add_space(10.0);
 
+        egui::ScrollArea::vertical()
+            .id_salt(("yr_settings_scroll", self.settings_category as u8))
+            .drag_to_scroll(true)
+            .show(ui, |ui| {
         if is_root {
             // Categorized settings menu list (matches YouTube Music settings screen: media_1794881819990_14eee889.jpg)
             let cat_row = |ui: &mut egui::Ui, cat_title: &str| -> egui::Response {
@@ -9408,9 +9421,14 @@ impl YrApp {
                     ui.heading("Morphe & Laboratorio");
                     ui.add_space(4.0);
                     ui.label(RichText::new("Motor acústico experimental en Rust y DSP avanzado de audio.").color(TEXT_SECONDARY));
-                    ui.add_space(12.0);
+                    ui.add_space(10.0);
 
-                    if ui.checkbox(&mut self.store.data.config.equalizer.morphe_spatial_audio, "Audio Espacial 3D Morphe (Binaural)").changed() {
+                    if settings_toggle_row(
+                        ui,
+                        &mut self.store.data.config.equalizer.morphe_spatial_audio,
+                        "Audio Espacial 3D Morphe (Binaural)",
+                        "Expande el campo sonoro estéreo con procesamiento binaural para máxima inmersión en auriculares y altavoces.",
+                    ) {
                         self.store.data.config.morphe_spatial_audio = self.store.data.config.equalizer.morphe_spatial_audio;
                         self.audio.set_equalizer(self.store.data.config.equalizer.clone());
                         let _ = self.store.save();
@@ -9418,39 +9436,52 @@ impl YrApp {
                             self.set_banner("Audio espacial 3D Morphe activado");
                         }
                     }
-                    ui.label(RichText::new("Expande el campo sonoro estéreo con procesamiento binaural para máxima inmersión en auriculares y altavoces.").size(12.0).color(TEXT_SECONDARY));
-                    ui.add_space(10.0);
 
-                    if ui.checkbox(&mut self.store.data.config.equalizer.morphe_vocal_boost, "Realce de voces y diálogos (Vocal Boost)").changed() {
+                    if settings_toggle_row(
+                        ui,
+                        &mut self.store.data.config.equalizer.morphe_vocal_boost,
+                        "Realce de voces y diálogos (Vocal Boost)",
+                        "Refuerza las frecuencias vocales entre 1 kHz y 4 kHz para letras nítidas.",
+                    ) {
                         self.store.data.config.morphe_vocal_boost = self.store.data.config.equalizer.morphe_vocal_boost;
                         self.audio.set_equalizer(self.store.data.config.equalizer.clone());
                         let _ = self.store.save();
                     }
-                    ui.label(RichText::new("Refuerza las frecuencias vocales entre 1 kHz y 4 kHz para letras nítidas.").size(12.0).color(TEXT_SECONDARY));
-                    ui.add_space(10.0);
 
-                    if ui.checkbox(&mut self.store.data.config.equalizer.morphe_dynamic_bass, "Dynamic Bass Drive (Graves dinámicos)").changed() {
+                    if settings_toggle_row(
+                        ui,
+                        &mut self.store.data.config.equalizer.morphe_dynamic_bass,
+                        "Dynamic Bass Drive (Graves dinámicos)",
+                        "Mejora la pegada y transitorios de baja frecuencia sin saturación ni armónicos indeseados.",
+                    ) {
                         self.store.data.config.morphe_dynamic_bass = self.store.data.config.equalizer.morphe_dynamic_bass;
                         self.audio.set_equalizer(self.store.data.config.equalizer.clone());
                         let _ = self.store.save();
                     }
-                    ui.label(RichText::new("Mejora la pegada y transitorios de baja frecuencia sin saturación ni armónicos indeseados.").size(12.0).color(TEXT_SECONDARY));
-                    ui.add_space(10.0);
 
-                    if ui.checkbox(&mut self.store.data.config.equalizer.morphe_limiter, "Limitador de picos / Anti-Clipping").changed() {
+                    if settings_toggle_row(
+                        ui,
+                        &mut self.store.data.config.equalizer.morphe_limiter,
+                        "Limitador de picos / Anti-Clipping",
+                        "Previene distorsiones digitales en pistas con alto volumen y rango dinámico comprimido.",
+                    ) {
                         self.store.data.config.morphe_limiter = self.store.data.config.equalizer.morphe_limiter;
                         self.audio.set_equalizer(self.store.data.config.equalizer.clone());
                         let _ = self.store.save();
                     }
-                    ui.label(RichText::new("Previene distorsiones digitales en pistas con alto volumen y rango dinámico comprimido.").size(12.0).color(TEXT_SECONDARY));
                 }
                 SettingsCategory::FamilyCenter => {
                     ui.heading("Centro familiar");
                     ui.add_space(4.0);
                     ui.label(RichText::new("Administra la experiencia musical de los miembros de tu familia.").color(TEXT_SECONDARY));
-                    ui.add_space(12.0);
+                    ui.add_space(10.0);
 
-                    if ui.checkbox(&mut self.store.data.config.restricted_mode, "Modo restringido (Filtro de contenido explícito)").changed() {
+                    if settings_toggle_row(
+                        ui,
+                        &mut self.store.data.config.restricted_mode,
+                        "Modo restringido (Filtro de contenido explícito)",
+                        "Oculta canciones y videos con letras o temáticas explícitas en búsquedas y mixes.",
+                    ) {
                         let _ = self.store.save();
                         self.set_banner(if self.store.data.config.restricted_mode {
                             "Modo restringido activado"
@@ -9458,8 +9489,7 @@ impl YrApp {
                             "Modo restringido desactivado"
                         });
                     }
-                    ui.label(RichText::new("Oculta canciones y videos con letras o temáticas explícitas en búsquedas y mixes.").size(12.0).color(TEXT_SECONDARY));
-                    ui.add_space(10.0);
+                    ui.add_space(6.0);
 
                     ui.label("Perfiles familiares de Google:");
                     ui.label(RichText::new("Permite compartir y alternar cuentas de Google rápidamente sin perder descargas locales.").size(12.0).color(TEXT_SECONDARY));
@@ -9577,24 +9607,40 @@ impl YrApp {
                                 });
                             });
                         });
-                    ui.add_space(12.0);
+                    ui.add_space(10.0);
                     let mut norm = self.store.data.config.equalizer.loudness_normalization;
-                    if ui.checkbox(&mut norm, "Normalización de volumen (Loudness Normalization)").changed() {
+                    if settings_toggle_row(
+                        ui,
+                        &mut norm,
+                        "Normalización de volumen",
+                        "Mantiene un volumen uniforme en todas las canciones.",
+                    ) {
                         self.store.data.config.equalizer.loudness_normalization = norm;
                         self.audio.set_equalizer(self.store.data.config.equalizer.clone());
                         let _ = self.store.save();
                     }
-                    ui.label(RichText::new("Ajusta suavemente el nivel de volumen para mantener un nivel uniforme en todas las pistas.").size(12.0).color(TEXT_SECONDARY));
-                    ui.add_space(8.0);
-                    if ui.checkbox(&mut self.store.data.config.gapless_playback, "Reproducción sin pausas (Gapless)").changed() {
+                    if settings_toggle_row(
+                        ui,
+                        &mut self.store.data.config.gapless_playback,
+                        "Reproducción sin pausas (Gapless)",
+                        "Elimina silencios entre pistas y precarga la siguiente canción.",
+                    ) {
                         let _ = self.store.save();
                     }
-                    ui.label(RichText::new("Elimina los silencios entre pistas continuas y precarga automáticamente la siguiente canción.").size(12.0).color(TEXT_SECONDARY));
-                    ui.add_space(8.0);
-                    if ui.checkbox(&mut self.store.data.config.autoplay_radio, "Radio automática continua al terminar la cola").changed() {
+                    if settings_toggle_row(
+                        ui,
+                        &mut self.store.data.config.autoplay_radio,
+                        "Radio automática continua",
+                        "Añade canciones similares al llegar al final de la cola.",
+                    ) {
                         let _ = self.store.save();
                     }
-                    if ui.checkbox(&mut self.store.data.config.sponsorblock_enabled, "SponsorBlock: omitir intros/patrocinios en audio").changed() {
+                    if settings_toggle_row(
+                        ui,
+                        &mut self.store.data.config.sponsorblock_enabled,
+                        "SponsorBlock en audio y video",
+                        "Omite automáticamente intros sin música y patrocinios.",
+                    ) {
                         let _ = self.store.save();
                     }
                 }
@@ -9621,28 +9667,46 @@ impl YrApp {
                             });
                         });
                     ui.add_space(10.0);
-                    if ui.checkbox(&mut self.store.data.config.mobile_data_saver, "Ahorro de datos móviles").changed() {
+                    if settings_toggle_row(
+                        ui,
+                        &mut self.store.data.config.mobile_data_saver,
+                        "Ahorro de datos móviles",
+                        "Reduce el streaming a 64 kbps en redes móviles para ahorrar consumo y batería.",
+                    ) {
                         let _ = self.store.save();
                     }
-                    ui.label(RichText::new("Reduce el streaming a 64 kbps al reproducir con datos móviles para ahorrar consumo y batería.").size(12.0).color(TEXT_SECONDARY));
-                    ui.add_space(10.0);
-                    if ui.checkbox(&mut self.store.data.config.wifi_only_streaming, "Transmitir solo mediante Wi-Fi").changed() {
+                    if settings_toggle_row(
+                        ui,
+                        &mut self.store.data.config.wifi_only_streaming,
+                        "Transmitir solo mediante Wi-Fi",
+                        "Bloquea la descarga de streams en conexiones de datos móviles.",
+                    ) {
                         let _ = self.store.save();
                     }
-                    ui.label(RichText::new("Bloquea la descarga de streams en conexiones de datos móviles.").size(12.0).color(TEXT_SECONDARY));
-                    ui.add_space(10.0);
-                    if ui.checkbox(&mut self.store.data.config.battery_saver, "Modo ahorro de batería").changed() {
+                    if settings_toggle_row(
+                        ui,
+                        &mut self.store.data.config.battery_saver,
+                        "Modo ahorro de batería",
+                        "Desactiva animaciones y suspende la precarga de la siguiente canción.",
+                    ) {
                         let _ = self.store.save();
                     }
-                    ui.label(RichText::new("Desactiva animaciones de carátula y suspende la precarga de la siguiente canción cuando la batería esté baja.").size(12.0).color(TEXT_SECONDARY));
-                    ui.add_space(10.0);
-                    if ui.checkbox(&mut self.store.data.config.prefer_video_mode, "Desactivar videos en datos móviles").changed() {
+                    if settings_toggle_row(
+                        ui,
+                        &mut self.store.data.config.prefer_video_mode,
+                        "Desactivar videos en datos móviles",
+                        "Fuerza reproducción de solo audio en el reproductor para máxima autonomía.",
+                    ) {
                         let _ = self.store.save();
                     }
-                    ui.label(RichText::new("Fuerza reproducción de solo audio en el reproductor para máxima autonomía.").size(12.0).color(TEXT_SECONDARY));
                 }
                 SettingsCategory::DownloadsStorage => {
-                    if ui.checkbox(&mut self.store.data.config.smart_downloads, "Descargas inteligentes (Auto-descarga)").changed() {
+                    if settings_toggle_row(
+                        ui,
+                        &mut self.store.data.config.smart_downloads,
+                        "Descargas inteligentes",
+                        "Descarga en segundo plano tus canciones favoritas y mixes recientes para escuchar offline.",
+                    ) {
                         let enabled = self.store.data.config.smart_downloads;
                         self.smart_downloads_flag
                             .store(enabled, std::sync::atomic::Ordering::Relaxed);
@@ -9662,8 +9726,6 @@ impl YrApp {
                             }
                         }
                     }
-                    ui.label(RichText::new("Descarga automáticamente en segundo plano tus canciones favoritas y mixes recientes para escuchar offline.").size(12.0).color(TEXT_SECONDARY));
-                    ui.add_space(6.0);
                     let offline_cnt = self
                         .downloads
                         .iter()
@@ -9677,15 +9739,20 @@ impl YrApp {
                         .size(13.0)
                         .color(GREEN_OK),
                     );
-                    ui.add_space(10.0);
-                    if ui.checkbox(&mut self.store.data.config.wifi_only_downloads, "Descargar solo mediante Wi-Fi").changed() {
+                    ui.add_space(6.0);
+                    if settings_toggle_row(
+                        ui,
+                        &mut self.store.data.config.wifi_only_downloads,
+                        "Descargar solo mediante Wi-Fi",
+                        "Evita descargas automáticas cuando usas datos móviles.",
+                    ) {
                         self.wifi_only_dl_flag.store(
                             self.store.data.config.wifi_only_downloads,
                             std::sync::atomic::Ordering::Relaxed,
                         );
                         let _ = self.store.save();
                     }
-                    ui.add_space(8.0);
+                    ui.add_space(6.0);
                     if icons::icon_pill_button(
                         ui,
                         icons::Icon::Download,
@@ -9695,19 +9762,7 @@ impl YrApp {
                     )
                     .clicked()
                     {
-                        let recent_tracks: Vec<Track> = self
-                            .store
-                            .data
-                            .recent_tracks
-                            .iter()
-                            .chain(self.store.data.liked_tracks.iter())
-                            .cloned()
-                            .collect();
-                        let count = recent_tracks.len();
-                        for t in &recent_tracks {
-                            self.maybe_smart_download_track(t, false, true);
-                        }
-                        self.set_banner(format!("Descargando {count} canciones para modo sin conexión"));
+                        self.trigger_smart_download_sync();
                     }
                     ui.add_space(10.0);
                     ui.label("Calidad de descargas offline:");
@@ -9818,7 +9873,12 @@ impl YrApp {
                     }
                 }
                 SettingsCategory::Notifications => {
-                    if ui.checkbox(&mut self.store.data.config.notifications_enabled, "Notificación multimedia en segundo plano").changed() {
+                    if settings_toggle_row(
+                        ui,
+                        &mut self.store.data.config.notifications_enabled,
+                        "Notificación multimedia en segundo plano",
+                        "Muestra la carátula, título y controles de pausa/saltar en la barra de notificaciones del sistema.",
+                    ) {
                         let on = self.store.data.config.notifications_enabled;
                         self.notifications_flag
                             .store(on, std::sync::atomic::Ordering::Relaxed);
@@ -9829,14 +9889,17 @@ impl YrApp {
                             self.last_media_sync = None;
                         }
                     }
-                    ui.label(RichText::new("Muestra la carátula, título y controles de pausa/saltar en la barra de notificaciones del sistema.").size(12.0).color(TEXT_SECONDARY));
                 }
                 SettingsCategory::Privacy => {
-                    if ui.checkbox(&mut self.store.data.config.incognito_mode, "Modo incógnito (Pausar historial)").changed() {
+                    if settings_toggle_row(
+                        ui,
+                        &mut self.store.data.config.incognito_mode,
+                        "Modo incógnito (Pausar historial)",
+                        "Las canciones que escuches no se guardarán en tu historial ni alterarán tus recomendaciones.",
+                    ) {
                         let _ = self.store.save();
                     }
-                    ui.label(RichText::new("Las canciones que escuches no se guardarán en tu historial ni alterarán tus recomendaciones.").size(12.0).color(TEXT_SECONDARY));
-                    ui.add_space(12.0);
+                    ui.add_space(10.0);
                     if settings_action_button(ui, "Borrar historial de reproducciones") {
                         self.store.data.recent_tracks.clear();
                         let _ = self.store.save();
@@ -9851,13 +9914,17 @@ impl YrApp {
                     }
                 }
                 SettingsCategory::Recommendations => {
-                    if ui.checkbox(&mut self.store.data.config.personalized_recommendations, "Recomendaciones personalizadas con cuenta Google").changed() {
+                    if settings_toggle_row(
+                        ui,
+                        &mut self.store.data.config.personalized_recommendations,
+                        "Recomendaciones personalizadas",
+                        "Ajusta los mixes de inicio según tu historial de reproducción, canciones favoritas y artistas seguidos.",
+                    ) {
                         let _ = self.store.save();
                     }
-                    ui.label(RichText::new("Ajusta los mixes de inicio según tu historial de reproducción, canciones favoritas y artistas seguidos.").size(12.0).color(TEXT_SECONDARY));
                 }
                 SettingsCategory::About => {
-                    ui.heading("YR Music v0.9.9");
+                    ui.heading("YR Music v0.9.10");
                     ui.label("Cliente nativo de música 100% en Rust para Android y escritorio.");
                     ui.add_space(6.0);
                     ui.label(RichText::new("Motor de audio Symphonia PCM con DSP Morphe 3D binaural, reproductor integrado de video en la app, auto-scroll inteligente de cola, prefetch predictivo en disco y compatibilidad completa con YouTube Music.").size(12.0).color(TEXT_SECONDARY));
@@ -9910,6 +9977,8 @@ impl YrApp {
                 }
             }
         }
+        ui.add_space(56.0);
+        });
     }
 
     fn render_action_sheet_modal(&mut self, ctx: &egui::Context) {
@@ -11036,7 +11105,7 @@ impl YrApp {
                         }
                         if menu_row(ui, icons::Icon::Help, "Ayuda y comentarios").clicked() {
                             self.show_account_modal = false;
-                            self.set_banner("YR Music v0.9.9 • Pure Rust");
+                            self.set_banner("YR Music v0.9.10 • Pure Rust");
                         }
 
                         #[cfg(target_os = "android")]
@@ -11927,6 +11996,100 @@ fn settings_action_button(ui: &mut egui::Ui, label: &str) -> bool {
         .corner_radius(CornerRadius::same(16))
         .min_size(Vec2::new(140.0, 34.0));
     ui.add(btn).clicked()
+}
+
+fn settings_toggle_row(
+    ui: &mut egui::Ui,
+    value: &mut bool,
+    title: &str,
+    subtitle: &str,
+) -> bool {
+    let avail_w = ui.available_width().max(180.0);
+    let switch_w = 44.0_f32;
+    let switch_h = 24.0_f32;
+    let text_w = (avail_w - switch_w - 14.0).max(120.0);
+    let toggle_id = ui.make_persistent_id(("yr_toggle", title));
+    let mut clicked = false;
+
+    ui.add_space(4.0);
+    let row_resp = ui.horizontal(|ui| {
+        ui.allocate_ui(Vec2::new(text_w, 0.0), |ui| {
+            ui.vertical(|ui| {
+                ui.set_max_width(text_w);
+                ui.spacing_mut().item_spacing.y = 2.0;
+                if ui
+                    .add(
+                        egui::Label::new(
+                            RichText::new(title)
+                                .size(14.5)
+                                .color(Color32::WHITE),
+                        )
+                        .wrap()
+                        .selectable(false)
+                        .sense(Sense::click()),
+                    )
+                    .clicked()
+                {
+                    clicked = true;
+                }
+                if !subtitle.is_empty() {
+                    if ui
+                        .add(
+                            egui::Label::new(
+                                RichText::new(subtitle)
+                                    .size(12.0)
+                                    .color(TEXT_SECONDARY),
+                            )
+                            .wrap()
+                            .selectable(false)
+                            .sense(Sense::click()),
+                        )
+                        .clicked()
+                    {
+                        clicked = true;
+                    }
+                }
+            });
+        });
+
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            let (sw_rect, sw_resp) =
+                ui.allocate_exact_size(Vec2::new(switch_w, switch_h.max(32.0)), Sense::click());
+            let track_rect = Rect::from_center_size(
+                sw_rect.center(),
+                Vec2::new(switch_w, switch_h),
+            );
+            let t = ui.ctx().animate_bool(toggle_id, *value);
+            let track_color = Color32::from_rgb(
+                (58.0 + (ACCENT_RED.r() as f32 - 58.0) * t).round() as u8,
+                (58.0 + (ACCENT_RED.g() as f32 - 58.0) * t).round() as u8,
+                (68.0 + (ACCENT_RED.b() as f32 - 68.0) * t).round() as u8,
+            );
+            ui.painter()
+                .rect_filled(track_rect, CornerRadius::same(12), track_color);
+            let knob_x = egui::lerp(
+                (track_rect.left() + 12.0)..=(track_rect.right() - 12.0),
+                t,
+            );
+            ui.painter().circle_filled(
+                Pos2::new(knob_x, track_rect.center().y),
+                9.0,
+                Color32::WHITE,
+            );
+            if sw_resp.clicked() {
+                clicked = true;
+            }
+        });
+    });
+
+    if !clicked && row_resp.response.interact(Sense::click()).clicked() {
+        clicked = true;
+    }
+    if clicked {
+        *value = !*value;
+    }
+    ui.add_space(6.0);
+    clicked
 }
 
 /// Paints a remote image only once ready so failed loads preserve the clean vector placeholder.

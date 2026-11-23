@@ -7,8 +7,10 @@ import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.app.Service;
+import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.pm.ActivityInfo;
 import android.content.pm.ServiceInfo;
 import android.content.res.ColorStateList;
@@ -24,6 +26,9 @@ import android.graphics.PorterDuff;
 import android.graphics.SurfaceTexture;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
+import android.media.AudioAttributes;
+import android.media.AudioFocusRequest;
+import android.media.AudioManager;
 import android.media.MediaMetadata;
 import android.media.MediaPlayer;
 import android.media.PlaybackParams;
@@ -163,6 +168,88 @@ public class YrPlaybackService extends Service {
 
     private MediaSession mediaSession;
     private PowerManager.WakeLock wakeLock;
+    private AudioManager audioManager;
+    private Object audioFocusRequest;
+    private boolean hasAudioFocus = false;
+    private boolean resumeOnAudioFocusGain = false;
+    private boolean noisyReceiverRegistered = false;
+
+    private final BroadcastReceiver noisyReceiver = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            if (intent != null && AudioManager.ACTION_AUDIO_BECOMING_NOISY.equals(intent.getAction())) {
+                if (currentPlaying) {
+                    Log.i("YrPlaybackService", "Audio becoming noisy -> pausing playback");
+                    resumeOnAudioFocusGain = false;
+                    nativeOnMediaAction(NATIVE_PAUSE, 0);
+                }
+            }
+        }
+    };
+
+    private final AudioManager.OnAudioFocusChangeListener audioFocusListener = focusChange -> {
+        if (focusChange == AudioManager.AUDIOFOCUS_LOSS) {
+            hasAudioFocus = false;
+            resumeOnAudioFocusGain = false;
+            if (currentPlaying) {
+                nativeOnMediaAction(NATIVE_PAUSE, 0);
+            }
+        } else if (focusChange == AudioManager.AUDIOFOCUS_LOSS_TRANSIENT) {
+            resumeOnAudioFocusGain = currentPlaying;
+            if (currentPlaying) {
+                nativeOnMediaAction(NATIVE_PAUSE, 0);
+            }
+        } else if (focusChange == AudioManager.AUDIOFOCUS_GAIN) {
+            hasAudioFocus = true;
+            if (resumeOnAudioFocusGain) {
+                resumeOnAudioFocusGain = false;
+                nativeOnMediaAction(NATIVE_PLAY, 0);
+            }
+        }
+    };
+
+    private void requestAudioFocusIfNeeded() {
+        if (audioManager == null || hasAudioFocus) return;
+        try {
+            int res;
+            if (Build.VERSION.SDK_INT >= 26) {
+                if (audioFocusRequest == null) {
+                    AudioAttributes attrs = new AudioAttributes.Builder()
+                            .setUsage(AudioAttributes.USAGE_MEDIA)
+                            .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+                            .build();
+                    audioFocusRequest = new AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
+                            .setAudioAttributes(attrs)
+                            .setWillPauseWhenDucked(false)
+                            .setOnAudioFocusChangeListener(audioFocusListener)
+                            .build();
+                }
+                res = audioManager.requestAudioFocus((AudioFocusRequest) audioFocusRequest);
+            } else {
+                res = audioManager.requestAudioFocus(
+                        audioFocusListener,
+                        AudioManager.STREAM_MUSIC,
+                        AudioManager.AUDIOFOCUS_GAIN
+                );
+            }
+            hasAudioFocus = (res == AudioManager.AUDIOFOCUS_REQUEST_GRANTED);
+        } catch (Throwable t) {
+            Log.w("YrPlaybackService", "requestAudioFocusIfNeeded failed: " + t);
+        }
+    }
+
+    private void abandonAudioFocusIfHeld() {
+        if (audioManager == null || !hasAudioFocus) return;
+        try {
+            if (Build.VERSION.SDK_INT >= 26 && audioFocusRequest != null) {
+                audioManager.abandonAudioFocusRequest((AudioFocusRequest) audioFocusRequest);
+            } else {
+                audioManager.abandonAudioFocus(audioFocusListener);
+            }
+        } catch (Throwable ignored) {
+        }
+        hasAudioFocus = false;
+    }
 
     private static String buildMetaKey() {
         Bitmap art = currentArtworkBitmap;
@@ -1948,6 +2035,18 @@ public class YrPlaybackService extends Service {
             }
         });
         mediaSession.setActive(true);
+        audioManager = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
+        try {
+            IntentFilter noisyFilter = new IntentFilter(AudioManager.ACTION_AUDIO_BECOMING_NOISY);
+            if (Build.VERSION.SDK_INT >= 33) {
+                registerReceiver(noisyReceiver, noisyFilter, Context.RECEIVER_NOT_EXPORTED);
+            } else {
+                registerReceiver(noisyReceiver, noisyFilter);
+            }
+            noisyReceiverRegistered = true;
+        } catch (Throwable t) {
+            Log.w("YrPlaybackService", "registerReceiver ACTION_AUDIO_BECOMING_NOISY failed: " + t);
+        }
         activeInstance = this;
         lastMetaKey = "";
         lastNotifPlaying = null;
@@ -1963,6 +2062,8 @@ public class YrPlaybackService extends Service {
         } else if (ACTION_PREV.equals(action)) {
             nativeOnMediaAction(NATIVE_PREV, 0);
         } else if (ACTION_STOP.equals(action)) {
+            resumeOnAudioFocusGain = false;
+            abandonAudioFocusIfHeld();
             nativeOnMediaAction(NATIVE_STOP, 0);
             stopForeground(true);
             stopSelf();
@@ -1994,6 +2095,9 @@ public class YrPlaybackService extends Service {
     }
 
     private void refreshMediaSessionAndNotification() {
+        if (currentPlaying) {
+            requestAudioFocusIfNeeded();
+        }
         if (wakeLock != null) {
             if (currentPlaying && !wakeLock.isHeld()) {
                 wakeLock.acquire(4 * 60 * 60 * 1000L);
@@ -2113,6 +2217,15 @@ public class YrPlaybackService extends Service {
         activeInstance = null;
         lastMetaKey = "";
         lastNotifPlaying = null;
+        resumeOnAudioFocusGain = false;
+        abandonAudioFocusIfHeld();
+        if (noisyReceiverRegistered) {
+            try {
+                unregisterReceiver(noisyReceiver);
+            } catch (Throwable ignored) {
+            }
+            noisyReceiverRegistered = false;
+        }
         if (wakeLock != null && wakeLock.isHeld()) {
             wakeLock.release();
         }
