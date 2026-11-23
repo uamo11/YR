@@ -14,8 +14,11 @@ import android.content.pm.ServiceInfo;
 import android.content.res.ColorStateList;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
+import android.graphics.Canvas;
 import android.graphics.Matrix;
 import android.graphics.Outline;
+import android.graphics.Paint;
+import android.graphics.Path;
 import android.graphics.PixelFormat;
 import android.graphics.SurfaceTexture;
 import android.graphics.Typeface;
@@ -111,7 +114,7 @@ public class YrPlaybackService extends Service {
     private static volatile TextView sVideoSeekBadge = null;
     private static final Handler sUiHandler = new Handler(Looper.getMainLooper());
     private static Runnable sHideSeekBadgeRunnable = null;
-    private static volatile TextView sVideoPauseIcon = null;
+    private static volatile View sVideoPauseIcon = null;
     private static volatile TextView sVideoFullscreenBtn = null;
     private static volatile TextView sVideoFullscreenTitle = null;
     private static volatile boolean sVideoFullscreen = false;
@@ -618,7 +621,7 @@ public class YrPlaybackService extends Service {
             }
         } else {
             try {
-                targetAct.setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED);
+                targetAct.setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_PORTRAIT);
             } catch (Throwable ignored) {
             }
             if (decor != null) {
@@ -813,10 +816,12 @@ public class YrPlaybackService extends Service {
                 final int wx = loc[0] + x;
                 final int wy = loc[1] + y;
                 sVideoActivityRef = new WeakReference<Activity>(act);
-                sCompactX = wx;
-                sCompactY = wy;
-                sCompactW = width;
-                sCompactH = height;
+                if (!sVideoFullscreen) {
+                    sCompactX = wx;
+                    sCompactY = wy;
+                    sCompactW = width;
+                    sCompactH = height;
+                }
                 Log.i("YrPlaybackService", "attachNativeVideo rect=(" + wx + "," + wy + "," + width + "x" + height + ")");
 
                 if (sVideoOverlayRoot == null) {
@@ -980,16 +985,31 @@ public class YrPlaybackService extends Service {
                     sVideoSeekBadge.setVisibility(View.GONE);
                     sVideoOverlayRoot.addView(sVideoSeekBadge);
 
-                    int pauseSz = (int) (52f * badgeDensity);
-                    sVideoPauseIcon = new TextView(act);
-                    sVideoPauseIcon.setText("\u25B6");
-                    sVideoPauseIcon.setTextColor(0xFFFFFFFF);
-                    sVideoPauseIcon.setTextSize(22f);
-                    sVideoPauseIcon.setTypeface(Typeface.DEFAULT_BOLD);
-                    sVideoPauseIcon.setGravity(Gravity.CENTER);
+                    int pauseSz = (int) (56f * badgeDensity);
+                    sVideoPauseIcon = new View(act) {
+                        private final Paint triPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+                        private final Path triPath = new Path();
+                        {
+                            triPaint.setColor(0xFFFFFFFF);
+                            triPaint.setStyle(Paint.Style.FILL);
+                        }
+
+                        @Override
+                        protected void onDraw(Canvas canvas) {
+                            super.onDraw(canvas);
+                            float w = getWidth();
+                            float h = getHeight();
+                            triPath.reset();
+                            triPath.moveTo(w * 0.39f, h * 0.28f);
+                            triPath.lineTo(w * 0.39f, h * 0.72f);
+                            triPath.lineTo(w * 0.72f, h * 0.50f);
+                            triPath.close();
+                            canvas.drawPath(triPath, triPaint);
+                        }
+                    };
                     GradientDrawable pauseBg = new GradientDrawable();
                     pauseBg.setShape(GradientDrawable.OVAL);
-                    pauseBg.setColor(0xAA0A0A0E);
+                    pauseBg.setColor(0xB80A0A0E);
                     sVideoPauseIcon.setBackground(pauseBg);
                     sVideoPauseIcon.setVisibility(View.GONE);
                     FrameLayout.LayoutParams pauseLp = new FrameLayout.LayoutParams(pauseSz, pauseSz);
