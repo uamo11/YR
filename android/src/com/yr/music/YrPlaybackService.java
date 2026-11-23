@@ -114,6 +114,8 @@ public class YrPlaybackService extends Service {
     private static volatile boolean sVideoRenderedFirstFrame = false;
     private static volatile boolean sSeekInFlight = false;
     private static volatile long sLastSeekStartedElapsedMs = 0L;
+    private static volatile long sLastFullscreenToggleElapsedMs = 0L;
+    private static Runnable sShowBufferingSpinnerRunnable = null;
     private static volatile TextView sVideoSeekBadge = null;
     private static final Handler sUiHandler = new Handler(Looper.getMainLooper());
     private static Runnable sHideSeekBadgeRunnable = null;
@@ -180,6 +182,10 @@ public class YrPlaybackService extends Service {
         currentPosMs = posMs;
         currentDurMs = durMs;
 
+        if (sVideoFullscreen) {
+            sUiHandler.post(YrPlaybackService::syncFsHudControls);
+        }
+
         YrPlaybackService svc = activeInstance;
         String metaKey = buildMetaKey();
         if (svc != null
@@ -190,6 +196,39 @@ public class YrPlaybackService extends Service {
             return;
         }
 
+        Intent intent = new Intent(ctx, YrPlaybackService.class);
+        intent.setAction(ACTION_UPDATE);
+        try {
+            if (Build.VERSION.SDK_INT >= 26) {
+                ctx.startForegroundService(intent);
+            } else {
+                ctx.startService(intent);
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private static void publishArtworkBitmap(final Context ctx, final String normalized, final Bitmap raw) {
+        if (ctx == null || raw == null || !normalized.equals(currentArtworkUrl)) {
+            return;
+        }
+        int w = raw.getWidth();
+        int h = raw.getHeight();
+        int maxDim = Math.max(w, h);
+        Bitmap scaled = raw;
+        if (maxDim > 512) {
+            float ratio = 512.0f / maxDim;
+            scaled = Bitmap.createScaledBitmap(
+                    raw,
+                    Math.max(1, Math.round(w * ratio)),
+                    Math.max(1, Math.round(h * ratio)),
+                    true
+            );
+            if (scaled != raw) {
+                raw.recycle();
+            }
+        }
+        currentArtworkBitmap = scaled;
         Intent intent = new Intent(ctx, YrPlaybackService.class);
         intent.setAction(ACTION_UPDATE);
         try {
@@ -216,6 +255,15 @@ public class YrPlaybackService extends Service {
             return;
         }
         new Thread(() -> {
+            if (normalized.startsWith("file://")) {
+                try {
+                    Bitmap raw = BitmapFactory.decodeFile(normalized.substring(7));
+                    publishArtworkBitmap(ctx, normalized, raw);
+                } catch (Throwable t) {
+                    Log.w("YrPlaybackService", "setArtworkUrl local file failed: " + t);
+                }
+                return;
+            }
             HttpURLConnection conn = null;
             try {
                 URL u = new URL(normalized);
@@ -225,35 +273,7 @@ public class YrPlaybackService extends Service {
                 conn.setInstanceFollowRedirects(true);
                 try (InputStream is = conn.getInputStream()) {
                     Bitmap raw = BitmapFactory.decodeStream(is);
-                    if (raw != null && normalized.equals(currentArtworkUrl)) {
-                        int w = raw.getWidth();
-                        int h = raw.getHeight();
-                        int maxDim = Math.max(w, h);
-                        Bitmap scaled = raw;
-                        if (maxDim > 512) {
-                            float ratio = 512.0f / maxDim;
-                            scaled = Bitmap.createScaledBitmap(
-                                    raw,
-                                    Math.max(1, Math.round(w * ratio)),
-                                    Math.max(1, Math.round(h * ratio)),
-                                    true
-                            );
-                            if (scaled != raw) {
-                                raw.recycle();
-                            }
-                        }
-                        currentArtworkBitmap = scaled;
-                        Intent intent = new Intent(ctx, YrPlaybackService.class);
-                        intent.setAction(ACTION_UPDATE);
-                        try {
-                            if (Build.VERSION.SDK_INT >= 26) {
-                                ctx.startForegroundService(intent);
-                            } else {
-                                ctx.startService(intent);
-                            }
-                        } catch (Throwable ignored) {
-                        }
-                    }
+                    publishArtworkBitmap(ctx, normalized, raw);
                 }
             } catch (Throwable t) {
                 Log.w("YrPlaybackService", "setArtworkUrl failed: " + t);
@@ -518,6 +538,35 @@ public class YrPlaybackService extends Service {
         sVideoTextureView.setTransform(matrix);
     }
 
+    private static void cancelPendingBufferingSpinner() {
+        if (sShowBufferingSpinnerRunnable != null) {
+            sUiHandler.removeCallbacks(sShowBufferingSpinnerRunnable);
+            sShowBufferingSpinnerRunnable = null;
+        }
+    }
+
+    private static void maybeSyncSeek(MediaPlayer mp, long targetMs) {
+        if (mp == null || !sVideoPrepared) return;
+        long now = SystemClock.elapsedRealtime();
+        if (sSeekInFlight && (now - sLastSeekStartedElapsedMs) < 7000L) {
+            return;
+        }
+        if ((now - sLastFullscreenToggleElapsedMs) < 1800L) {
+            return;
+        }
+        boolean waitingFirstFrame = !sVideoRenderedFirstFrame && (now - sLastSeekStartedElapsedMs) < 5000L;
+        if (waitingFirstFrame) {
+            return;
+        }
+        try {
+            long cur = mp.getCurrentPosition();
+            if (Math.abs(cur - targetMs) > 2200L) {
+                seekMediaPlayerTo(mp, targetMs, false);
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
     private static void seekMediaPlayerTo(MediaPlayer mp, long posMs, boolean force) {
         if (mp == null) return;
         long now = SystemClock.elapsedRealtime();
@@ -731,6 +780,7 @@ public class YrPlaybackService extends Service {
         if (wm == null) return;
 
         sVideoFullscreen = fullscreen;
+        sLastFullscreenToggleElapsedMs = SystemClock.elapsedRealtime();
         final float fsDensity = targetAct.getResources().getDisplayMetrics().density;
         View decor = (targetAct.getWindow() != null) ? targetAct.getWindow().getDecorView() : null;
         if (fullscreen) {
@@ -820,6 +870,7 @@ public class YrPlaybackService extends Service {
     }
 
     private static void releaseMediaPlayerLocked() {
+        cancelPendingBufferingSpinner();
         sVideoPrepared = false;
         sVideoRenderedFirstFrame = false;
         sSeekInFlight = false;
@@ -848,6 +899,7 @@ public class YrPlaybackService extends Service {
 
     private static void prepareNativeMediaPlayer(final Activity act, final String streamUrl, final String ua) {
         if (act == null || streamUrl == null || streamUrl.isEmpty()) return;
+        cancelPendingBufferingSpinner();
         releaseMediaPlayerLocked();
         if (sVideoSpinner != null) {
             sVideoSpinner.setVisibility(View.VISIBLE);
@@ -870,11 +922,20 @@ public class YrPlaybackService extends Service {
                 if (player != sMediaPlayer) return false;
                 if (what == MediaPlayer.MEDIA_INFO_VIDEO_RENDERING_START
                         || what == MediaPlayer.MEDIA_INFO_BUFFERING_END) {
+                    cancelPendingBufferingSpinner();
                     sVideoRenderedFirstFrame = true;
                     if (sVideoSpinner != null) sVideoSpinner.setVisibility(View.GONE);
                 } else if (what == MediaPlayer.MEDIA_INFO_BUFFERING_START) {
-                    if (!sVideoRenderedFirstFrame && sVideoSpinner != null) {
-                        sVideoSpinner.setVisibility(View.VISIBLE);
+                    if (!sVideoRenderedFirstFrame) {
+                        if (sVideoSpinner != null) sVideoSpinner.setVisibility(View.VISIBLE);
+                    } else {
+                        cancelPendingBufferingSpinner();
+                        sShowBufferingSpinnerRunnable = () -> {
+                            if (player == sMediaPlayer && sVideoWantedVisible && sVideoSpinner != null) {
+                                sVideoSpinner.setVisibility(View.VISIBLE);
+                            }
+                        };
+                        sUiHandler.postDelayed(sShowBufferingSpinnerRunnable, 450L);
                     }
                 }
                 return false;
@@ -882,17 +943,18 @@ public class YrPlaybackService extends Service {
             mp.setOnSeekCompleteListener(player -> {
                 if (player != sMediaPlayer) return;
                 sSeekInFlight = false;
+                cancelPendingBufferingSpinner();
                 if (sVideoSpinner != null) sVideoSpinner.setVisibility(View.GONE);
             });
             mp.setOnPreparedListener(player -> {
                 if (player != sMediaPlayer) return;
                 sVideoPrepared = true;
                 player.setVolume(0f, 0f);
-                if (sVideoSpinner != null) {
-                    sVideoSpinner.setVisibility(View.GONE);
-                }
                 if (sPendingPosMs > 1200) {
                     seekMediaPlayerTo(player, sPendingPosMs, true);
+                } else if (sVideoSpinner != null) {
+                    cancelPendingBufferingSpinner();
+                    sVideoSpinner.setVisibility(View.GONE);
                 }
                 if (Math.abs(sPendingSpeed - 1.0f) > 0.03f) {
                     applySpeedToMediaPlayer(player, sPendingSpeed);
@@ -910,6 +972,7 @@ public class YrPlaybackService extends Service {
             mp.setOnErrorListener((player, what, extra) -> {
                 Log.w("YrPlaybackService", "Native MediaPlayer error what=" + what + " extra=" + extra);
                 if (player != sMediaPlayer) return true;
+                cancelPendingBufferingSpinner();
                 if (!sTriedFallback && sVideoFallbackUrl != null && !sVideoFallbackUrl.isEmpty()) {
                     sTriedFallback = true;
                     Log.i("YrPlaybackService", "Retrying fallback HLS video stream");
@@ -1108,6 +1171,7 @@ public class YrPlaybackService extends Service {
                         public void onSurfaceTextureUpdated(SurfaceTexture st) {
                             if (sVideoPrepared) {
                                 sVideoRenderedFirstFrame = true;
+                                cancelPendingBufferingSpinner();
                                 if (sVideoSpinner != null && sVideoSpinner.getVisibility() != View.GONE) {
                                     sVideoSpinner.setVisibility(View.GONE);
                                 }
@@ -1456,9 +1520,7 @@ public class YrPlaybackService extends Service {
                         } else if (!playing && sMediaPlayer.isPlaying()) {
                             sMediaPlayer.pause();
                         }
-                        if (Math.abs(sMediaPlayer.getCurrentPosition() - startMs) > 2200) {
-                            seekMediaPlayerTo(sMediaPlayer, startMs, false);
-                        }
+                        maybeSyncSeek(sMediaPlayer, startMs);
                     } catch (Throwable ignored) {
                     }
                 }
@@ -1487,14 +1549,31 @@ public class YrPlaybackService extends Service {
                 } else if (!playing && mp.isPlaying()) {
                     mp.pause();
                 }
-                long cur = mp.getCurrentPosition();
-                long now = SystemClock.elapsedRealtime();
-                boolean waitingFirstFrame = !sVideoRenderedFirstFrame && (now - sLastSeekStartedElapsedMs) < 5000L;
-                if (!waitingFirstFrame && Math.abs(cur - posMs) > 2200) {
-                    seekMediaPlayerTo(mp, posMs, false);
-                }
+                maybeSyncSeek(mp, posMs);
                 if (Math.abs(sLastAppliedSpeed - speed) > 0.03f) {
                     applySpeedToMediaPlayer(mp, speed);
+                }
+            } catch (Throwable ignored) {
+            }
+        });
+    }
+
+    public static void prepareNextEmbeddedVideo(final Context ctx) {
+        new Handler(Looper.getMainLooper()).post(() -> {
+            try {
+                sVideoUrl = null;
+                sVideoFallbackUrl = null;
+                sVideoUserAgent = null;
+                sTriedFallback = false;
+                releaseMediaPlayerLocked();
+                if (sVideoWantedVisible && sVideoOverlayRoot != null && !sActivityPaused) {
+                    sVideoOverlayRoot.setVisibility(View.VISIBLE);
+                }
+                if (sVideoWantedVisible && sVideoSpinner != null) {
+                    sVideoSpinner.setVisibility(View.VISIBLE);
+                }
+                if (sVideoFullscreen) {
+                    setFullscreenHudVisible(true);
                 }
             } catch (Throwable ignored) {
             }
@@ -1565,6 +1644,7 @@ public class YrPlaybackService extends Service {
     public static void destroyEmbeddedVideo(final Context ctx) {
         new Handler(Looper.getMainLooper()).post(() -> {
             try {
+                cancelPendingBufferingSpinner();
                 sVideoWantedVisible = false;
                 if (sVideoFullscreen) {
                     setVideoFullscreen(null, false);

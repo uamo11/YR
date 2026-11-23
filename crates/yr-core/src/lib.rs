@@ -1,4 +1,5 @@
 pub mod image_cache;
+pub mod lyrics_cache;
 pub mod models;
 pub mod queue;
 pub mod store;

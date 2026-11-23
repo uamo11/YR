@@ -403,7 +403,7 @@ async fn play_track_bg(
             0,
             track.duration_secs.unwrap_or(0) * 1000,
         );
-        let art_bg = track_thumb_url(track.thumbnail_url.as_deref(), &track.id);
+        let art_bg = resolve_track_cover_uri(&track);
         crate::android_media::set_artwork_url(art_bg.as_deref().unwrap_or(""));
     }
 
@@ -1440,6 +1440,43 @@ impl YrApp {
         });
     }
 
+    fn trigger_smart_download_sync(&mut self) {
+        let max_songs = self.store.data.config.max_smart_download_songs.max(1);
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut candidates: Vec<Track> = Vec::new();
+        for dl in &self.downloads {
+            if matches!(dl.status, DownloadStatus::Failed(_))
+                && seen.insert(dl.track.id.clone())
+            {
+                candidates.push(dl.track.clone());
+            }
+        }
+        for t in self
+            .store
+            .data
+            .liked_tracks
+            .iter()
+            .chain(self.store.data.recent_tracks.iter())
+        {
+            if seen.insert(t.id.clone()) {
+                candidates.push(t.clone());
+            }
+        }
+        let mut triggered = 0usize;
+        for t in candidates {
+            if triggered >= max_songs {
+                break;
+            }
+            self.maybe_smart_download_track(&t, false, true);
+            triggered += 1;
+        }
+        self.set_banner(if triggered > 0 {
+            format!("Sincronizando {triggered} canciones offline...")
+        } else {
+            "Sin canciones pendientes para sincronizar".to_string()
+        });
+    }
+
     fn maybe_smart_download_track(
         &self,
         track: &Track,
@@ -1496,8 +1533,25 @@ impl YrApp {
     }
 
     fn load_lyrics(&mut self, track: Track, ctx: &egui::Context) {
+        self.load_lyrics_with_options(track, ctx, false);
+    }
+
+    fn load_lyrics_with_options(
+        &mut self,
+        track: Track,
+        ctx: &egui::Context,
+        force_refresh: bool,
+    ) {
         self.lyrics_track_id = Some(track.id.clone());
         self.lyrics_data = None;
+        if !force_refresh {
+            let lyrics_dir = self.data_dir.join("lyrics_cache");
+            if let Some(cached) = yr_core::lyrics_cache::load_cached_lyrics(&lyrics_dir, &track.id) {
+                self.lyrics_data = Some(cached);
+                self.lyrics_loading = false;
+                return;
+            }
+        }
         if track.local_path.is_some() || track.id.starts_with("local_") {
             self.lyrics_loading = false;
             return;
@@ -1628,7 +1682,7 @@ impl YrApp {
             self.video_stream_loading = false;
             self.video_stream_error = None;
             self.last_video_attached = None;
-            crate::android_media::hide_embedded_video();
+            crate::android_media::prepare_next_embedded_video();
             self.resolve_video_for_track(track.id.clone(), ctx);
         }
         self.lyrics_data = None;
@@ -1639,7 +1693,7 @@ impl YrApp {
         self.sponsor_track_id = Some(track.id.clone());
         self.sponsor_segments.clear();
         self.sponsor_skipped_idx = None;
-        let art_cover = track_thumb_url(track.thumbnail_url.as_deref(), &track.id);
+        let art_cover = resolve_track_cover_uri(&track);
         self.ensure_cover_color(art_cover.as_deref(), ctx);
 
         // Preload synced lyrics and related recommendations when the player is visible.
@@ -1657,8 +1711,7 @@ impl YrApp {
                 0,
                 track.duration_secs.unwrap_or(0) * 1000,
             );
-            let art_bg = track_thumb_url(track.thumbnail_url.as_deref(), &track.id);
-            crate::android_media::set_artwork_url(art_bg.as_deref().unwrap_or(""));
+            crate::android_media::set_artwork_url(art_cover.as_deref().unwrap_or(""));
         }
 
         if self.store.data.config.sponsorblock_enabled {
@@ -1964,6 +2017,13 @@ impl YrApp {
                     }
                 }
                 AppEvent::LyricsLoaded { track_id, result } => {
+                    if let Ok(Some(ref data)) = result {
+                        let _ = yr_core::lyrics_cache::save_cached_lyrics(
+                            &self.data_dir.join("lyrics_cache"),
+                            &track_id,
+                            data,
+                        );
+                    }
                     if self.lyrics_track_id.as_deref() == Some(&track_id) {
                         self.lyrics_loading = false;
                         self.lyrics_data = match result {
@@ -2038,11 +2098,11 @@ impl YrApp {
                             self.sponsor_track_id = Some(track.id.clone());
                             self.sponsor_segments.clear();
                             self.sponsor_skipped_idx = None;
-                            let art_cover = track_thumb_url(track.thumbnail_url.as_deref(), &track.id);
+                            let art_cover = resolve_track_cover_uri(&track);
                             self.ensure_cover_color(art_cover.as_deref(), ctx);
                             if self.store.data.config.notifications_enabled {
                                 crate::android_media::set_artwork_url(
-                                    track.thumbnail_url.as_deref().unwrap_or(""),
+                                    art_cover.as_deref().unwrap_or(""),
                                 );
                             }
                             self.load_lyrics(track.clone(), ctx);
@@ -2055,7 +2115,7 @@ impl YrApp {
                                 self.video_stream_loading = false;
                                 self.video_stream_error = None;
                                 self.last_video_attached = None;
-                                crate::android_media::hide_embedded_video();
+                                crate::android_media::prepare_next_embedded_video();
                                 self.resolve_video_for_track(track.id, ctx);
                             }
                         }
@@ -2071,6 +2131,7 @@ impl YrApp {
                             }
                             Err(e) => {
                                 self.video_stream_error = Some(e);
+                                crate::android_media::hide_embedded_video();
                             }
                         }
                     }
@@ -6213,8 +6274,21 @@ impl YrApp {
             .iter()
             .filter(|d| d.status == DownloadStatus::Completed)
             .count();
+        let in_progress_count = self
+            .downloads
+            .iter()
+            .filter(|d| matches!(d.status, DownloadStatus::Downloading | DownloadStatus::Queued))
+            .count();
+        let failed_count = self
+            .downloads
+            .iter()
+            .filter(|d| matches!(d.status, DownloadStatus::Failed(_)))
+            .count();
         let max_songs = self.store.data.config.max_smart_download_songs.max(1);
         let smart_on = self.store.data.config.smart_downloads;
+        let wifi_blocked = smart_on
+            && self.store.data.config.wifi_only_downloads
+            && !crate::android_media::is_wifi_connected();
 
         ui.add_space(4.0);
         egui::Frame::new()
@@ -6269,6 +6343,27 @@ impl YrApp {
                     .size(12.0)
                     .color(quota_color),
                 );
+                if in_progress_count > 0 {
+                    ui.label(
+                        RichText::new(format!(
+                            "Descargando {in_progress_count} en segundo plano..."
+                        ))
+                        .size(11.5)
+                        .color(Color32::from_rgb(130, 195, 255)),
+                    );
+                } else if wifi_blocked {
+                    ui.label(
+                        RichText::new("En pausa • Esperando conexión Wi-Fi")
+                            .size(11.5)
+                            .color(Color32::from_rgb(245, 185, 66)),
+                    );
+                } else if failed_count > 0 {
+                    ui.label(
+                        RichText::new(format!("{failed_count} con error • Toca Sincronizar"))
+                            .size(11.5)
+                            .color(ACCENT_RED),
+                    );
+                }
                 ui.add_space(6.0);
                 let ratio = (total_completed as f32 / max_songs as f32).clamp(0.0, 1.0);
                 let (bar_rect, _) =
@@ -6296,28 +6391,60 @@ impl YrApp {
         ui.add_space(6.0);
 
         if !completed.is_empty() {
+            ui.allocate_ui(Vec2::new(ui.available_width(), 34.0), |ui| {
+                egui::ScrollArea::horizontal()
+                    .id_salt("downloads_actions_row")
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            if icons::icon_pill_button(
+                                ui,
+                                icons::Icon::Play,
+                                "Reproducir todo offline",
+                                BG_ELEVATED,
+                                TEXT_PRIMARY,
+                            )
+                            .clicked()
+                            {
+                                self.play_track_in_list(completed.clone(), 0, ctx);
+                            }
+                            if icons::icon_pill_button(
+                                ui,
+                                icons::Icon::Shuffle,
+                                "Aleatorio",
+                                BG_ELEVATED,
+                                TEXT_PRIMARY,
+                            )
+                            .clicked()
+                            {
+                                self.play_tracks_shuffled(completed.clone(), ctx);
+                            }
+                            if icons::icon_pill_button(
+                                ui,
+                                icons::Icon::Refresh,
+                                "Sincronizar",
+                                BG_ELEVATED,
+                                TEXT_PRIMARY,
+                            )
+                            .clicked()
+                            {
+                                self.trigger_smart_download_sync();
+                            }
+                        });
+                    });
+            });
+            ui.add_space(6.0);
+        } else if !self.downloads.is_empty() {
             ui.horizontal(|ui| {
                 if icons::icon_pill_button(
                     ui,
-                    icons::Icon::Play,
-                    "Reproducir todo offline",
+                    icons::Icon::Refresh,
+                    "Sincronizar",
                     BG_ELEVATED,
                     TEXT_PRIMARY,
                 )
                 .clicked()
                 {
-                    self.play_track_in_list(completed.clone(), 0, ctx);
-                }
-                if icons::icon_pill_button(
-                    ui,
-                    icons::Icon::Shuffle,
-                    "Aleatorio",
-                    BG_ELEVATED,
-                    TEXT_PRIMARY,
-                )
-                .clicked()
-                {
-                    self.play_tracks_shuffled(completed.clone(), ctx);
+                    self.trigger_smart_download_sync();
                 }
             });
             ui.add_space(6.0);
@@ -6355,17 +6482,30 @@ impl YrApp {
                         .color(TEXT_SECONDARY),
                     );
                     ui.add_space(14.0);
-                    if icons::icon_pill_button(
-                        ui,
-                        icons::Icon::Home,
-                        "Explorar música",
-                        ACCENT_RED,
-                        Color32::WHITE,
-                    )
-                    .clicked()
-                    {
-                        self.active_tab = NavTab::Home;
-                    }
+                    ui.horizontal(|ui| {
+                        if icons::icon_pill_button(
+                            ui,
+                            icons::Icon::Home,
+                            "Explorar música",
+                            ACCENT_RED,
+                            Color32::WHITE,
+                        )
+                        .clicked()
+                        {
+                            self.active_tab = NavTab::Home;
+                        }
+                        if icons::icon_pill_button(
+                            ui,
+                            icons::Icon::Refresh,
+                            "Sincronizar recientes",
+                            BG_ELEVATED,
+                            TEXT_PRIMARY,
+                        )
+                        .clicked()
+                        {
+                            self.trigger_smart_download_sync();
+                        }
+                    });
                 });
                 return;
             }
@@ -7611,7 +7751,7 @@ impl YrApp {
                                 )
                                 .clicked()
                                 {
-                                    self.load_lyrics(track.clone(), ctx);
+                                    self.load_lyrics_with_options(track.clone(), ctx, true);
                                 }
                                 if let Some(d) = &self.lyrics_data {
                                     let has_lyrics = !d.synced.is_empty()
@@ -7746,6 +7886,14 @@ impl YrApp {
                                                 self.audio.seek(Duration::from_secs_f64(
                                                     line.time_secs,
                                                 ));
+                                                self.last_media_sync = None;
+                                                if self.is_video_mode {
+                                                    crate::android_media::sync_native_video(
+                                                        snap.status == PlaybackStatus::Playing,
+                                                        (line.time_secs * 1000.0).max(0.0) as u64,
+                                                        snap.speed,
+                                                    );
+                                                }
                                             }
                                             ui.add_space(6.0);
                                         }
@@ -7810,7 +7958,7 @@ impl YrApp {
                                             )
                                             .clicked()
                                             {
-                                                self.load_lyrics(track.clone(), ctx);
+                                                self.load_lyrics_with_options(track.clone(), ctx, true);
                                             }
                                         }
                                     });
@@ -7830,7 +7978,7 @@ impl YrApp {
                                 )
                                 .clicked()
                                 {
-                                    self.load_lyrics(track.clone(), ctx);
+                                    self.load_lyrics_with_options(track.clone(), ctx, true);
                                 }
                             }
                         } else {
@@ -7849,7 +7997,7 @@ impl YrApp {
                             )
                             .clicked()
                             {
-                                self.load_lyrics(track.clone(), ctx);
+                                self.load_lyrics_with_options(track.clone(), ctx, true);
                             }
                         }
                     } else if self.show_related {
@@ -9580,7 +9728,7 @@ impl YrApp {
                     ui.label(RichText::new("Ajusta los mixes de inicio según tu historial de reproducción, canciones favoritas y artistas seguidos.").size(12.0).color(TEXT_SECONDARY));
                 }
                 SettingsCategory::About => {
-                    ui.heading("YR Music v0.9.7");
+                    ui.heading("YR Music v0.9.8");
                     ui.label("Cliente nativo de música 100% en Rust para Android y escritorio.");
                     ui.add_space(6.0);
                     ui.label(RichText::new("Motor de audio Symphonia PCM con DSP Morphe 3D binaural, reproductor integrado de video en la app, auto-scroll inteligente de cola, prefetch predictivo en disco y compatibilidad completa con YouTube Music.").size(12.0).color(TEXT_SECONDARY));
@@ -10759,7 +10907,7 @@ impl YrApp {
                         }
                         if menu_row(ui, icons::Icon::Help, "Ayuda y comentarios").clicked() {
                             self.show_account_modal = false;
-                            self.set_banner("YR Music v0.9.7 • Pure Rust");
+                            self.set_banner("YR Music v0.9.8 • Pure Rust");
                         }
 
                         #[cfg(target_os = "android")]
