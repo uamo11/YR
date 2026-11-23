@@ -605,6 +605,65 @@ fn parse_responsive_track(r: &Value) -> Option<(Track, String)> {
     Some((track, subtitle))
 }
 
+fn is_non_artist_segment(seg: &str) -> bool {
+    let low = seg.trim().to_lowercase();
+    if low.is_empty() {
+        return true;
+    }
+    let media_types = [
+        "canción",
+        "cancion",
+        "song",
+        "video",
+        "vídeo",
+        "álbum",
+        "album",
+        "sencillo",
+        "single",
+        "ep",
+        "playlist",
+        "lista",
+        "episodio",
+        "episode",
+        "pódcast",
+        "podcast",
+    ];
+    if media_types.contains(&low.as_str()) {
+        return true;
+    }
+    let count_tokens = [
+        "vistas",
+        "views",
+        "reproducciones",
+        "plays",
+        "suscriptores",
+        "subscribers",
+        "canciones",
+        "songs",
+    ];
+    if count_tokens.iter().any(|tok| low.contains(tok)) {
+        return true;
+    }
+    if seg.contains(':') && parse_duration_text(seg).is_some() {
+        return true;
+    }
+    let trimmed = seg.trim();
+    if trimmed.len() == 4 && trimmed.chars().all(|c| c.is_ascii_digit()) {
+        return true;
+    }
+    false
+}
+
+pub fn extract_artist_from_subtitle(subtitle: &str) -> String {
+    for part in subtitle.split('•') {
+        let seg = part.trim();
+        if !is_non_artist_segment(seg) {
+            return seg.to_string();
+        }
+    }
+    "YouTube Music".to_string()
+}
+
 fn parse_two_row_card(r: &Value) -> Option<HomeShelfCard> {
     let title = runs_text(r.get("title"));
     if title.is_empty() {
@@ -623,21 +682,40 @@ fn parse_two_row_card(r: &Value) -> Option<HomeShelfCard> {
         .and_then(|n| n.pointer("/watchEndpoint/videoId"))
         .and_then(|v| v.as_str())
     {
-        let artist = subtitle
-            .split('•')
-            .nth(1)
-            .or_else(|| subtitle.split('•').next())
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| "YouTube Music".to_string());
+        let (run_artist, run_artist_id) = r
+            .pointer("/subtitle/runs")
+            .and_then(|v| v.as_array())
+            .and_then(|runs| {
+                runs.iter().find_map(|run| {
+                    let browse_id = run
+                        .pointer("/navigationEndpoint/browseEndpoint/browseId")
+                        .and_then(|v| v.as_str())?;
+                    let page_type = run
+                        .pointer("/navigationEndpoint/browseEndpoint/browseEndpointContextSupportedConfigs/browseEndpointContextMusicConfig/pageType")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    if page_type == "MUSIC_PAGE_TYPE_ARTIST" || browse_id.starts_with("UC") {
+                        let name = run
+                            .get("text")
+                            .and_then(|t| t.as_str())
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())?;
+                        Some((name.to_string(), Some(browse_id.to_string())))
+                    } else {
+                        None
+                    }
+                })
+            })
+            .unwrap_or_else(|| (extract_artist_from_subtitle(&subtitle), None));
+        let duration_secs = parse_duration_text(&subtitle);
         let track = Track {
             id: vid.to_string(),
             title: title.clone(),
-            artist,
-            artist_id: None,
+            artist: run_artist,
+            artist_id: run_artist_id,
             album: None,
             album_id: None,
-            duration_secs: None,
+            duration_secs,
             thumbnail_url: thumbnail_url.clone(),
             local_path: None,
         };
@@ -1818,5 +1896,25 @@ mod tests {
         ];
         let best = pick_best_lrclib_entry(&entries, Some(197)).expect("picked best");
         assert_eq!(best["plainLyrics"], "Right duration synced");
+    }
+
+    #[test]
+    fn extract_artist_from_subtitle_skips_views_types_and_durations() {
+        assert_eq!(
+            extract_artist_from_subtitle("Beéle • 213 M de vistas"),
+            "Beéle"
+        );
+        assert_eq!(
+            extract_artist_from_subtitle("Canción • Chris Lebron • 3:16"),
+            "Chris Lebron"
+        );
+        assert_eq!(
+            extract_artist_from_subtitle("Video • Camila • 42 M de vistas"),
+            "Camila"
+        );
+        assert_eq!(
+            extract_artist_from_subtitle("Álbum • Bad Bunny • 2025"),
+            "Bad Bunny"
+        );
     }
 }

@@ -4828,10 +4828,10 @@ impl YrApp {
                         });
                     });
 
-                    // Right-hand vertical action rail (Like, Save, Radio, More)
+                    // Right-hand vertical action rail (Like, Download, Save, Radio, More)
                     ui.allocate_ui(Vec2::new(rail_w, body_h), |ui| {
                         ui.vertical_centered(|ui| {
-                            ui.add_space((body_h - 206.0).max(0.0) * 0.5);
+                            ui.add_space((body_h - 252.0).max(0.0) * 0.5);
                             let liked = self.store.is_liked(&track.id);
                             let rail_bg = Color32::from_black_alpha(120);
                             if icons::icon_button(
@@ -4847,7 +4847,30 @@ impl YrApp {
                             {
                                 self.store.toggle_like(track.clone());
                             }
-                            ui.add_space(12.0);
+                            ui.add_space(10.0);
+                            let is_downloaded = track.local_path.is_some()
+                                || self.downloads.iter().any(|d| {
+                                    d.track.id == track.id && d.status == DownloadStatus::Completed
+                                });
+                            if icons::icon_button(
+                                ui,
+                                if is_downloaded {
+                                    icons::Icon::DownloadDone
+                                } else {
+                                    icons::Icon::Download
+                                },
+                                42.0,
+                                20.0,
+                                rail_bg,
+                                if is_downloaded { GREEN_OK } else { Color32::WHITE },
+                                21.0,
+                            )
+                            .clicked()
+                                && !is_downloaded
+                            {
+                                self.enqueue_download(track.clone(), ctx);
+                            }
+                            ui.add_space(10.0);
                             if icons::icon_button(
                                 ui,
                                 icons::Icon::PlaylistAdd,
@@ -4861,7 +4884,7 @@ impl YrApp {
                             {
                                 self.playlist_picker_track = Some(track.clone());
                             }
-                            ui.add_space(12.0);
+                            ui.add_space(10.0);
                             if icons::icon_button(
                                 ui,
                                 icons::Icon::Radio,
@@ -4875,7 +4898,7 @@ impl YrApp {
                             {
                                 self.start_radio(track.id.clone(), ctx);
                             }
-                            ui.add_space(12.0);
+                            ui.add_space(10.0);
                             if icons::icon_button(
                                 ui,
                                 icons::Icon::MoreVert,
@@ -4987,15 +5010,16 @@ impl YrApp {
                     .max(1.0);
                 let frac = (snap.position_secs / total).clamp(0.0, 1.0) as f32;
                 let (bar_r, _) =
-                    ui.allocate_exact_size(Vec2::new(inner_rect.width(), 3.0), Sense::hover());
+                    ui.allocate_exact_size(Vec2::new(inner_rect.width(), 2.5), Sense::hover());
                 ui.painter()
-                    .rect_filled(bar_r, 1.5, Color32::from_white_alpha(55));
+                    .rect_filled(bar_r, CornerRadius::same(1), Color32::from_white_alpha(30));
                 if frac > 0.0 {
                     let fill_r = egui::Rect::from_min_max(
                         bar_r.min,
                         egui::pos2(bar_r.left() + bar_r.width() * frac, bar_r.bottom()),
                     );
-                    ui.painter().rect_filled(fill_r, 1.5, Color32::WHITE);
+                    ui.painter()
+                        .rect_filled(fill_r, CornerRadius::same(1), ACCENT_RED);
                 }
             }
         });
@@ -5195,7 +5219,7 @@ impl YrApp {
                         return;
                     }
 
-                    // Búsquedas recientes visual strip + history rows (matching YT Music)
+                    // Búsquedas recientes visual strip + history rows (unified header)
                     let mut recent_thumbs: Vec<(String, Option<String>)> = self
                         .store
                         .data
@@ -5210,13 +5234,45 @@ impl YrApp {
                         }
                     }
 
-                    if !recent_thumbs.is_empty() {
+                    let history = self.store.data.search_history.clone();
+                    let has_real_search_history =
+                        !history.is_empty() || !self.store.data.search_history_items.is_empty();
+
+                    if has_real_search_history {
+                        ui.add_space(10.0);
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new("Búsquedas recientes")
+                                    .size(13.5)
+                                    .color(TEXT_SECONDARY),
+                            );
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                if icons::icon_pill_button(
+                                    ui,
+                                    icons::Icon::Trash,
+                                    "Borrar todo",
+                                    Color32::from_white_alpha(18),
+                                    TEXT_SECONDARY,
+                                )
+                                .clicked()
+                                {
+                                    self.store.data.search_history.clear();
+                                    self.store.data.search_history_items.clear();
+                                    let _ = self.store.save();
+                                    self.set_banner("Historial de búsqueda borrado");
+                                }
+                            });
+                        });
+                    } else if !recent_thumbs.is_empty() {
                         ui.add_space(10.0);
                         ui.label(
-                            RichText::new("Búsquedas recientes")
+                            RichText::new("Escuchado recientemente")
                                 .size(13.5)
                                 .color(TEXT_SECONDARY),
                         );
+                    }
+
+                    if !recent_thumbs.is_empty() {
                         ui.add_space(6.0);
                         egui::ScrollArea::horizontal()
                             .id_salt("recent_search_thumbs")
@@ -5252,32 +5308,7 @@ impl YrApp {
                             });
                     }
 
-                    let history = self.store.data.search_history.clone();
                     if !history.is_empty() {
-                        ui.add_space(8.0);
-                        ui.horizontal(|ui| {
-                            ui.label(
-                                RichText::new("Búsquedas recientes")
-                                    .size(13.5)
-                                    .color(TEXT_SECONDARY),
-                            );
-                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                if icons::icon_pill_button(
-                                    ui,
-                                    icons::Icon::Trash,
-                                    "Borrar todo",
-                                    Color32::from_white_alpha(18),
-                                    TEXT_SECONDARY,
-                                )
-                                .clicked()
-                                {
-                                    self.store.data.search_history.clear();
-                                    self.store.data.search_history_items.clear();
-                                    let _ = self.store.save();
-                                    self.set_banner("Historial de búsqueda borrado");
-                                }
-                            });
-                        });
                         ui.add_space(4.0);
                         let mut delete_query: Option<String> = None;
                         for item in history.iter().take(6) {
@@ -9924,7 +9955,7 @@ impl YrApp {
                     }
                 }
                 SettingsCategory::About => {
-                    ui.heading("YR Music v0.9.10");
+                    ui.heading("YR Music v0.9.11");
                     ui.label("Cliente nativo de música 100% en Rust para Android y escritorio.");
                     ui.add_space(6.0);
                     ui.label(RichText::new("Motor de audio Symphonia PCM con DSP Morphe 3D binaural, reproductor integrado de video en la app, auto-scroll inteligente de cola, prefetch predictivo en disco y compatibilidad completa con YouTube Music.").size(12.0).color(TEXT_SECONDARY));
@@ -10552,30 +10583,47 @@ impl YrApp {
 
                         ui.add_space(8.0);
 
-                        // Master enable toggle + reset button
+                        // Master enable toggle & loudness normalization (Material 3)
+                        let mut eq_enabled = self.store.data.config.equalizer.enabled;
+                        if settings_toggle_row(
+                            ui,
+                            &mut eq_enabled,
+                            "Activar ecualizador",
+                            "",
+                        ) {
+                            self.store.data.config.equalizer.enabled = eq_enabled;
+                            changed = true;
+                        }
+
+                        let mut norm = self.store.data.config.equalizer.loudness_normalization;
+                        if settings_toggle_row(
+                            ui,
+                            &mut norm,
+                            "Normalización de volumen",
+                            "",
+                        ) {
+                            self.store.data.config.equalizer.loudness_normalization = norm;
+                            changed = true;
+                        }
+
+                        ui.add_space(6.0);
                         ui.horizontal(|ui| {
-                            let mut eq_enabled = self.store.data.config.equalizer.enabled;
-                            if ui.checkbox(&mut eq_enabled, "Activar ecualizador").changed() {
-                                self.store.data.config.equalizer.enabled = eq_enabled;
-                                changed = true;
-                            }
+                            ui.label(RichText::new("Preajustes de sonido:").size(12.5).color(TEXT_SECONDARY));
                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                if ui.small_button("Reiniciar a Plano").clicked() {
+                                if icons::icon_pill_button(
+                                    ui,
+                                    icons::Icon::Refresh,
+                                    "Reiniciar a Plano",
+                                    BG_ELEVATED,
+                                    Color32::WHITE,
+                                )
+                                .clicked()
+                                {
                                     self.store.data.config.equalizer.apply_preset("Plano");
                                     changed = true;
                                 }
                             });
                         });
-
-                        ui.add_space(4.0);
-                        let mut norm = self.store.data.config.equalizer.loudness_normalization;
-                        if ui.checkbox(&mut norm, "Normalización de volumen").changed() {
-                            self.store.data.config.equalizer.loudness_normalization = norm;
-                            changed = true;
-                        }
-
-                        ui.add_space(8.0);
-                        ui.label(RichText::new("Preajustes de sonido:").size(12.5).color(TEXT_SECONDARY));
                         ui.add_space(4.0);
                         ui.horizontal_wrapped(|ui| {
                             ui.spacing_mut().item_spacing = Vec2::new(6.0, 6.0);
@@ -11105,7 +11153,7 @@ impl YrApp {
                         }
                         if menu_row(ui, icons::Icon::Help, "Ayuda y comentarios").clicked() {
                             self.show_account_modal = false;
-                            self.set_banner("YR Music v0.9.10 • Pure Rust");
+                            self.set_banner("YR Music v0.9.11 • Pure Rust");
                         }
 
                         #[cfg(target_os = "android")]
@@ -11114,12 +11162,7 @@ impl YrApp {
                         let footer_reserve = 36.0;
                         let rem_h = (screen.bottom() - ui.cursor().top() - footer_reserve).max(14.0);
                         ui.add_space(rem_h);
-                        ui.horizontal(|ui| {
-                            ui.spacing_mut().item_spacing.x = 0.0;
-                            let pad = (inner_w - 230.0).max(0.0) * 0.5;
-                            if pad > 0.0 {
-                                ui.add_space(pad);
-                            }
+                        ui.vertical_centered(|ui| {
                             ui.label(
                                 RichText::new("Polít. de Privacidad • Condic. del Servicio")
                                     .size(11.0)
@@ -12104,8 +12147,41 @@ fn paint_ready_image(
         .fit_to_exact_size(size)
         .corner_radius(corner_radius);
     match img.load_for_size(ui.ctx(), size) {
-        Ok(egui::load::TexturePoll::Ready { .. }) => {
-            img.paint_at(ui, rect);
+        Ok(egui::load::TexturePoll::Ready { texture }) => {
+            if texture.size.x > 0.0
+                && texture.size.y > 0.0
+                && rect.width() > 0.0
+                && rect.height() > 0.0
+            {
+                let tex_aspect = texture.size.x / texture.size.y;
+                let dst_aspect = rect.width() / rect.height();
+                let uv = if (tex_aspect - dst_aspect).abs() > 0.02 {
+                    if tex_aspect > dst_aspect {
+                        let keep = (dst_aspect / tex_aspect).clamp(0.1, 1.0);
+                        let margin = (1.0 - keep) * 0.5;
+                        egui::Rect::from_min_max(
+                            egui::pos2(margin, 0.0),
+                            egui::pos2(1.0 - margin, 1.0),
+                        )
+                    } else {
+                        let keep = (tex_aspect / dst_aspect).clamp(0.1, 1.0);
+                        let margin = (1.0 - keep) * 0.5;
+                        egui::Rect::from_min_max(
+                            egui::pos2(0.0, margin),
+                            egui::pos2(1.0, 1.0 - margin),
+                        )
+                    }
+                } else {
+                    egui::Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0))
+                };
+                Image::from_texture(texture)
+                    .maintain_aspect_ratio(false)
+                    .uv(uv)
+                    .corner_radius(corner_radius)
+                    .paint_at(ui, rect);
+            } else {
+                img.paint_at(ui, rect);
+            }
             true
         }
         Ok(egui::load::TexturePoll::Pending { .. }) => {
