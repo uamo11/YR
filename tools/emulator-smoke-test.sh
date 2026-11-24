@@ -84,7 +84,7 @@ adb shell screencap -p /data/local/tmp/03_search_all.png
 adb pull /data/local/tmp/03_search_all.png screenshots/03_search_all.png
 
 # 3b. Open top Artist ("Daft Punk") from unified search results
-adb shell input tap 540 650
+adb shell input tap 450 745
 sleep 4
 adb shell screencap -p /data/local/tmp/03b_artist_detail.png
 adb pull /data/local/tmp/03b_artist_detail.png screenshots/03b_artist_detail.png
