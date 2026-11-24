@@ -154,6 +154,8 @@ pub struct AppConfig {
     pub seek_seconds: u32,
     #[serde(default = "default_true")]
     pub gapless_playback: bool,
+    #[serde(default)]
+    pub lyrics_large_text: bool,
 }
 
 fn default_seek_seconds() -> u32 {
@@ -211,6 +213,7 @@ impl Default for AppConfig {
             restricted_mode: false,
             seek_seconds: default_seek_seconds(),
             gapless_playback: true,
+            lyrics_large_text: false,
         }
     }
 }
@@ -1169,6 +1172,20 @@ mod tests {
         assert!(badges.iter().all(|b| b.unlocked));
         let fan = badges.iter().find(|b| b.id == "top_artist_fan").unwrap();
         assert_eq!(fan.title, "Fan de Chris Lebron");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn lyrics_large_text_defaults_false_and_roundtrips() {
+        let dir = std::env::temp_dir().join(format!("yr_lyrics_cfg_{}", Uuid::new_v4()));
+        {
+            let mut store = LibraryStore::load_or_default(&dir);
+            assert!(!store.data.config.lyrics_large_text);
+            store.data.config.lyrics_large_text = true;
+            store.save().unwrap();
+        }
+        let reloaded = LibraryStore::load_or_default(&dir);
+        assert!(reloaded.data.config.lyrics_large_text);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

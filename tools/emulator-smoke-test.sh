@@ -37,11 +37,11 @@ if [ -z "$PID" ]; then
 fi
 echo "YR Music running with PID: $PID"
 
-# 1. Home tab (with moods, 4-row quick picks, Accesos directos grid, carousels)
+# 1. Home tab (edge-to-edge mood chips, quick picks, Accesos directos)
 adb shell screencap -p /data/local/tmp/01_home.png
 adb pull /data/local/tmp/01_home.png screenshots/01_home.png
 
-# 1a. Scroll Home down to capture Accesos directos grid + personalized sections
+# 1a. Scroll Home down to capture Accesos directos grid + carousels
 adb shell input swipe 540 1650 540 650 350
 sleep 2
 adb shell screencap -p /data/local/tmp/01a_home_scrolled.png
@@ -49,52 +49,47 @@ adb pull /data/local/tmp/01a_home_scrolled.png screenshots/01a_home_scrolled.png
 adb shell input swipe 540 650 540 1650 350
 sleep 1
 
-# 1b. Open Google Login modal and WebView
-adb shell input tap 820 140
-sleep 1
-adb shell screencap -p /data/local/tmp/01b_google_login_modal.png
-adb pull /data/local/tmp/01b_google_login_modal.png screenshots/01b_google_login_modal.png
-# Tap "Iniciar sesión con Google" inside modal
-adb shell input tap 365 929
-sleep 6
-adb shell screencap -p /data/local/tmp/01c_google_webview.png
-adb pull /data/local/tmp/01c_google_webview.png screenshots/01c_google_webview.png
-adb logcat -d | grep -i "YR_LOGIN" || true
-# Close WebView dialog via its top-right "CERRAR" button (940, 80) + fallback BACK if still open
-adb shell input tap 940 80
-sleep 1
-# Tap modal "Cerrar" button (bottom-right inside centered modal)
-adb shell input tap 882 1660
+# 2. Account modal, Tu Recap (nav-bar clearance) & Insignias modal
+adb shell input tap 895 140
+sleep 1.5
+adb shell screencap -p /data/local/tmp/02a_account_modal.png
+adb pull /data/local/tmp/02a_account_modal.png screenshots/02a_account_modal.png
+
+adb shell input tap 540 1070
+sleep 1.5
+adb shell screencap -p /data/local/tmp/02b_recap_modal.png
+adb pull /data/local/tmp/02b_recap_modal.png screenshots/02b_recap_modal.png
+adb shell input keyevent 4
 sleep 1
 
-# 2. Search tab (third column at 4-tab bottom nav)
-adb shell input tap 675 2160
-sleep 2
-# Tap search box, type query, tap Buscar button
-adb shell input tap 350 245
+adb shell input tap 895 140
+sleep 1.2
+adb shell input tap 540 1218
+sleep 1.5
+adb shell screencap -p /data/local/tmp/02c_badges_modal.png
+adb pull /data/local/tmp/02c_badges_modal.png screenshots/02c_badges_modal.png
+adb shell input keyevent 4
+sleep 1
+
+# 3. Unified Search ("Todo" default tab)
+adb shell input tap 675 2180
+sleep 1.5
+adb shell input tap 350 265
 sleep 1
 adb shell input text "daft%spunk"
 sleep 1
-adb shell input tap 960 245
+adb shell input tap 974 265
 sleep 5
-adb shell screencap -p /data/local/tmp/02_search.png
-adb pull /data/local/tmp/02_search.png screenshots/02_search.png
+adb shell screencap -p /data/local/tmp/03_search_all.png
+adb pull /data/local/tmp/03_search_all.png screenshots/03_search_all.png
 
-# 2b. Open track row ... menu to verify all actions inside menu
-adb shell input tap 980 520
-sleep 1
-adb shell screencap -p /data/local/tmp/02b_track_menu.png
-adb pull /data/local/tmp/02b_track_menu.png screenshots/02b_track_menu.png
-adb shell input tap 980 520
-sleep 1
-
-# 3. Open Settings (top right gear), trigger local audio demo (2 tracks)
-adb shell input tap 1000 135
-sleep 1
-adb shell input tap 300 1415
+# 4. Samples discovery (Video quick button + interactive seek bar)
+adb shell input tap 405 2180
+sleep 2
+adb shell input tap 450 1100
 sleep 4
-adb shell screencap -p /data/local/tmp/03_local_playing.png
-adb pull /data/local/tmp/03_local_playing.png screenshots/03_local_playing.png
+adb shell screencap -p /data/local/tmp/04_samples_playing.png
+adb pull /data/local/tmp/04_samples_playing.png screenshots/04_samples_playing.png
 
 # Verify ForegroundService, Notification, and MediaSession
 adb shell dumpsys notification --noredact | grep -A 25 "com.yr.music" > screenshots/dumpsys_notif.txt || true
@@ -102,55 +97,45 @@ adb shell dumpsys media_session | grep -A 25 "YrMusicSession" > screenshots/dump
 adb shell dumpsys activity services com.yr.music > screenshots/dumpsys_service.txt || true
 cat screenshots/dumpsys_service.txt
 
-# 4. Seek on progress bar (swipe slider) & Pause
-adb shell input swipe 180 1490 700 1490 300
+# 5. Now Playing (edge-to-edge action pills) + 5-speed Action Sheet
+adb shell input tap 350 1960
+sleep 1.5
+adb shell screencap -p /data/local/tmp/05a_now_playing.png
+adb pull /data/local/tmp/05a_now_playing.png screenshots/05a_now_playing.png
+
+adb shell input tap 988 152
+sleep 1.5
+adb shell screencap -p /data/local/tmp/05b_action_sheet_5speeds.png
+adb pull /data/local/tmp/05b_action_sheet_5speeds.png screenshots/05b_action_sheet_5speeds.png
+adb shell input keyevent 4
 sleep 1
-adb shell input tap 540 1700
+
+# 6. Queue drawer (SIGUIENTE) & Lyrics (LETRA with A+ & Compartir)
+adb shell input tap 195 2215
+sleep 1.5
+adb shell screencap -p /data/local/tmp/06a_queue_tuner.png
+adb pull /data/local/tmp/06a_queue_tuner.png screenshots/06a_queue_tuner.png
+
+adb shell input tap 540 2215
+sleep 3
+adb shell screencap -p /data/local/tmp/06b_lyrics_karaoke.png
+adb pull /data/local/tmp/06b_lyrics_karaoke.png screenshots/06b_lyrics_karaoke.png
+adb shell input keyevent 4
 sleep 1
-adb shell screencap -p /data/local/tmp/04_seek_pause.png
-adb pull /data/local/tmp/04_seek_pause.png screenshots/04_seek_pause.png
 
-# 5. Next track (⏭)
-adb shell input tap 755 1700
-sleep 2
-adb shell screencap -p /data/local/tmp/05_next_track.png
-adb pull /data/local/tmp/05_next_track.png screenshots/05_next_track.png
-
-# 5b. Swipe gesture right on cover art (Prev -> back to Pista 1)
-adb shell input swipe 200 750 850 750 250
-sleep 2
-adb shell screencap -p /data/local/tmp/05b_swipe_prev.png
-adb pull /data/local/tmp/05b_swipe_prev.png screenshots/05b_swipe_prev.png
-
-# 6. Open Queue tab (Cola), reorder Pista 2 up (^), & Letra tab
-adb shell input tap 556 266
+# 7. In-place Video mode in Now Playing
+adb shell input tap 645 152
+sleep 5
+adb shell screencap -p /data/local/tmp/07_video_inplace.png
+adb pull /data/local/tmp/07_video_inplace.png screenshots/07_video_inplace.png
+adb shell input keyevent 4
 sleep 1
-adb shell screencap -p /data/local/tmp/06_queue_editable.png
-adb pull /data/local/tmp/06_queue_editable.png screenshots/06_queue_editable.png
 
-adb shell input swipe 875 678 875 678 120
-sleep 1
-adb shell screencap -p /data/local/tmp/06a_queue_reordered.png
-adb pull /data/local/tmp/06a_queue_reordered.png screenshots/06a_queue_reordered.png
-
-adb shell input tap 404 266
-sleep 2
-adb shell screencap -p /data/local/tmp/06b_lyrics.png
-adb pull /data/local/tmp/06b_lyrics.png screenshots/06b_lyrics.png
-
-# 7. Return to Portada and swipe DOWN on cover art to minimize to Mini-Player
-adb shell input tap 228 266
-sleep 1
-adb shell input swipe 540 550 540 1050 250
-sleep 1
-adb shell screencap -p /data/local/tmp/07_mini_player.png
-adb pull /data/local/tmp/07_mini_player.png screenshots/07_mini_player.png
-
-# 8. Expand notification shade, capture MediaStyle notification controls, tap Siguiente & Pausar, and verify screen-off survival
+# 8. Notification controls, screen-off survival & lockscreen controls
 adb shell cmd statusbar expand-notifications
 sleep 2
-adb shell screencap -p /data/local/tmp/07b_notification_controls.png
-adb pull /data/local/tmp/07b_notification_controls.png screenshots/07b_notification_controls.png
+adb shell screencap -p /data/local/tmp/08a_notification_controls.png
+adb pull /data/local/tmp/08a_notification_controls.png screenshots/08a_notification_controls.png
 adb shell uiautomator dump /data/local/tmp/notif_dump.xml || true
 adb pull /data/local/tmp/notif_dump.xml screenshots/notif_dump.xml || true
 {
@@ -189,11 +174,10 @@ adb shell dumpsys activity services com.yr.music | grep -q "YrPlaybackService" &
     adb shell dumpsys media_session | grep -A 25 "YrMusicSession" || true
 } >> screenshots/dumpsys_media_screen_off.txt
 cat screenshots/dumpsys_media_screen_off.txt
-# Wake to Lockscreen and capture lockscreen media controls
 adb shell input keyevent 26
 sleep 2
-adb shell screencap -p /data/local/tmp/07c_lockscreen_controls.png
-adb pull /data/local/tmp/07c_lockscreen_controls.png screenshots/07c_lockscreen_controls.png
+adb shell screencap -p /data/local/tmp/08b_lockscreen_controls.png
+adb pull /data/local/tmp/08b_lockscreen_controls.png screenshots/08b_lockscreen_controls.png
 adb shell input swipe 540 1900 540 700 300
 sleep 1
 adb shell input text 1234
@@ -202,21 +186,11 @@ adb shell input keyevent 66
 sleep 1
 adb shell locksettings clear --old 1234 || true
 
-# 8b. Re-open Now Playing -> Cola and remove non-playing track (X)
-adb shell input tap 1015 2020
-sleep 1
-adb shell input tap 556 266
-sleep 1
-adb shell input swipe 990 520 990 520 120
-sleep 1
-adb shell screencap -p /data/local/tmp/06c_queue_removed.png
-adb pull /data/local/tmp/06c_queue_removed.png screenshots/06c_queue_removed.png
-
-# 9. 5-minute stress test with Monkey (1500 events * 200ms = 300s)
-adb shell monkey -p com.yr.music --throttle 200 --pct-syskeys 0 1500 || true
+# 9. Monkey stability stress test
+adb shell monkey -p com.yr.music --throttle 150 --pct-syskeys 0 400 || true
 sleep 2
-adb shell screencap -p /data/local/tmp/08_after_monkey.png
-adb pull /data/local/tmp/08_after_monkey.png screenshots/08_after_monkey.png
+adb shell screencap -p /data/local/tmp/09_after_monkey.png
+adb pull /data/local/tmp/09_after_monkey.png screenshots/09_after_monkey.png
 
 PID_AFTER=$(adb shell pidof com.yr.music | tr -d '\r' || true)
 adb logcat -d > emulator-logcat.log

@@ -947,6 +947,7 @@ impl YrApp {
         let timer_tick = Arc::clone(&app.sleep_timer_until);
         let cache_dir_tick = app.data_dir.join("stream_cache");
         let cov_dir_tick = app.data_dir.join("cover_cache");
+        let lyrics_dir_tick = app.data_dir.join("lyrics_cache");
         let smart_dl_tick = Arc::clone(&app.smart_downloads_flag);
         let notif_tick = Arc::clone(&app.notifications_flag);
         let max_smart_tick = Arc::clone(&app.max_smart_songs_atomic);
@@ -994,6 +995,11 @@ impl YrApp {
                                                 tokio::spawn(cache_track_cover_async(
                                                     Arc::clone(&provider_tick),
                                                     cov_dir_tick.clone(),
+                                                    track.clone(),
+                                                ));
+                                                tokio::spawn(cache_track_lyrics_async(
+                                                    Arc::clone(&provider_tick),
+                                                    lyrics_dir_tick.clone(),
                                                     track,
                                                 ));
                                             }
@@ -1614,6 +1620,7 @@ impl YrApp {
         let track_cloned = track.clone();
         let tx = self.event_tx.clone();
         let cov_dir = self.data_dir.join("cover_cache");
+        let lyrics_dir = self.data_dir.join("lyrics_cache");
         let prov_cov = Arc::clone(&self.provider);
         self.runtime.spawn(async move {
             if dl.find_local_path(&track_cloned.id).await.is_some() {
@@ -1625,7 +1632,16 @@ impl YrApp {
                     .unwrap_or(false)
             {
                 if dl.register_cached_track(track_cloned.clone(), &cache_file).await.is_ok() {
-                    tokio::spawn(cache_track_cover_async(prov_cov, cov_dir, track_cloned));
+                    tokio::spawn(cache_track_cover_async(
+                        Arc::clone(&prov_cov),
+                        cov_dir,
+                        track_cloned.clone(),
+                    ));
+                    tokio::spawn(cache_track_lyrics_async(
+                        prov_cov,
+                        lyrics_dir,
+                        track_cloned,
+                    ));
                     let tasks = dl.list_tasks().await;
                     let total_bytes = dl.total_downloaded_bytes().await;
                     let _ = tx.send(AppEvent::DownloadsRefreshed { tasks, total_bytes });
@@ -1639,7 +1655,16 @@ impl YrApp {
                 return;
             }
             dl.enqueue(track_cloned.clone(), quality).await;
-            tokio::spawn(cache_track_cover_async(prov_cov, cov_dir, track_cloned));
+            tokio::spawn(cache_track_cover_async(
+                Arc::clone(&prov_cov),
+                cov_dir,
+                track_cloned.clone(),
+            ));
+            tokio::spawn(cache_track_lyrics_async(
+                prov_cov,
+                lyrics_dir,
+                track_cloned,
+            ));
         });
     }
 
@@ -1785,6 +1810,18 @@ impl YrApp {
             {
                 self.maybe_smart_download_track(&next_t, false, false);
             }
+        }
+        let prev_recents: Vec<Track> = self
+            .store
+            .data
+            .recent_tracks
+            .iter()
+            .filter(|t| t.id != track.id)
+            .take(3)
+            .cloned()
+            .collect();
+        for prev_t in prev_recents {
+            self.maybe_smart_download_track(&prev_t, false, false);
         }
         self.audio.stop();
         if self.is_video_mode {
@@ -1951,10 +1988,23 @@ impl YrApp {
         let dl = Arc::clone(&self.downloader);
         let quality = self.store.data.config.download_quality;
         let tx = self.event_tx.clone();
+        let prov_meta = Arc::clone(&self.provider);
+        let cov_dir = self.data_dir.join("cover_cache");
+        let lyr_dir = self.data_dir.join("lyrics_cache");
         let ctx = ctx.clone();
         self.runtime.spawn(async move {
             for track in tracks {
-                dl.enqueue(track, quality).await;
+                dl.enqueue(track.clone(), quality).await;
+                tokio::spawn(cache_track_cover_async(
+                    Arc::clone(&prov_meta),
+                    cov_dir.clone(),
+                    track.clone(),
+                ));
+                tokio::spawn(cache_track_lyrics_async(
+                    Arc::clone(&prov_meta),
+                    lyr_dir.clone(),
+                    track,
+                ));
             }
             loop {
                 let tasks = dl.list_tasks().await;
@@ -2017,6 +2067,24 @@ impl YrApp {
                             }
                             self.store.backfill_missing_artists(&heal_pool);
                             self.home_feed = feed;
+                            if self.store.data.config.smart_downloads {
+                                let mut seen_seed = HashSet::new();
+                                let seeds: Vec<Track> = self
+                                    .store
+                                    .data
+                                    .liked_tracks
+                                    .iter()
+                                    .chain(self.store.data.recent_tracks.iter())
+                                    .chain(self.home_feed.quick_picks.iter())
+                                    .filter(|t| !t.id.starts_with("local_"))
+                                    .filter(|t| seen_seed.insert(t.id.clone()))
+                                    .take(3)
+                                    .cloned()
+                                    .collect();
+                                for seed_t in seeds {
+                                    self.maybe_smart_download_track(&seed_t, false, false);
+                                }
+                            }
                             self.rebuild_samples_deck();
                             if !self.explore_loaded_once {
                                 self.load_explore(ctx);
@@ -2113,6 +2181,19 @@ impl YrApp {
                                 for t in &tracks {
                                     q.enqueue_or_enrich(t.clone());
                                 }
+                            }
+                            let upcoming_smart: Vec<Track> = {
+                                let q = self.queue.lock().unwrap();
+                                let ordered = q.ordered_tracks();
+                                let cur_idx = q.current_index();
+                                let start = cur_idx
+                                    .and_then(|ci| ordered.iter().position(|(i, _)| *i == ci))
+                                    .map(|p| p + 1)
+                                    .unwrap_or(0);
+                                ordered.into_iter().skip(start).take(3).map(|(_, t)| t.clone()).collect()
+                            };
+                            for ut in upcoming_smart {
+                                self.maybe_smart_download_track(&ut, false, false);
                             }
                             let mut existing: HashSet<String> =
                                 self.sample_tracks.iter().map(|t| t.id.clone()).collect();
@@ -4291,45 +4372,58 @@ impl YrApp {
             .vertical_scroll_offset(self.home_scroller.offset_y)
             .drag_to_scroll(false)
             .show(ui, |ui| {
-                // Mood / Genre Chips row (YT Music style)
+            // Mood / Genre Chips row (YT Music style, edge-to-edge bleed)
             if !self.home_feed.moods.is_empty() {
                 let moods = self.home_feed.moods.clone();
-                egui::ScrollArea::horizontal()
-                    .id_salt("home_moods")
-                    .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.spacing_mut().item_spacing.x = 8.0;
-                            for mood in moods {
-                                let is_selected =
-                                    self.active_mood_title.as_deref() == Some(mood.title.as_str());
-                                let btn = egui::Button::new(
-                                    RichText::new(&mood.title).size(13.0).color(if is_selected {
-                                        Color32::BLACK
+                let screen_x = ctx.screen_rect().x_range();
+                let (row_rect, _) = ui.allocate_exact_size(
+                    Vec2::new(ui.available_width(), 34.0),
+                    Sense::hover(),
+                );
+                let bleed_rect = egui::Rect::from_x_y_ranges(screen_x, row_rect.y_range());
+                ui.allocate_new_ui(egui::UiBuilder::new().max_rect(bleed_rect), |ui| {
+                    egui::ScrollArea::horizontal()
+                        .id_salt("home_moods")
+                        .scroll_bar_visibility(
+                            egui::scroll_area::ScrollBarVisibility::AlwaysHidden,
+                        )
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = 8.0;
+                                ui.add_space(12.0);
+                                for mood in moods {
+                                    let is_selected =
+                                        self.active_mood_title.as_deref() == Some(mood.title.as_str());
+                                    let btn = egui::Button::new(
+                                        RichText::new(&mood.title).size(13.0).color(if is_selected {
+                                            Color32::BLACK
+                                        } else {
+                                            TEXT_PRIMARY
+                                        }),
+                                    )
+                                    .fill(if is_selected {
+                                        Color32::WHITE
                                     } else {
-                                        TEXT_PRIMARY
-                                    }),
-                                )
-                                .fill(if is_selected {
-                                    Color32::WHITE
-                                } else {
-                                    Color32::from_rgb(32, 32, 35)
-                                })
-                                .stroke(Stroke::new(1.0_f32, Color32::from_rgb(55, 55, 60)))
-                                .corner_radius(CornerRadius::same(8));
-                                if ui.add(btn).clicked() {
-                                    if is_selected {
-                                        self.active_mood_title = None;
-                                        self.refresh_home(ctx);
-                                    } else if mood.params.is_some() {
-                                        self.active_mood_title = Some(mood.title);
-                                        self.refresh_home_with_params(mood.params, ctx);
-                                    } else {
-                                        self.open_mood(mood.id, mood.title, ctx);
+                                        Color32::from_rgb(32, 32, 35)
+                                    })
+                                    .stroke(Stroke::new(1.0_f32, Color32::from_rgb(55, 55, 60)))
+                                    .corner_radius(CornerRadius::same(8));
+                                    if ui.add(btn).clicked() {
+                                        if is_selected {
+                                            self.active_mood_title = None;
+                                            self.refresh_home(ctx);
+                                        } else if mood.params.is_some() {
+                                            self.active_mood_title = Some(mood.title);
+                                            self.refresh_home_with_params(mood.params, ctx);
+                                        } else {
+                                            self.open_mood(mood.id, mood.title, ctx);
+                                        }
                                     }
                                 }
-                            }
+                                ui.add_space(12.0);
+                            });
                         });
-                    });
+                });
                 ui.add_space(6.0);
             }
 
@@ -4875,26 +4969,26 @@ impl YrApp {
                         });
                     });
 
-                    // Right-hand vertical action rail (Like, Download, Save, Radio, More)
+                    // Right-hand vertical action rail (Like, Download, Save, Radio, Video, More)
                     ui.allocate_ui(Vec2::new(rail_w, body_h), |ui| {
                         ui.vertical_centered(|ui| {
-                            ui.add_space((body_h - 252.0).max(0.0) * 0.5);
+                            ui.add_space((body_h - 296.0).max(0.0) * 0.5);
                             let liked = self.store.is_liked(&track.id);
                             let rail_bg = Color32::from_black_alpha(120);
                             if icons::icon_button(
                                 ui,
                                 icons::Icon::ThumbUp,
-                                42.0,
+                                40.0,
                                 20.0,
                                 rail_bg,
                                 if liked { ACCENT_RED } else { Color32::WHITE },
-                                21.0,
+                                20.0,
                             )
                             .clicked()
                             {
                                 self.store.toggle_like(track.clone());
                             }
-                            ui.add_space(10.0);
+                            ui.add_space(8.0);
                             let is_downloaded = track.local_path.is_some()
                                 || self.downloads.iter().any(|d| {
                                     d.track.id == track.id && d.status == DownloadStatus::Completed
@@ -4906,54 +5000,77 @@ impl YrApp {
                                 } else {
                                     icons::Icon::Download
                                 },
-                                42.0,
+                                40.0,
                                 20.0,
                                 rail_bg,
                                 if is_downloaded { GREEN_OK } else { Color32::WHITE },
-                                21.0,
+                                20.0,
                             )
                             .clicked()
                                 && !is_downloaded
                             {
                                 self.enqueue_download(track.clone(), ctx);
                             }
-                            ui.add_space(10.0);
+                            ui.add_space(8.0);
                             if icons::icon_button(
                                 ui,
                                 icons::Icon::PlaylistAdd,
-                                42.0,
+                                40.0,
                                 20.0,
                                 rail_bg,
                                 Color32::WHITE,
-                                21.0,
+                                20.0,
                             )
                             .clicked()
                             {
                                 self.playlist_picker_track = Some(track.clone());
                             }
-                            ui.add_space(10.0);
+                            ui.add_space(8.0);
                             if icons::icon_button(
                                 ui,
                                 icons::Icon::Radio,
-                                42.0,
+                                40.0,
                                 20.0,
                                 rail_bg,
                                 Color32::WHITE,
-                                21.0,
+                                20.0,
                             )
                             .clicked()
                             {
                                 self.start_radio(track.id.clone(), ctx);
                             }
-                            ui.add_space(10.0);
+                            ui.add_space(8.0);
                             if icons::icon_button(
                                 ui,
-                                icons::Icon::MoreVert,
-                                42.0,
+                                icons::Icon::Video,
+                                40.0,
                                 20.0,
                                 rail_bg,
                                 Color32::WHITE,
-                                21.0,
+                                20.0,
+                            )
+                            .clicked()
+                            {
+                                if !is_current {
+                                    self.activate_sample_at(idx, ctx);
+                                }
+                                self.is_video_mode = true;
+                                self.now_playing_open = true;
+                                self.show_queue = false;
+                                self.show_lyrics = false;
+                                self.show_related = false;
+                                self.last_video_attached = None;
+                                self.resolve_video_for_track(track.id.clone(), ctx);
+                            }
+                            ui.add_space(8.0);
+                            if icons::icon_button(
+                                ui,
+                                icons::Icon::MoreVert,
+                                40.0,
+                                20.0,
+                                rail_bg,
+                                Color32::WHITE,
+                                20.0,
                             )
                             .clicked()
                             {
@@ -5056,17 +5173,39 @@ impl YrApp {
                     .unwrap_or(1.0)
                     .max(1.0);
                 let frac = (snap.position_secs / total).clamp(0.0, 1.0) as f32;
-                let (bar_r, _) =
-                    ui.allocate_exact_size(Vec2::new(inner_rect.width(), 2.5), Sense::hover());
-                ui.painter()
-                    .rect_filled(bar_r, CornerRadius::same(1), Color32::from_white_alpha(30));
+                let (touch_r, bar_resp) = ui.allocate_exact_size(
+                    Vec2::new(inner_rect.width(), 14.0),
+                    Sense::click_and_drag(),
+                );
+                let track_r = egui::Rect::from_center_size(
+                    touch_r.center(),
+                    Vec2::new(touch_r.width(), 3.5),
+                );
+                ui.painter().rect_filled(
+                    track_r,
+                    CornerRadius::same(2),
+                    Color32::from_white_alpha(38),
+                );
+                let tip_x = track_r.left() + track_r.width() * frac;
                 if frac > 0.0 {
                     let fill_r = egui::Rect::from_min_max(
-                        bar_r.min,
-                        egui::pos2(bar_r.left() + bar_r.width() * frac, bar_r.bottom()),
+                        track_r.min,
+                        egui::pos2(tip_x, track_r.bottom()),
                     );
                     ui.painter()
-                        .rect_filled(fill_r, CornerRadius::same(1), ACCENT_RED);
+                        .rect_filled(fill_r, CornerRadius::same(2), ACCENT_RED);
+                }
+                ui.painter().circle_filled(
+                    egui::pos2(tip_x.clamp(track_r.left() + 4.0, track_r.right() - 4.0), track_r.center().y),
+                    5.0,
+                    ACCENT_RED,
+                );
+                if (bar_resp.clicked() || bar_resp.dragged()) && track_r.width() > 1.0 {
+                    if let Some(pos) = bar_resp.interact_pointer_pos() {
+                        let seek_ratio = ((pos.x - track_r.left()) / track_r.width()).clamp(0.0, 1.0) as f64;
+                        self.audio.seek(Duration::from_secs_f64(seek_ratio * total));
+                        self.last_media_sync = None;
+                    }
                 }
             }
         });
@@ -5138,6 +5277,7 @@ impl YrApp {
             ui.add_space(6.0);
             egui::ScrollArea::horizontal()
                 .id_salt("search_filter_chips")
+                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = 6.0;
@@ -8081,12 +8221,13 @@ impl YrApp {
                                 }
                             });
                     } else if self.show_lyrics {
+                        let large_lyrics = self.store.data.config.lyrics_large_text;
                         ui.horizontal(|ui| {
                             let badge = match &self.lyrics_data {
                                 Some(d) if !d.synced.is_empty() => "Letra sincronizada",
                                 _ => "Letra",
                             };
-                            let hdr_w = (ui.available_width() - 134.0).max(110.0);
+                            let hdr_w = (ui.available_width() - 184.0).max(96.0);
                             ui.allocate_ui(Vec2::new(hdr_w, 30.0), |ui| {
                                 ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
                                     ui.add(
@@ -8115,35 +8256,75 @@ impl YrApp {
                                 {
                                     self.load_lyrics_with_options(track.clone(), ctx, true);
                                 }
+                                ui.add_space(4.0);
+                                let font_btn = egui::Button::new(
+                                    RichText::new("A+")
+                                        .size(12.5)
+                                        .strong()
+                                        .color(Color32::WHITE),
+                                )
+                                .fill(if large_lyrics {
+                                    ACCENT_RED
+                                } else {
+                                    Color32::from_white_alpha(24)
+                                })
+                                .corner_radius(CornerRadius::same(14))
+                                .min_size(Vec2::new(36.0, 28.0));
+                                if ui.add(font_btn).clicked() {
+                                    self.store.data.config.lyrics_large_text = !large_lyrics;
+                                    let _ = self.store.save();
+                                    self.set_banner(if self.store.data.config.lyrics_large_text {
+                                        "Letra grande activada"
+                                    } else {
+                                        "Tamaño de letra estándar"
+                                    });
+                                }
                                 if let Some(d) = &self.lyrics_data {
                                     let has_lyrics = !d.synced.is_empty()
                                         || (!d.plain.is_empty() && !d.plain.starts_with("No se pudo"));
                                     if has_lyrics {
-                                        ui.add_space(6.0);
+                                        ui.add_space(4.0);
                                         if icons::icon_pill_button(
                                             ui,
                                             icons::Icon::Share,
-                                            "Copiar",
+                                            "Compartir",
                                             Color32::from_white_alpha(24),
                                             Color32::WHITE,
                                         )
                                         .clicked()
                                         {
-                                            let body = if !d.synced.is_empty() {
+                                            let excerpt = if !d.synced.is_empty() {
+                                                let active_i = d
+                                                    .synced
+                                                    .iter()
+                                                    .rposition(|l| {
+                                                        l.time_secs <= snap.position_secs + 0.25
+                                                    })
+                                                    .unwrap_or(0);
                                                 d.synced
                                                     .iter()
-                                                    .map(|l| l.text.as_str())
+                                                    .skip(active_i)
+                                                    .map(|l| l.text.trim())
                                                     .filter(|s| !s.is_empty())
+                                                    .take(2)
                                                     .collect::<Vec<_>>()
                                                     .join("\n")
                                             } else {
-                                                d.plain.clone()
+                                                d.plain
+                                                    .lines()
+                                                    .map(|l| l.trim())
+                                                    .filter(|l| !l.is_empty())
+                                                    .take(4)
+                                                    .collect::<Vec<_>>()
+                                                    .join("\n")
                                             };
-                                            ctx.copy_text(format!(
-                                                "{} — {}\n\n{}",
-                                                track.title, track.artist, body
-                                            ));
-                                            self.set_banner("Letra copiada al portapapeles");
+                                            let quote = format!(
+                                                "«{}»\n— {} • {}\nhttps://music.youtube.com/watch?v={}",
+                                                excerpt, track.title, track.artist, track.id
+                                            );
+                                            ctx.copy_text(quote.clone());
+                                            crate::android_media::share_text(&track.title, &quote);
+                                            self.set_banner("Fragmento de letra listo para compartir");
                                         }
                                     }
                                 }
@@ -8210,7 +8391,9 @@ impl YrApp {
                                                             egui::Label::new(
                                                                 RichText::new(text)
                                                                     .size(if is_active {
-                                                                        18.5
+                                                                        if large_lyrics { 22.5 } else { 18.5 }
+                                                                    } else if large_lyrics {
+                                                                        18.0
                                                                     } else {
                                                                         15.5
                                                                     })
@@ -8286,7 +8469,7 @@ impl YrApp {
                                         ui.add_space(6.0);
                                         ui.label(
                                             RichText::new(&data.plain)
-                                                .size(16.0)
+                                                .size(if large_lyrics { 19.5 } else { 16.0 })
                                                 .color(Color32::from_white_alpha(230)),
                                         );
                                         if !data.plain.starts_with("No se pudo") {
@@ -8906,13 +9089,21 @@ impl YrApp {
                     }
 
                     ui.add_space(12.0);
-                    // Scrollable Action Pills row matching YTM: ThumbUp|ThumbDown, Letra, Guardar, Compartir, Descargar, Radio
+                    // Scrollable Action Pills row matching YTM (edge-to-edge bleed): ThumbUp|ThumbDown, Letra, Guardar, Compartir, Descargar, Radio
                     let pill_bg = Color32::from_white_alpha(26);
-                    ui.allocate_ui(Vec2::new(avail_w, 38.0), |ui| {
+                    let (pills_row_rect, _) =
+                        ui.allocate_exact_size(Vec2::new(avail_w, 38.0), Sense::hover());
+                    let bleed_rect =
+                        egui::Rect::from_x_y_ranges(bg_rect.x_range(), pills_row_rect.y_range());
+                    ui.allocate_new_ui(egui::UiBuilder::new().max_rect(bleed_rect), |ui| {
                         egui::ScrollArea::horizontal()
                             .id_salt("np_action_pills")
+                            .scroll_bar_visibility(
+                                egui::scroll_area::ScrollBarVisibility::AlwaysHidden,
+                            )
                             .show(ui, |ui| {
                             ui.horizontal(|ui| {
+                                ui.add_space(pad_x);
                                 let liked = self.store.is_liked(&track.id);
                                 let disliked = self.store.is_disliked(&track.id);
                                 egui::Frame::new()
@@ -9098,6 +9289,13 @@ impl YrApp {
                                         .unwrap_or(1);
                                     let next = presets[(cur_idx + 1) % presets.len()];
                                     self.audio.set_speed(next);
+                                    if self.is_video_mode {
+                                        crate::android_media::sync_native_video(
+                                            snap.status == PlaybackStatus::Playing,
+                                            (snap.position_secs * 1000.0).max(0.0) as u64,
+                                            next,
+                                        );
+                                    }
                                     self.store.data.config.playback_speed = next;
                                     let _ = self.store.save();
                                     self.set_banner(format!("Velocidad: {next}x"));
@@ -9119,6 +9317,7 @@ impl YrApp {
                                 {
                                     self.show_sleep_timer_sheet = true;
                                 }
+                                ui.add_space(pad_x);
                             });
                         });
                     });
@@ -10169,7 +10368,7 @@ impl YrApp {
                     }
                 }
                 SettingsCategory::About => {
-                    ui.heading("YR Music v0.9.14");
+                    ui.heading("YR Music v0.9.15");
                     ui.label("Cliente nativo de música 100% en Rust para Android y escritorio.");
                     ui.add_space(6.0);
                     ui.label(RichText::new("Motor de audio Symphonia PCM con DSP Morphe 3D binaural, reproductor integrado de video en la app, auto-scroll inteligente de cola, prefetch predictivo en disco y compatibilidad completa con YouTube Music.").size(12.0).color(TEXT_SECONDARY));
@@ -11442,7 +11641,7 @@ impl YrApp {
                         }
                         if menu_row(ui, icons::Icon::Help, "Ayuda y comentarios").clicked() {
                             self.show_account_modal = false;
-                            self.set_banner("YR Music v0.9.14 • Pure Rust");
+                            self.set_banner("YR Music v0.9.15 • Pure Rust");
                         }
 
                         #[cfg(target_os = "android")]
@@ -12894,6 +13093,21 @@ async fn cache_track_cover_async(
                 let _ = std::fs::rename(&tmp, &dst);
             }
         }
+    }
+}
+
+async fn cache_track_lyrics_async(
+    provider: Arc<dyn MusicProvider>,
+    lyrics_dir: PathBuf,
+    track: Track,
+) {
+    if track.id.starts_with("local_")
+        || yr_core::lyrics_cache::load_cached_lyrics(&lyrics_dir, &track.id).is_some()
+    {
+        return;
+    }
+    if let Ok(Some(data)) = provider.get_synced_lyrics(&track).await {
+        let _ = yr_core::lyrics_cache::save_cached_lyrics(&lyrics_dir, &track.id, &data);
     }
 }
 
