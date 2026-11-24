@@ -131,6 +131,12 @@ adb pull /data/local/tmp/07_video_inplace.png screenshots/07_video_inplace.png
 adb shell input keyevent 4
 sleep 1
 
+# 7b. Library tab (edge-to-edge filters, Sort pill, Liked & Offline downloads)
+adb shell input tap 945 2180
+sleep 2
+adb shell screencap -p /data/local/tmp/07b_library.png
+adb pull /data/local/tmp/07b_library.png screenshots/07b_library.png
+
 # 8. Notification controls, screen-off survival & lockscreen controls
 adb shell cmd statusbar expand-notifications
 sleep 2

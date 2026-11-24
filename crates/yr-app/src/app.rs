@@ -51,6 +51,31 @@ enum LibraryFilter {
     Artists,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LibrarySort {
+    Recent,
+    TitleAz,
+    ArtistAz,
+}
+
+impl LibrarySort {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Recent => "Recientes",
+            Self::TitleAz => "A–Z",
+            Self::ArtistAz => "Artista",
+        }
+    }
+
+    fn next(self) -> Self {
+        match self {
+            Self::Recent => Self::TitleAz,
+            Self::TitleAz => Self::ArtistAz,
+            Self::ArtistAz => Self::Recent,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SettingsCategory {
     #[default]
@@ -292,6 +317,8 @@ pub struct YrApp {
 
     active_tab: NavTab,
     library_filter: LibraryFilter,
+    library_sort: LibrarySort,
+    expanded_playlist_id: Option<String>,
     library_search: String,
     show_new_playlist_dialog: bool,
     search_query: String,
@@ -596,6 +623,8 @@ impl YrApp {
             event_rx,
             active_tab: NavTab::Home,
             library_filter: LibraryFilter::All,
+            library_sort: LibrarySort::Recent,
+            expanded_playlist_id: None,
             library_search: String::new(),
             show_new_playlist_dialog: false,
             search_query: String::new(),
@@ -4381,49 +4410,48 @@ impl YrApp {
                     Sense::hover(),
                 );
                 let bleed_rect = egui::Rect::from_x_y_ranges(screen_x, row_rect.y_range());
-                ui.allocate_new_ui(egui::UiBuilder::new().max_rect(bleed_rect), |ui| {
-                    egui::ScrollArea::horizontal()
-                        .id_salt("home_moods")
-                        .scroll_bar_visibility(
-                            egui::scroll_area::ScrollBarVisibility::AlwaysHidden,
-                        )
-                        .show(ui, |ui| {
-                            ui.horizontal(|ui| {
-                                ui.spacing_mut().item_spacing.x = 8.0;
-                                ui.add_space(12.0);
-                                for mood in moods {
-                                    let is_selected =
-                                        self.active_mood_title.as_deref() == Some(mood.title.as_str());
-                                    let btn = egui::Button::new(
-                                        RichText::new(&mood.title).size(13.0).color(if is_selected {
-                                            Color32::BLACK
-                                        } else {
-                                            TEXT_PRIMARY
-                                        }),
-                                    )
-                                    .fill(if is_selected {
-                                        Color32::WHITE
+                let mut bleed_ui = ui.new_child(egui::UiBuilder::new().max_rect(bleed_rect));
+                egui::ScrollArea::horizontal()
+                    .id_salt("home_moods")
+                    .scroll_bar_visibility(
+                        egui::scroll_area::ScrollBarVisibility::AlwaysHidden,
+                    )
+                    .show(&mut bleed_ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 8.0;
+                            ui.add_space(12.0);
+                            for mood in moods {
+                                let is_selected =
+                                    self.active_mood_title.as_deref() == Some(mood.title.as_str());
+                                let btn = egui::Button::new(
+                                    RichText::new(&mood.title).size(13.0).color(if is_selected {
+                                        Color32::BLACK
                                     } else {
-                                        Color32::from_rgb(32, 32, 35)
-                                    })
-                                    .stroke(Stroke::new(1.0_f32, Color32::from_rgb(55, 55, 60)))
-                                    .corner_radius(CornerRadius::same(8));
-                                    if ui.add(btn).clicked() {
-                                        if is_selected {
-                                            self.active_mood_title = None;
-                                            self.refresh_home(ctx);
-                                        } else if mood.params.is_some() {
-                                            self.active_mood_title = Some(mood.title);
-                                            self.refresh_home_with_params(mood.params, ctx);
-                                        } else {
-                                            self.open_mood(mood.id, mood.title, ctx);
-                                        }
+                                        TEXT_PRIMARY
+                                    }),
+                                )
+                                .fill(if is_selected {
+                                    Color32::WHITE
+                                } else {
+                                    Color32::from_rgb(32, 32, 35)
+                                })
+                                .stroke(Stroke::new(1.0_f32, Color32::from_rgb(55, 55, 60)))
+                                .corner_radius(CornerRadius::same(8));
+                                if ui.add(btn).clicked() {
+                                    if is_selected {
+                                        self.active_mood_title = None;
+                                        self.refresh_home(ctx);
+                                    } else if mood.params.is_some() {
+                                        self.active_mood_title = Some(mood.title);
+                                        self.refresh_home_with_params(mood.params, ctx);
+                                    } else {
+                                        self.open_mood(mood.id, mood.title, ctx);
                                     }
                                 }
-                                ui.add_space(12.0);
-                            });
+                            }
+                            ui.add_space(12.0);
                         });
-                });
+                    });
                 ui.add_space(6.0);
             }
 
@@ -5275,12 +5303,20 @@ impl YrApp {
 
         if has_results || self.search_loading {
             ui.add_space(6.0);
+            let (row_rect, _) = ui.allocate_exact_size(
+                Vec2::new(ui.available_width(), 34.0),
+                Sense::hover(),
+            );
+            let bleed_rect =
+                egui::Rect::from_x_y_ranges(ctx.screen_rect().x_range(), row_rect.y_range());
+            let mut bleed_ui = ui.new_child(egui::UiBuilder::new().max_rect(bleed_rect));
             egui::ScrollArea::horizontal()
                 .id_salt("search_filter_chips")
                 .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
-                .show(ui, |ui| {
+                .show(&mut bleed_ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = 6.0;
+                        ui.add_space(12.0);
                         for (filt, label) in [
                             (SearchFilter::All, "Todo"),
                             (SearchFilter::Songs, "Canciones"),
@@ -5300,6 +5336,7 @@ impl YrApp {
                                 self.search_filter = filt;
                             }
                         }
+                        ui.add_space(12.0);
                     });
                 });
         }
@@ -6029,6 +6066,23 @@ impl YrApp {
         }
     }
 
+    fn sort_tracks_by(list: &mut [Track], sort: LibrarySort) {
+        match sort {
+            LibrarySort::Recent => {}
+            LibrarySort::TitleAz => {
+                list.sort_by(|a, b| a.title.to_lowercase().cmp(&b.title.to_lowercase()));
+            }
+            LibrarySort::ArtistAz => {
+                list.sort_by(|a, b| {
+                    a.artist
+                        .to_lowercase()
+                        .cmp(&b.artist.to_lowercase())
+                        .then_with(|| a.title.to_lowercase().cmp(&b.title.to_lowercase()))
+                });
+            }
+        }
+    }
+
     fn render_library(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         ui.horizontal(|ui| {
             ui.label(
@@ -6073,34 +6127,46 @@ impl YrApp {
         });
 
         ui.add_space(8.0);
-        egui::ScrollArea::horizontal()
-            .id_salt("lib_filters")
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 8.0;
-                    for (filt, label) in [
-                        (LibraryFilter::All, "Todo"),
-                        (LibraryFilter::Downloads, "Descargas"),
-                        (LibraryFilter::History, "Historial"),
-                        (LibraryFilter::Playlists, "Playlists"),
-                        (LibraryFilter::Songs, "Canciones"),
-                        (LibraryFilter::Albums, "Álbumes"),
-                        (LibraryFilter::Artists, "Artistas"),
-                    ] {
-                        let active = self.library_filter == filt;
-                        let btn = egui::Button::new(
-                            RichText::new(label)
-                                .size(13.0)
-                                .color(if active { Color32::BLACK } else { TEXT_PRIMARY }),
-                        )
-                        .fill(if active { Color32::WHITE } else { BG_ELEVATED })
-                        .corner_radius(CornerRadius::same(8));
-                        if ui.add(btn).clicked() {
-                            self.library_filter = filt;
+        {
+            let (row_rect, _) = ui.allocate_exact_size(
+                Vec2::new(ui.available_width(), 34.0),
+                Sense::hover(),
+            );
+            let bleed_rect =
+                egui::Rect::from_x_y_ranges(ctx.screen_rect().x_range(), row_rect.y_range());
+            let mut bleed_ui = ui.new_child(egui::UiBuilder::new().max_rect(bleed_rect));
+            egui::ScrollArea::horizontal()
+                .id_salt("lib_filters")
+                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+                .show(&mut bleed_ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 8.0;
+                        ui.add_space(12.0);
+                        for (filt, label) in [
+                            (LibraryFilter::All, "Todo"),
+                            (LibraryFilter::Downloads, "Descargas"),
+                            (LibraryFilter::History, "Historial"),
+                            (LibraryFilter::Playlists, "Playlists"),
+                            (LibraryFilter::Songs, "Canciones"),
+                            (LibraryFilter::Albums, "Álbumes"),
+                            (LibraryFilter::Artists, "Artistas"),
+                        ] {
+                            let active = self.library_filter == filt;
+                            let btn = egui::Button::new(
+                                RichText::new(label)
+                                    .size(13.0)
+                                    .color(if active { Color32::BLACK } else { TEXT_PRIMARY }),
+                            )
+                            .fill(if active { Color32::WHITE } else { BG_ELEVATED })
+                            .corner_radius(CornerRadius::same(8));
+                            if ui.add(btn).clicked() {
+                                self.library_filter = filt;
+                            }
                         }
-                    }
+                        ui.add_space(12.0);
+                    });
                 });
-            });
+        }
 
         if self.show_new_playlist_dialog {
             ui.add_space(6.0);
@@ -6168,35 +6234,56 @@ impl YrApp {
         }
 
         ui.add_space(6.0);
-        egui::Frame::new()
-            .fill(BG_SURFACE)
-            .corner_radius(CornerRadius::same(18))
-            .inner_margin(egui::Margin::symmetric(12, 4))
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    let input_w = (ui.available_width() - 36.0).max(120.0);
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.library_search)
-                            .hint_text("Filtrar tu biblioteca...")
-                            .frame(false)
-                            .desired_width(input_w),
-                    );
-                    if !self.library_search.is_empty()
-                        && icons::icon_button(
-                            ui,
-                            icons::Icon::Close,
-                            24.0,
-                            12.0,
-                            Color32::TRANSPARENT,
-                            TEXT_SECONDARY,
-                            12.0,
-                        )
-                        .clicked()
-                    {
-                        self.library_search.clear();
-                    }
-                });
+        ui.horizontal(|ui| {
+            let sort_w = 98.0_f32;
+            let bar_w = (ui.available_width() - sort_w - 6.0).max(120.0);
+            ui.allocate_ui(Vec2::new(bar_w, 32.0), |ui| {
+                egui::Frame::new()
+                    .fill(BG_SURFACE)
+                    .corner_radius(CornerRadius::same(18))
+                    .inner_margin(egui::Margin::symmetric(12, 5))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            let input_w = (bar_w - 48.0).max(80.0);
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.library_search)
+                                    .hint_text("Filtrar tu biblioteca...")
+                                    .frame(false)
+                                    .desired_width(input_w),
+                            );
+                            if !self.library_search.is_empty()
+                                && icons::icon_button(
+                                    ui,
+                                    icons::Icon::Close,
+                                    22.0,
+                                    11.0,
+                                    Color32::TRANSPARENT,
+                                    TEXT_SECONDARY,
+                                    12.0,
+                                )
+                                .clicked()
+                            {
+                                self.library_search.clear();
+                            }
+                        });
+                    });
             });
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let sort_btn = egui::Button::new(
+                    RichText::new(format!("⇅ {}", self.library_sort.label()))
+                        .size(12.0)
+                        .strong()
+                        .color(TEXT_PRIMARY),
+                )
+                .fill(BG_ELEVATED)
+                .corner_radius(CornerRadius::same(16))
+                .min_size(Vec2::new(sort_w, 32.0));
+                if ui.add(sort_btn).clicked() {
+                    self.library_sort = self.library_sort.next();
+                    self.set_banner(format!("Ordenado: {}", self.library_sort.label()));
+                }
+            });
+        });
 
         let lib_q = self.library_search.trim().to_lowercase();
         let lib_matches = |text: &str| lib_q.is_empty() || text.to_lowercase().contains(&lib_q);
@@ -6402,7 +6489,7 @@ impl YrApp {
                             });
                         });
 
-                    let liked: Vec<Track> = self
+                    let mut liked: Vec<Track> = self
                         .store
                         .data
                         .liked_tracks
@@ -6410,6 +6497,7 @@ impl YrApp {
                         .filter(|t| lib_matches(&t.title) || lib_matches(&t.artist))
                         .cloned()
                         .collect();
+                    Self::sort_tracks_by(&mut liked, self.library_sort);
                     if !liked.is_empty() && matches!(self.library_filter, LibraryFilter::All | LibraryFilter::Songs) {
                         ui.add_space(6.0);
                         for (idx, track) in liked.iter().enumerate() {
@@ -6419,7 +6507,7 @@ impl YrApp {
                 }
 
                 if matches!(self.library_filter, LibraryFilter::All | LibraryFilter::Songs) {
-                    let completed: Vec<Track> = self
+                    let mut completed: Vec<Track> = self
                         .downloads
                         .iter()
                         .filter(|d| {
@@ -6428,6 +6516,7 @@ impl YrApp {
                         })
                         .map(|d| d.track.clone())
                         .collect();
+                    Self::sort_tracks_by(&mut completed, self.library_sort);
                     if !completed.is_empty() {
                         ui.add_space(10.0);
                         ui.horizontal(|ui| {
@@ -6478,7 +6567,7 @@ impl YrApp {
                             .map(|t| t.id.clone())
                             .chain(completed.iter().map(|t| t.id.clone()))
                             .collect();
-                        let recent_extra: Vec<Track> = self
+                        let mut recent_extra: Vec<Track> = self
                             .store
                             .data
                             .recent_tracks
@@ -6489,6 +6578,7 @@ impl YrApp {
                             })
                             .cloned()
                             .collect();
+                        Self::sort_tracks_by(&mut recent_extra, self.library_sort);
                         if !recent_extra.is_empty() {
                             ui.add_space(10.0);
                             ui.label(
@@ -6508,7 +6598,8 @@ impl YrApp {
                     if !self.store.data.playlists.is_empty() {
                         ui.add_space(10.0);
                         ui.label(RichText::new("Tus playlists").size(16.0).strong());
-                        let pls: Vec<_> = self
+                        ui.add_space(4.0);
+                        let mut pls: Vec<_> = self
                             .store
                             .data
                             .playlists
@@ -6521,15 +6612,166 @@ impl YrApp {
                             })
                             .cloned()
                             .collect();
+                        if self.library_sort != LibrarySort::Recent {
+                            pls.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+                        }
                         for pl in pls {
-                            ui.horizontal(|ui| {
-                                egui::CollapsingHeader::new(format!(
-                                    "{} ({})",
-                                    pl.name,
-                                    pl.tracks.len()
-                                ))
-                                .id_salt(&pl.id)
+                            let pl_count = pl.tracks.len();
+                            let is_expanded =
+                                self.expanded_playlist_id.as_deref() == Some(pl.id.as_str());
+                            let cover_uri = pl.tracks.first().and_then(resolve_track_cover_uri);
+                            egui::Frame::new()
+                                .fill(Color32::from_rgb(20, 20, 23))
+                                .corner_radius(CornerRadius::same(10))
+                                .inner_margin(8.0)
                                 .show(ui, |ui| {
+                                    ui.set_min_width(ui.available_width());
+                                    ui.horizontal(|ui| {
+                                        let card_row_start = ui.cursor().min;
+                                        let (thumb_rect, _) =
+                                            ui.allocate_exact_size(Vec2::splat(54.0), Sense::hover());
+                                        ui.painter().rect_filled(
+                                            thumb_rect,
+                                            CornerRadius::same(8),
+                                            BG_ELEVATED,
+                                        );
+                                        if let Some(ref uri) = cover_uri {
+                                            paint_progressive_image(
+                                                ui,
+                                                thumb_rect,
+                                                uri,
+                                                220,
+                                                Vec2::splat(54.0),
+                                                CornerRadius::same(8),
+                                            );
+                                        } else {
+                                            icons::draw_icon(
+                                                ui.painter(),
+                                                egui::Rect::from_center_size(
+                                                    thumb_rect.center(),
+                                                    Vec2::splat(24.0),
+                                                ),
+                                                icons::Icon::PlaylistAdd,
+                                                TEXT_SECONDARY,
+                                            );
+                                        }
+                                        ui.add_space(8.0);
+                                        let btns_w = if pl_count > 0 { 128.0 } else { 36.0 };
+                                        let text_w = (ui.available_width() - 10.0 - btns_w).max(90.0);
+                                        ui.allocate_ui(Vec2::new(text_w, 54.0), |ui| {
+                                            ui.vertical(|ui| {
+                                                ui.add(
+                                                    egui::Label::new(
+                                                        RichText::new(&pl.name)
+                                                            .strong()
+                                                            .size(15.0)
+                                                            .color(TEXT_PRIMARY),
+                                                    )
+                                                    .truncate()
+                                                    .selectable(false),
+                                                );
+                                                let meta = if pl_count == 1 {
+                                                    "1 canción • Playlist local".to_string()
+                                                } else {
+                                                    format!("{pl_count} canciones • Playlist local")
+                                                };
+                                                ui.add(
+                                                    egui::Label::new(
+                                                        RichText::new(meta)
+                                                            .size(12.0)
+                                                            .color(TEXT_SECONDARY),
+                                                    )
+                                                    .truncate()
+                                                    .selectable(false),
+                                                );
+                                            });
+                                        });
+                                        let hit_rect = egui::Rect::from_min_size(
+                                            card_row_start,
+                                            Vec2::new(54.0 + 8.0 + text_w, 54.0),
+                                        );
+                                        if ui
+                                            .interact(
+                                                hit_rect,
+                                                ui.id().with(("local_pl_card", &pl.id)),
+                                                Sense::click(),
+                                            )
+                                            .clicked()
+                                        {
+                                            if is_expanded {
+                                                self.expanded_playlist_id = None;
+                                            } else {
+                                                self.expanded_playlist_id = Some(pl.id.clone());
+                                            }
+                                        }
+                                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                            ui.spacing_mut().item_spacing.x = 4.0;
+                                            if icons::icon_button(
+                                                ui,
+                                                icons::Icon::Trash,
+                                                28.0,
+                                                14.0,
+                                                Color32::TRANSPARENT,
+                                                TEXT_SECONDARY,
+                                                14.0,
+                                            )
+                                            .clicked()
+                                            {
+                                                if is_expanded {
+                                                    self.expanded_playlist_id = None;
+                                                }
+                                                self.store.delete_playlist(&pl.id);
+                                                self.set_banner(format!(
+                                                    "Playlist '{}' eliminada",
+                                                    pl.name
+                                                ));
+                                            }
+                                            if pl_count > 0 {
+                                                if icons::icon_button(
+                                                    ui,
+                                                    icons::Icon::Download,
+                                                    28.0,
+                                                    14.0,
+                                                    BG_ELEVATED,
+                                                    TEXT_PRIMARY,
+                                                    14.0,
+                                                )
+                                                .clicked()
+                                                {
+                                                    self.enqueue_download_all(pl.tracks.clone(), ctx);
+                                                }
+                                                if icons::icon_button(
+                                                    ui,
+                                                    icons::Icon::Shuffle,
+                                                    28.0,
+                                                    14.0,
+                                                    BG_ELEVATED,
+                                                    TEXT_PRIMARY,
+                                                    14.0,
+                                                )
+                                                .clicked()
+                                                {
+                                                    self.play_tracks_shuffled(pl.tracks.clone(), ctx);
+                                                }
+                                                if icons::icon_button(
+                                                    ui,
+                                                    icons::Icon::Play,
+                                                    32.0,
+                                                    16.0,
+                                                    ACCENT_RED,
+                                                    Color32::WHITE,
+                                                    15.0,
+                                                )
+                                                .clicked()
+                                                {
+                                                    self.play_track_in_list(pl.tracks.clone(), 0, ctx);
+                                                }
+                                            }
+                                        });
+                                    });
+                                });
+                            if is_expanded && !pl.tracks.is_empty() {
+                                ui.indent(("local_pl_tracks", &pl.id), |ui| {
                                     for (idx, track) in pl.tracks.iter().enumerate() {
                                         if !lib_matches(&pl.name)
                                             && !lib_matches(&track.title)
@@ -6569,26 +6811,8 @@ impl YrApp {
                                         });
                                     }
                                 });
-                                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                    if icons::icon_button(
-                                        ui,
-                                        icons::Icon::Trash,
-                                        30.0,
-                                        15.0,
-                                        Color32::TRANSPARENT,
-                                        TEXT_SECONDARY,
-                                        15.0,
-                                    )
-                                    .clicked()
-                                    {
-                                        self.store.delete_playlist(&pl.id);
-                                        self.set_banner(format!(
-                                            "Playlist '{}' eliminada",
-                                            pl.name
-                                        ));
-                                    }
-                                });
-                            });
+                            }
+                            ui.add_space(4.0);
                         }
                     }
 
@@ -6603,13 +6827,27 @@ impl YrApp {
                 }
 
                 if matches!(self.library_filter, LibraryFilter::All | LibraryFilter::Albums) && !self.home_feed.new_albums.is_empty() {
-                    let albums: Vec<_> = self
+                    let mut albums: Vec<_> = self
                         .home_feed
                         .new_albums
                         .iter()
                         .filter(|a| lib_matches(&a.title) || lib_matches(&a.artist))
                         .cloned()
                         .collect();
+                    match self.library_sort {
+                        LibrarySort::Recent => {}
+                        LibrarySort::TitleAz => {
+                            albums.sort_by(|a, b| a.title.to_lowercase().cmp(&b.title.to_lowercase()));
+                        }
+                        LibrarySort::ArtistAz => {
+                            albums.sort_by(|a, b| {
+                                a.artist
+                                    .to_lowercase()
+                                    .cmp(&b.artist.to_lowercase())
+                                    .then_with(|| a.title.to_lowercase().cmp(&b.title.to_lowercase()))
+                            });
+                        }
+                    }
                     if !albums.is_empty() {
                         ui.add_space(10.0);
                         ui.label(RichText::new("Álbumes").size(16.0).strong());
@@ -6647,6 +6885,9 @@ impl YrApp {
                                 .small()
                                 .color(TEXT_SECONDARY),
                         );
+                    }
+                    if self.library_sort != LibrarySort::Recent {
+                        artists.sort_by(|a, b| a.1.to_lowercase().cmp(&b.1.to_lowercase()));
                     }
                     for (aid, name, thumb) in artists {
                         if render_artist_card_row(
@@ -9095,15 +9336,15 @@ impl YrApp {
                         ui.allocate_exact_size(Vec2::new(avail_w, 38.0), Sense::hover());
                     let bleed_rect =
                         egui::Rect::from_x_y_ranges(bg_rect.x_range(), pills_row_rect.y_range());
-                    ui.allocate_new_ui(egui::UiBuilder::new().max_rect(bleed_rect), |ui| {
-                        egui::ScrollArea::horizontal()
-                            .id_salt("np_action_pills")
-                            .scroll_bar_visibility(
-                                egui::scroll_area::ScrollBarVisibility::AlwaysHidden,
-                            )
-                            .show(ui, |ui| {
-                            ui.horizontal(|ui| {
-                                ui.add_space(pad_x);
+                    let mut bleed_ui = ui.new_child(egui::UiBuilder::new().max_rect(bleed_rect));
+                    egui::ScrollArea::horizontal()
+                        .id_salt("np_action_pills")
+                        .scroll_bar_visibility(
+                            egui::scroll_area::ScrollBarVisibility::AlwaysHidden,
+                        )
+                        .show(&mut bleed_ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.add_space(pad_x);
                                 let liked = self.store.is_liked(&track.id);
                                 let disliked = self.store.is_disliked(&track.id);
                                 egui::Frame::new()
@@ -9320,7 +9561,6 @@ impl YrApp {
                                 ui.add_space(pad_x);
                             });
                         });
-                    });
 
                     ui.add_space(12.0);
                     let total = snap
@@ -10368,7 +10608,7 @@ impl YrApp {
                     }
                 }
                 SettingsCategory::About => {
-                    ui.heading("YR Music v0.9.15");
+                    ui.heading("YR Music v0.9.16");
                     ui.label("Cliente nativo de música 100% en Rust para Android y escritorio.");
                     ui.add_space(6.0);
                     ui.label(RichText::new("Motor de audio Symphonia PCM con DSP Morphe 3D binaural, reproductor integrado de video en la app, auto-scroll inteligente de cola, prefetch predictivo en disco y compatibilidad completa con YouTube Music.").size(12.0).color(TEXT_SECONDARY));
@@ -11641,7 +11881,7 @@ impl YrApp {
                         }
                         if menu_row(ui, icons::Icon::Help, "Ayuda y comentarios").clicked() {
                             self.show_account_modal = false;
-                            self.set_banner("YR Music v0.9.15 • Pure Rust");
+                            self.set_banner("YR Music v0.9.16 • Pure Rust");
                         }
 
                         #[cfg(target_os = "android")]

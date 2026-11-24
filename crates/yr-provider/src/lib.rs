@@ -735,9 +735,37 @@ impl MusicProvider for YtMusicProvider {
                 }
             }
         }
-        let info = innertube::fetch_player_video_stream(&self.http, track_id, max_height)
-            .await
-            .map_err(ProviderError::Api)?;
+        let info = match innertube::fetch_player_video_stream(&self.http, track_id, max_height).await {
+            Ok(v) => v,
+            Err(inner_err) => {
+                let player = self
+                    .client
+                    .query()
+                    .player(track_id)
+                    .await
+                    .map_err(|_| ProviderError::Api(inner_err.clone()))?;
+                let adaptive_avc = player
+                    .video_only_streams
+                    .into_iter()
+                    .filter(|s| s.mime.contains("video/mp4") && s.mime.contains("avc1"))
+                    .map(|s| (s.height, s.width.max(1), s.fps as u32, s.url))
+                    .collect();
+                let muxed_mp4 = player
+                    .video_streams
+                    .into_iter()
+                    .filter(|s| s.mime.contains("video/mp4"))
+                    .map(|s| (s.height, s.width.max(1), s.fps as u32, s.url))
+                    .collect();
+                select_video_candidate(
+                    track_id,
+                    adaptive_avc,
+                    muxed_mp4,
+                    player.hls_manifest_url,
+                    max_height,
+                )
+                .ok_or(ProviderError::Api(inner_err))?
+            }
+        };
         if let Ok(mut guard) = self.video_stream_cache.lock() {
             if guard.len() > 200 {
                 guard.clear();
@@ -841,9 +869,90 @@ impl MusicProvider for YtMusicProvider {
     }
 }
 
+fn select_video_candidate(
+    track_id: &str,
+    adaptive_avc: Vec<(u32, u32, u32, String)>,
+    muxed_mp4: Vec<(u32, u32, u32, String)>,
+    hls_url: Option<String>,
+    max_height: u32,
+) -> Option<VideoStreamInfo> {
+    let cap = if max_height == 0 { 720 } else { max_height };
+    let candidates = if !adaptive_avc.is_empty() {
+        adaptive_avc
+    } else {
+        muxed_mp4
+    };
+    if let Some((h, w, _, url)) = candidates
+        .iter()
+        .filter(|(h, _, _, _)| *h <= cap)
+        .max_by_key(|(h, _, fps, _)| (*h, *fps))
+        .cloned()
+        .or_else(|| {
+            candidates
+                .into_iter()
+                .min_by_key(|(h, _, fps, _)| (*h, std::cmp::Reverse(*fps)))
+        })
+    {
+        let ua = innertube::video_stream_user_agent(&url).to_string();
+        return Some(VideoStreamInfo {
+            track_id: track_id.to_string(),
+            url,
+            fallback_url: hls_url,
+            user_agent: ua,
+            width: w,
+            height: h,
+            is_hls: false,
+        });
+    }
+    hls_url.map(|url| {
+        let ua = innertube::video_stream_user_agent(&url).to_string();
+        VideoStreamInfo {
+            track_id: track_id.to_string(),
+            url,
+            fallback_url: None,
+            user_agent: ua,
+            width: 1280,
+            height: 720,
+            is_hls: true,
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn select_video_candidate_handles_auto_cap_and_hls_fallback() {
+        let adaptive = vec![
+            (480, 854, 30, "https://rr1.googlevideo.com/videoplayback?c=IOS&q=480".into()),
+            (720, 1280, 60, "https://rr1.googlevideo.com/videoplayback?c=IOS&q=720".into()),
+            (1080, 1920, 60, "https://rr1.googlevideo.com/videoplayback?c=IOS&q=1080".into()),
+        ];
+        let auto = select_video_candidate(
+            "t1",
+            adaptive.clone(),
+            vec![],
+            Some("https://manifest.googlevideo.com/master.m3u8?c=IOS".into()),
+            0,
+        )
+        .expect("auto picks 720p60");
+        assert_eq!(auto.height, 720);
+        assert!(auto.url.contains("q=720"));
+        assert!(!auto.is_hls);
+
+        let hls = select_video_candidate(
+            "t2",
+            vec![],
+            vec![],
+            Some("https://manifest.googlevideo.com/master.m3u8?c=MWEB".into()),
+            720,
+        )
+        .expect("falls back to HLS");
+        assert!(hls.is_hls);
+        assert_eq!(hls.height, 720);
+        assert!(hls.user_agent.contains("Pixel 8"));
+    }
 
     #[test]
     fn subscriber_count_formatting_handles_millions_thousands_and_units() {

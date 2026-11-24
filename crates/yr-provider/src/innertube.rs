@@ -850,6 +850,20 @@ fn non_empty(s: String) -> Option<String> {
 const VISIONOS_UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_6) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15";
 const ANDROID_VR_UA: &str = "com.google.android.apps.youtube.vr.oculus/1.60.19 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip";
 const IOS_PLAYER_UA: &str = "com.google.ios.youtube/19.29.1 (iPhone16,2; U; CPU iOS 17_5_1 like Mac OS X;)";
+
+pub fn video_stream_user_agent(url: &str) -> &'static str {
+    if url.contains("c=MWEB") || url.contains("c=WEB") {
+        "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
+    } else if url.contains("c=VISIONOS") {
+        VISIONOS_UA
+    } else if url.contains("c=IOS") {
+        IOS_PLAYER_UA
+    } else if url.contains("c=ANDROID_VR") {
+        ANDROID_VR_UA
+    } else {
+        "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
+    }
+}
 static VISITOR_DATA_CACHE: OnceLock<RwLock<Option<(String, Instant)>>> = OnceLock::new();
 
 fn decode_visitor_data(raw: &str) -> String {
@@ -1011,9 +1025,10 @@ fn pick_best_video_stream(
         );
     }
 
+    let cap = if max_height == 0 { 720 } else { max_height };
     if let Some((h, w, _, url)) = candidates
         .iter()
-        .filter(|(h, _, _, _)| *h <= max_height)
+        .filter(|(h, _, _, _)| *h <= cap)
         .max_by_key(|(h, _, fps, _)| (*h, *fps))
         .cloned()
         .or_else(|| {
@@ -1118,7 +1133,8 @@ async fn fetch_mobile_player_json(
     ua: &str,
     client_id: &str,
 ) -> Result<Value, String> {
-    let client_obj = if client_name == "IOS" {
+    let vd = get_or_fetch_visitor_data(http, false).await.ok();
+    let mut client_obj = if client_name == "IOS" {
         json!({
             "clientName": client_name,
             "clientVersion": client_version,
@@ -1140,6 +1156,9 @@ async fn fetch_mobile_player_json(
             "osVersion": "12"
         })
     };
+    if let Some(ref v) = vd {
+        client_obj["visitorData"] = Value::String(v.clone());
+    }
     let body = json!({
         "context": {
             "client": client_obj
@@ -1148,12 +1167,16 @@ async fn fetch_mobile_player_json(
         "contentCheckOk": true,
         "racyCheckOk": true
     });
-    let resp = http
+    let mut req = http
         .post("https://www.youtube.com/youtubei/v1/player?prettyPrint=false")
         .header(CONTENT_TYPE, "application/json")
         .header(USER_AGENT, ua)
         .header("X-YouTube-Client-Name", client_id)
-        .header("X-YouTube-Client-Version", client_version)
+        .header("X-YouTube-Client-Version", client_version);
+    if let Some(ref v) = vd {
+        req = req.header("X-Goog-Visitor-Id", v);
+    }
+    let resp = req
         .json(&body)
         .send()
         .await
@@ -1200,10 +1223,22 @@ pub async fn fetch_player_video_stream(
             return Ok(v);
         }
     }
-    let val = fetch_mobile_player_json(http, video_id, "ANDROID_VR", "1.60.19", ANDROID_VR_UA, "28")
-        .await?;
-    pick_best_video_stream(video_id, &val, max_height, ANDROID_VR_UA)
-        .ok_or_else(|| "No compatible MP4/HLS video stream".to_string())
+    let clients = [
+        ("ANDROID_VR", "1.60.19", ANDROID_VR_UA, "28"),
+        ("IOS", "19.29.1", IOS_PLAYER_UA, "5"),
+    ];
+    let mut last_err = "No compatible MP4/HLS video stream".to_string();
+    for (client_name, client_version, ua, client_id) in clients {
+        match fetch_mobile_player_json(http, video_id, client_name, client_version, ua, client_id).await {
+            Ok(val) => {
+                if let Some(v) = pick_best_video_stream(video_id, &val, max_height, ua) {
+                    return Ok(v);
+                }
+            }
+            Err(e) => last_err = e,
+        }
+    }
+    Err(last_err)
 }
 
 /// Fast direct stream extraction via InnerTube `VISIONOS 0.1` (+ visitorData),
@@ -1823,6 +1858,20 @@ mod tests {
         let s720 = pick_best_video_stream("vid1", &sample, 720, VISIONOS_UA).expect("720p video");
         assert_eq!(s720.height, 720);
         assert_eq!(s720.url, "https://rr1.googlevideo.com/avc_720");
+
+        let s_auto = pick_best_video_stream("vid1", &sample, 0, VISIONOS_UA).expect("Auto caps at 720p");
+        assert_eq!(s_auto.height, 720);
+        assert_eq!(s_auto.url, "https://rr1.googlevideo.com/avc_720");
+
+        assert_eq!(
+            video_stream_user_agent("https://rr1.googlevideo.com/videoplayback?c=IOS"),
+            IOS_PLAYER_UA
+        );
+        assert_eq!(
+            video_stream_user_agent("https://rr1.googlevideo.com/videoplayback?c=ANDROID_VR"),
+            ANDROID_VR_UA
+        );
+        assert!(video_stream_user_agent("https://rr1.googlevideo.com/videoplayback?c=MWEB").contains("Pixel 8"));
     }
 
     #[tokio::test]
