@@ -62,7 +62,7 @@ impl LibrarySort {
     fn label(self) -> &'static str {
         match self {
             Self::Recent => "Recientes",
-            Self::TitleAz => "A–Z",
+            Self::TitleAz => "A-Z",
             Self::ArtistAz => "Artista",
         }
     }
@@ -6235,7 +6235,7 @@ impl YrApp {
 
         ui.add_space(6.0);
         ui.horizontal(|ui| {
-            let sort_w = 98.0_f32;
+            let sort_w = 104.0_f32;
             let bar_w = (ui.available_width() - sort_w - 6.0).max(120.0);
             ui.allocate_ui(Vec2::new(bar_w, 32.0), |ui| {
                 egui::Frame::new()
@@ -6269,16 +6269,15 @@ impl YrApp {
                     });
             });
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                let sort_btn = egui::Button::new(
-                    RichText::new(format!("⇅ {}", self.library_sort.label()))
-                        .size(12.0)
-                        .strong()
-                        .color(TEXT_PRIMARY),
+                if icons::icon_pill_button(
+                    ui,
+                    icons::Icon::ChevronDown,
+                    self.library_sort.label(),
+                    BG_ELEVATED,
+                    TEXT_PRIMARY,
                 )
-                .fill(BG_ELEVATED)
-                .corner_radius(CornerRadius::same(16))
-                .min_size(Vec2::new(sort_w, 32.0));
-                if ui.add(sort_btn).clicked() {
+                .clicked()
+                {
                     self.library_sort = self.library_sort.next();
                     self.set_banner(format!("Ordenado: {}", self.library_sort.label()));
                 }

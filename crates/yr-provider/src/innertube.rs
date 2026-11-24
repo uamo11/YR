@@ -1133,8 +1133,7 @@ async fn fetch_mobile_player_json(
     ua: &str,
     client_id: &str,
 ) -> Result<Value, String> {
-    let vd = get_or_fetch_visitor_data(http, false).await.ok();
-    let mut client_obj = if client_name == "IOS" {
+    let client_obj = if client_name == "IOS" {
         json!({
             "clientName": client_name,
             "clientVersion": client_version,
@@ -1156,9 +1155,6 @@ async fn fetch_mobile_player_json(
             "osVersion": "12"
         })
     };
-    if let Some(ref v) = vd {
-        client_obj["visitorData"] = Value::String(v.clone());
-    }
     let body = json!({
         "context": {
             "client": client_obj
@@ -1167,16 +1163,12 @@ async fn fetch_mobile_player_json(
         "contentCheckOk": true,
         "racyCheckOk": true
     });
-    let mut req = http
+    let resp = http
         .post("https://www.youtube.com/youtubei/v1/player?prettyPrint=false")
         .header(CONTENT_TYPE, "application/json")
         .header(USER_AGENT, ua)
         .header("X-YouTube-Client-Name", client_id)
-        .header("X-YouTube-Client-Version", client_version);
-    if let Some(ref v) = vd {
-        req = req.header("X-Goog-Visitor-Id", v);
-    }
-    let resp = req
+        .header("X-YouTube-Client-Version", client_version)
         .json(&body)
         .send()
         .await
