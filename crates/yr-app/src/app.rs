@@ -336,6 +336,7 @@ pub struct YrApp {
     home_loading: bool,
     active_mood_title: Option<String>,
     detail_view: DetailView,
+    detail_filter_query: String,
     detail_loading: bool,
 
     downloads: Vec<DownloadTask>,
@@ -641,6 +642,7 @@ impl YrApp {
             home_loading: false,
             active_mood_title: None,
             detail_view: DetailView::None,
+            detail_filter_query: String::new(),
             detail_loading: false,
             downloads: Vec::new(),
             total_downloaded_bytes: 0,
@@ -1313,6 +1315,7 @@ impl YrApp {
 
     fn open_album(&mut self, album_id: String, ctx: &egui::Context) {
         self.detail_loading = true;
+        self.detail_filter_query.clear();
         let provider = Arc::clone(&self.provider);
         let tx = self.event_tx.clone();
         let ctx = ctx.clone();
@@ -1325,6 +1328,7 @@ impl YrApp {
 
     fn open_playlist(&mut self, playlist_id: String, ctx: &egui::Context) {
         self.detail_loading = true;
+        self.detail_filter_query.clear();
         let provider = Arc::clone(&self.provider);
         let tx = self.event_tx.clone();
         let ctx = ctx.clone();
@@ -1475,6 +1479,19 @@ impl YrApp {
         }
     }
 
+    fn lookup_track_meta(&self, track_id: &str) -> Option<Track> {
+        self.queue
+            .lock()
+            .ok()
+            .and_then(|q| q.tracks().iter().find(|t| t.id == track_id).cloned())
+            .or_else(|| {
+                self.known_tracks
+                    .lock()
+                    .ok()
+                    .and_then(|m| m.get(track_id).cloned())
+            })
+    }
+
     fn prewarm_next_video_stream(&mut self, ctx: &egui::Context) {
         if !self.is_video_mode {
             return;
@@ -1504,11 +1521,16 @@ impl YrApp {
             return;
         }
         self.prewarmed_video_key = Some(key);
+        let track_meta = self.lookup_track_meta(&next_id);
         let provider = Arc::clone(&self.provider);
         let tx = self.event_tx.clone();
         let ctx = ctx.clone();
         self.runtime.spawn(async move {
-            if let Ok(info) = provider.resolve_video_stream(&next_id, max_h).await {
+            let res = match track_meta {
+                Some(ref t) => provider.resolve_music_video_stream(t, max_h).await,
+                None => provider.resolve_video_stream(&next_id, max_h).await,
+            };
+            if let Ok(info) = res {
                 let _ = tx.send(AppEvent::VideoStreamPrewarmed {
                     track_id: next_id,
                     max_h,
@@ -1564,14 +1586,16 @@ impl YrApp {
         self.video_stream_loading = true;
         self.video_stream_error = None;
         self.last_video_attached = None;
+        let track_meta = self.lookup_track_meta(&track_id);
         let provider = Arc::clone(&self.provider);
         let tx = self.event_tx.clone();
         let ctx = ctx.clone();
         self.runtime.spawn(async move {
-            let res = provider
-                .resolve_video_stream(&track_id, max_h)
-                .await
-                .map_err(|e| e.to_string());
+            let res = match track_meta {
+                Some(ref t) => provider.resolve_music_video_stream(t, max_h).await,
+                None => provider.resolve_video_stream(&track_id, max_h).await,
+            }
+            .map_err(|e| e.to_string());
             let _ = tx.send(AppEvent::VideoStreamResolved {
                 track_id,
                 result: res,
@@ -2987,6 +3011,7 @@ impl YrApp {
             }
         } else if !matches!(self.detail_view, DetailView::None) {
             self.detail_view = DetailView::None;
+            self.detail_filter_query.clear();
         } else if self.active_tab == NavTab::Search
             && (!self.search_query.trim().is_empty() || has_search_results)
         {
@@ -3253,6 +3278,30 @@ impl YrApp {
             {
                 self.enqueue_download_all(tracks.to_vec(), ctx);
             }
+            if tracks.len() >= 2
+                && icons::icon_pill_button(
+                    ui,
+                    icons::Icon::PlaylistAdd,
+                    "Guardar lista",
+                    BG_ELEVATED,
+                    TEXT_PRIMARY,
+                )
+                .clicked()
+            {
+                let name = pin_card
+                    .as_ref()
+                    .map(|c| c.title.clone())
+                    .filter(|s| !s.trim().is_empty())
+                    .unwrap_or_else(|| "Mix guardado".to_string());
+                let pl = self.store.create_playlist(name);
+                let saved_count = tracks.len();
+                for t in tracks {
+                    self.store.add_to_playlist(&pl.id, t.clone());
+                }
+                self.set_banner(format!(
+                    "Guardada en Tus playlists ({saved_count} canciones)"
+                ));
+            }
             if let Some(card) = pin_card {
                 let is_pinned = self.store.is_pinned_speed_dial(&card.title);
                 if icons::icon_pill_button(
@@ -3272,6 +3321,51 @@ impl YrApp {
                     });
                 }
             }
+        });
+    }
+
+    fn render_detail_topbar(
+        &mut self,
+        ui: &mut egui::Ui,
+        ctx: &egui::Context,
+        kind_label: &str,
+        share_subject: &str,
+        share_body: &str,
+    ) {
+        ui.horizontal(|ui| {
+            if icons::icon_button(
+                ui,
+                icons::Icon::ArrowBack,
+                36.0,
+                18.0,
+                BG_ELEVATED,
+                TEXT_PRIMARY,
+                18.0,
+            )
+            .clicked()
+            {
+                self.detail_view = DetailView::None;
+                self.detail_filter_query.clear();
+            }
+            ui.add_space(6.0);
+            ui.label(RichText::new(kind_label).size(15.0).color(TEXT_SECONDARY));
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if icons::icon_button(
+                    ui,
+                    icons::Icon::Share,
+                    34.0,
+                    17.0,
+                    BG_ELEVATED,
+                    TEXT_PRIMARY,
+                    16.0,
+                )
+                .clicked()
+                {
+                    ctx.copy_text(share_body.to_string());
+                    crate::android_media::share_text(share_subject, share_body);
+                    self.set_banner("Enlace copiado y listo para compartir");
+                }
+            });
         });
     }
 
@@ -3299,27 +3393,11 @@ impl YrApp {
         match view {
             DetailView::None => false,
             DetailView::Album(album) => {
-                ui.horizontal(|ui| {
-                    if icons::icon_button(
-                        ui,
-                        icons::Icon::ArrowBack,
-                        36.0,
-                        18.0,
-                        BG_ELEVATED,
-                        TEXT_PRIMARY,
-                        18.0,
-                    )
-                    .clicked()
-                    {
-                        self.detail_view = DetailView::None;
-                    }
-                    ui.add_space(6.0);
-                    ui.label(
-                        RichText::new("Álbum")
-                            .size(15.0)
-                            .color(TEXT_SECONDARY),
-                    );
-                });
+                let share_body = format!(
+                    "{} — {}\nhttps://music.youtube.com/browse/{}",
+                    album.summary.title, album.summary.artist, album.summary.id
+                );
+                self.render_detail_topbar(ui, ctx, "Álbum", &album.summary.title, &share_body);
                 ui.add_space(6.0);
                 let detail_viewport = ui.available_rect_before_wrap();
                 self.detail_scroller.update(ui, detail_viewport, !self.detail_loading);
@@ -3367,11 +3445,25 @@ impl YrApp {
                                 .selectable(false),
                             );
                             ui.add_space(2.0);
-                            ui.label(
-                                RichText::new(&album.summary.artist)
-                                    .size(14.0)
-                                    .color(TEXT_SECONDARY),
-                            );
+                            if ui
+                                .add(
+                                    egui::Label::new(
+                                        RichText::new(&album.summary.artist)
+                                            .size(14.0)
+                                            .color(TEXT_SECONDARY),
+                                    )
+                                    .selectable(false)
+                                    .sense(Sense::click()),
+                                )
+                                .clicked()
+                                && !album.summary.artist.trim().is_empty()
+                            {
+                                self.detail_view = DetailView::None;
+                                self.detail_filter_query.clear();
+                                self.active_tab = NavTab::Search;
+                                self.search_query = album.summary.artist.clone();
+                                self.trigger_search(ctx);
+                            }
                             let count = album.tracks.len();
                             let total_secs: u64 =
                                 album.tracks.iter().filter_map(|t| t.duration_secs).sum();
@@ -3380,10 +3472,15 @@ impl YrApp {
                             } else {
                                 format!("{count} canciones")
                             };
-                            let meta = if total_secs > 0 {
+                            let base_meta = if total_secs > 0 {
                                 format!("{count_txt} • {}", format_seconds(total_secs))
                             } else {
                                 count_txt
+                            };
+                            let meta = if let Some(y) = album.summary.year {
+                                format!("{y} • {base_meta}")
+                            } else {
+                                base_meta
                             };
                             ui.label(RichText::new(meta).size(12.0).color(TEXT_SECONDARY));
                             ui.add_space(10.0);
@@ -3414,28 +3511,57 @@ impl YrApp {
                 true
             }
             DetailView::Playlist(pl) => {
-                ui.horizontal(|ui| {
-                    if icons::icon_button(
-                        ui,
-                        icons::Icon::ArrowBack,
-                        36.0,
-                        18.0,
-                        BG_ELEVATED,
-                        TEXT_PRIMARY,
-                        18.0,
-                    )
-                    .clicked()
-                    {
-                        self.detail_view = DetailView::None;
-                    }
-                    ui.add_space(6.0);
-                    ui.label(
-                        RichText::new("Playlist")
-                            .size(15.0)
-                            .color(TEXT_SECONDARY),
-                    );
-                });
+                let share_body = format!(
+                    "{}\nhttps://music.youtube.com/playlist?list={}",
+                    pl.summary.title, pl.summary.id
+                );
+                self.render_detail_topbar(ui, ctx, "Playlist", &pl.summary.title, &share_body);
                 ui.add_space(6.0);
+                if pl.tracks.len() >= 6 {
+                    egui::Frame::new()
+                        .fill(BG_SURFACE)
+                        .corner_radius(CornerRadius::same(18))
+                        .inner_margin(egui::Margin::symmetric(12, 4))
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                let input_w = (ui.available_width() - 36.0).max(120.0);
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut self.detail_filter_query)
+                                        .hint_text("Buscar en esta playlist...")
+                                        .frame(false)
+                                        .desired_width(input_w),
+                                );
+                                if !self.detail_filter_query.is_empty()
+                                    && icons::icon_button(
+                                        ui,
+                                        icons::Icon::Close,
+                                        24.0,
+                                        12.0,
+                                        Color32::TRANSPARENT,
+                                        TEXT_SECONDARY,
+                                        12.0,
+                                    )
+                                    .clicked()
+                                {
+                                    self.detail_filter_query.clear();
+                                }
+                            });
+                        });
+                    ui.add_space(6.0);
+                }
+                let q_low = self.detail_filter_query.trim().to_lowercase();
+                let visible_tracks: Vec<Track> = if q_low.is_empty() {
+                    pl.tracks.clone()
+                } else {
+                    pl.tracks
+                        .iter()
+                        .filter(|t| {
+                            t.title.to_lowercase().contains(&q_low)
+                                || t.artist.to_lowercase().contains(&q_low)
+                        })
+                        .cloned()
+                        .collect()
+                };
                 let detail_viewport = ui.available_rect_before_wrap();
                 self.detail_scroller.update(ui, detail_viewport, !self.detail_loading);
                 let detail_scroll = egui::ScrollArea::vertical()
@@ -3520,8 +3646,8 @@ impl YrApp {
                             self.render_collection_actions(ui, ctx, &pl.tracks, true, Some(card));
                         });
                         ui.add_space(10.0);
-                        for (idx, track) in pl.tracks.iter().enumerate() {
-                            self.render_track_row(ui, ctx, track, &pl.tracks, idx, false);
+                        for (idx, track) in visible_tracks.iter().enumerate() {
+                            self.render_track_row(ui, ctx, track, &visible_tracks, idx, false);
                         }
                     });
                 self.detail_scroller.sync_bounds(detail_scroll.content_size.y, detail_scroll.inner_rect.height());
@@ -3538,27 +3664,11 @@ impl YrApp {
                 true
             }
             DetailView::Artist(artist) => {
-                ui.horizontal(|ui| {
-                    if icons::icon_button(
-                        ui,
-                        icons::Icon::ArrowBack,
-                        36.0,
-                        18.0,
-                        BG_ELEVATED,
-                        TEXT_PRIMARY,
-                        18.0,
-                    )
-                    .clicked()
-                    {
-                        self.detail_view = DetailView::None;
-                    }
-                    ui.add_space(6.0);
-                    ui.label(
-                        RichText::new("Artista")
-                            .size(15.0)
-                            .color(TEXT_SECONDARY),
-                    );
-                });
+                let share_body = format!(
+                    "{}\nhttps://music.youtube.com/channel/{}",
+                    artist.summary.name, artist.summary.id
+                );
+                self.render_detail_topbar(ui, ctx, "Artista", &artist.summary.name, &share_body);
                 ui.add_space(6.0);
                 let detail_viewport = ui.available_rect_before_wrap();
                 self.detail_scroller.update(ui, detail_viewport, !self.detail_loading);
@@ -9250,15 +9360,24 @@ impl YrApp {
                             self.open_artist(artist_id, ctx);
                         }
                     } else {
-                        ui.add(
-                            egui::Label::new(
-                                RichText::new(&track.artist)
-                                    .size(15.0)
-                                    .color(Color32::from_white_alpha(190)),
-                            )
-                            .truncate()
-                            .selectable(false),
-                        );
+                        let artist_clickable =
+                            !track.artist.trim().is_empty() && track.artist != "YouTube Music";
+                        let mut artist_lbl = egui::Label::new(
+                            RichText::new(&track.artist)
+                                .size(15.0)
+                                .color(Color32::from_white_alpha(190)),
+                        )
+                        .truncate()
+                        .selectable(false);
+                        if artist_clickable {
+                            artist_lbl = artist_lbl.sense(Sense::click());
+                        }
+                        if ui.add(artist_lbl).clicked() && artist_clickable {
+                            self.now_playing_open = false;
+                            self.active_tab = NavTab::Search;
+                            self.search_query = track.artist.clone();
+                            self.trigger_search(ctx);
+                        }
                     }
 
                     let is_offline = track.local_path.is_some()
@@ -10607,7 +10726,7 @@ impl YrApp {
                     }
                 }
                 SettingsCategory::About => {
-                    ui.heading("YR Music v0.9.16");
+                    ui.heading("YR Music v0.9.17");
                     ui.label("Cliente nativo de música 100% en Rust para Android y escritorio.");
                     ui.add_space(6.0);
                     ui.label(RichText::new("Motor de audio Symphonia PCM con DSP Morphe 3D binaural, reproductor integrado de video en la app, auto-scroll inteligente de cola, prefetch predictivo en disco y compatibilidad completa con YouTube Music.").size(12.0).color(TEXT_SECONDARY));
@@ -11880,7 +11999,7 @@ impl YrApp {
                         }
                         if menu_row(ui, icons::Icon::Help, "Ayuda y comentarios").clicked() {
                             self.show_account_modal = false;
-                            self.set_banner("YR Music v0.9.16 • Pure Rust");
+                            self.set_banner("YR Music v0.9.17 • Pure Rust");
                         }
 
                         #[cfg(target_os = "android")]

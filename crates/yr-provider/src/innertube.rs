@@ -849,7 +849,7 @@ fn non_empty(s: String) -> Option<String> {
 
 const VISIONOS_UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_6) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15";
 const ANDROID_VR_UA: &str = "com.google.android.apps.youtube.vr.oculus/1.60.19 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip";
-const IOS_PLAYER_UA: &str = "com.google.ios.youtube/19.29.1 (iPhone16,2; U; CPU iOS 17_5_1 like Mac OS X;)";
+const IOS_PLAYER_UA: &str = "com.google.ios.youtube/20.03.02 (iPhone16,2; U; CPU iOS 18_2_1 like Mac OS X;)";
 
 pub fn video_stream_user_agent(url: &str) -> &'static str {
     if url.contains("c=MWEB") || url.contains("c=WEB") {
@@ -983,46 +983,50 @@ fn pick_best_video_stream(
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
 
-    let collect_mp4 = |arr: Option<&Vec<Value>>, require_avc: bool| -> Vec<(u32, u32, u32, String)> {
-        let mut list = Vec::new();
-        let Some(items) = arr else {
-            return list;
+    let collect_video =
+        |arr: Option<&Vec<Value>>, mime_sub: &str, codec_sub: Option<&str>| -> Vec<(u32, u32, u32, String)> {
+            let mut list = Vec::new();
+            let Some(items) = arr else {
+                return list;
+            };
+            for f in items {
+                let Some(mime) = f.get("mimeType").and_then(|v| v.as_str()) else {
+                    continue;
+                };
+                if !mime.contains(mime_sub) {
+                    continue;
+                }
+                if let Some(c) = codec_sub {
+                    if !mime.contains(c) {
+                        continue;
+                    }
+                }
+                let Some(url) = f.get("url").and_then(|v| v.as_str()) else {
+                    continue;
+                };
+                let height = f.get("height").and_then(|v| v.as_u64()).unwrap_or(360) as u32;
+                let width = f
+                    .get("width")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or((height as u64 * 16) / 9) as u32;
+                let fps = f.get("fps").and_then(|v| v.as_u64()).unwrap_or(30) as u32;
+                list.push((height, width, fps, url.to_string()));
+            }
+            list
         };
-        for f in items {
-            let Some(mime) = f.get("mimeType").and_then(|v| v.as_str()) else {
-                continue;
-            };
-            if !mime.contains("video/mp4") {
-                continue;
-            }
-            if require_avc && !mime.contains("avc1") {
-                continue;
-            }
-            let Some(url) = f.get("url").and_then(|v| v.as_str()) else {
-                continue;
-            };
-            let height = f.get("height").and_then(|v| v.as_u64()).unwrap_or(360) as u32;
-            let width = f
-                .get("width")
-                .and_then(|v| v.as_u64())
-                .unwrap_or((height as u64 * 16) / 9) as u32;
-            let fps = f.get("fps").and_then(|v| v.as_u64()).unwrap_or(30) as u32;
-            list.push((height, width, fps, url.to_string()));
-        }
-        list
-    };
 
-    let mut candidates = collect_mp4(
-        val.pointer("/streamingData/adaptiveFormats")
-            .and_then(|v| v.as_array()),
-        true,
-    );
+    let adaptive = val
+        .pointer("/streamingData/adaptiveFormats")
+        .and_then(|v| v.as_array());
+    let muxed = val
+        .pointer("/streamingData/formats")
+        .and_then(|v| v.as_array());
+    let mut candidates = collect_video(adaptive, "video/mp4", Some("avc1"));
     if candidates.is_empty() {
-        candidates = collect_mp4(
-            val.pointer("/streamingData/formats")
-                .and_then(|v| v.as_array()),
-            false,
-        );
+        candidates = collect_video(muxed, "video/mp4", None);
+    }
+    if candidates.is_empty() {
+        candidates = collect_video(adaptive, "video/webm", None);
     }
 
     let cap = if max_height == 0 { 720 } else { max_height };
@@ -1141,8 +1145,9 @@ async fn fetch_mobile_player_json(
             "deviceModel": "iPhone16,2",
             "hl": "es-419",
             "gl": "MX",
-            "osName": "iOS",
-            "osVersion": "17.5.1.21F90"
+            "osName": "iPhone",
+            "osVersion": "18.2.1.22C161",
+            "platform": "MOBILE"
         })
     } else {
         json!({
@@ -1204,7 +1209,7 @@ async fn fetch_visionos_stream(
         .ok_or_else(|| "No audio stream in VISIONOS response".to_string())
 }
 
-/// Resolves a direct hardware-decodable H.264 MP4 or HLS video stream via InnerTube.
+/// Resolves a direct hardware-decodable H.264 MP4, VP9 WebM, or HLS video stream via InnerTube.
 pub async fn fetch_player_video_stream(
     http: &reqwest::Client,
     video_id: &str,
@@ -1217,7 +1222,7 @@ pub async fn fetch_player_video_stream(
     }
     let clients = [
         ("ANDROID_VR", "1.60.19", ANDROID_VR_UA, "28"),
-        ("IOS", "19.29.1", IOS_PLAYER_UA, "5"),
+        ("IOS", "20.03.02", IOS_PLAYER_UA, "5"),
     ];
     let mut last_err = "No compatible MP4/HLS video stream".to_string();
     for (client_name, client_version, ua, client_id) in clients {
@@ -1227,7 +1232,11 @@ pub async fn fetch_player_video_stream(
                     return Ok(v);
                 }
             }
-            Err(e) => last_err = e,
+            Err(e) => {
+                if last_err.starts_with("No ") || !e.contains("HTTP ") {
+                    last_err = e;
+                }
+            }
         }
     }
     Err(last_err)
@@ -1245,7 +1254,7 @@ pub async fn fetch_player_stream(
     }
     let clients = [
         ("ANDROID_VR", "1.60.19", ANDROID_VR_UA, "28"),
-        ("IOS", "19.29.1", IOS_PLAYER_UA, "5"),
+        ("IOS", "20.03.02", IOS_PLAYER_UA, "5"),
     ];
 
     let mut last_err = String::from("No stream returned");
@@ -1258,7 +1267,11 @@ pub async fn fetch_player_stream(
                     return Ok(best);
                 }
             }
-            Err(e) => last_err = e,
+            Err(e) => {
+                if last_err.starts_with("No ") || !e.contains("HTTP ") {
+                    last_err = e;
+                }
+            }
         }
     }
 
@@ -1864,6 +1877,24 @@ mod tests {
             ANDROID_VR_UA
         );
         assert!(video_stream_user_agent("https://rr1.googlevideo.com/videoplayback?c=MWEB").contains("Pixel 8"));
+
+        let vp9_only = json!({
+            "streamingData": {
+                "adaptiveFormats": [
+                    {
+                        "itag": 247,
+                        "mimeType": "video/webm; codecs=\"vp9\"",
+                        "width": 1280,
+                        "height": 720,
+                        "fps": 30,
+                        "url": "https://rr1.googlevideo.com/vp9_720"
+                    }
+                ]
+            }
+        });
+        let vp9_pick = pick_best_video_stream("vid2", &vp9_only, 0, IOS_PLAYER_UA).expect("VP9 WebM fallback");
+        assert_eq!(vp9_pick.height, 720);
+        assert_eq!(vp9_pick.url, "https://rr1.googlevideo.com/vp9_720");
     }
 
     #[tokio::test]

@@ -2,7 +2,7 @@ pub mod innertube;
 
 use async_trait::async_trait;
 use innertube::GoogleSession;
-use rustypipe::client::{OauthDeviceCode, RustyPipe};
+use rustypipe::client::{ClientType, OauthDeviceCode, RustyPipe};
 use rustypipe::model::{AlbumItem, ArtistItem, MusicPlaylistItem, TrackItem};
 use rustypipe::param::Country;
 use std::collections::HashMap;
@@ -56,6 +56,13 @@ pub trait MusicProvider: Send + Sync {
         _max_height: u32,
     ) -> Result<VideoStreamInfo, ProviderError> {
         Err(ProviderError::Api("Video stream not supported".into()))
+    }
+    async fn resolve_music_video_stream(
+        &self,
+        track: &Track,
+        max_height: u32,
+    ) -> Result<VideoStreamInfo, ProviderError> {
+        self.resolve_video_stream(&track.id, max_height).await
     }
     async fn fetch_bytes(&self, url: &str) -> Result<Vec<u8>, ProviderError>;
     async fn is_logged_in(&self) -> bool;
@@ -216,6 +223,24 @@ impl YtMusicProvider {
                 .last()
                 .or_else(|| item.thumbnail.first())
                 .map(|t| t.url.clone()),
+        }
+    }
+
+    async fn search_omv_candidates(&self, track: &Track) -> Vec<(String, String, Option<u32>)> {
+        let query = format!("{} {}", track.title, track.artist);
+        match tokio::time::timeout(
+            Duration::from_millis(3500),
+            self.client.query().music_search_videos(&query),
+        )
+        .await
+        {
+            Ok(Ok(res)) => res
+                .items
+                .items
+                .into_iter()
+                .map(|t| (t.id, t.name, t.duration))
+                .collect(),
+            _ => Vec::new(),
         }
     }
 }
@@ -741,14 +766,23 @@ impl MusicProvider for YtMusicProvider {
                 let player = self
                     .client
                     .query()
-                    .player(track_id)
+                    .player_from_clients(
+                        track_id,
+                        &[ClientType::Ios, ClientType::Android, ClientType::Tv, ClientType::Desktop],
+                    )
                     .await
                     .map_err(|_| ProviderError::Api(inner_err.clone()))?;
                 let adaptive_avc = player
                     .video_only_streams
-                    .into_iter()
+                    .iter()
                     .filter(|s| s.mime.contains("video/mp4") && s.mime.contains("avc1"))
-                    .map(|s| (s.height, s.width.max(1), s.fps as u32, s.url))
+                    .map(|s| (s.height, s.width.max(1), s.fps as u32, s.url.clone()))
+                    .collect();
+                let adaptive_webm = player
+                    .video_only_streams
+                    .iter()
+                    .filter(|s| s.mime.contains("video/webm"))
+                    .map(|s| (s.height, s.width.max(1), s.fps as u32, s.url.clone()))
                     .collect();
                 let muxed_mp4 = player
                     .video_streams
@@ -760,6 +794,7 @@ impl MusicProvider for YtMusicProvider {
                     track_id,
                     adaptive_avc,
                     muxed_mp4,
+                    adaptive_webm,
                     player.hls_manifest_url,
                     max_height,
                 )
@@ -773,6 +808,68 @@ impl MusicProvider for YtMusicProvider {
             guard.insert(cache_key, (info.clone(), Instant::now()));
         }
         Ok(info)
+    }
+
+    async fn resolve_music_video_stream(
+        &self,
+        track: &Track,
+        max_height: u32,
+    ) -> Result<VideoStreamInfo, ProviderError> {
+        let cache_key = (track.id.clone(), max_height);
+        if let Ok(guard) = self.video_stream_cache.lock() {
+            if let Some((cached, fetched_at)) = guard.get(&cache_key) {
+                if fetched_at.elapsed() < Duration::from_secs(4 * 3600) {
+                    return Ok(cached.clone());
+                }
+            }
+        }
+        let is_art_track = track
+            .thumbnail_url
+            .as_deref()
+            .is_some_and(|u| u.contains("googleusercontent.com"));
+        let mut omv_cands: Option<Vec<(String, String, Option<u32>)>> = None;
+
+        if is_art_track && !track.title.trim().is_empty() {
+            let cands = self.search_omv_candidates(track).await;
+            if let Some(omv_id) = pick_paired_omv_id(track, &cands, 6) {
+                if let Ok(mut info) = self.resolve_video_stream(&omv_id, max_height).await {
+                    info.track_id = track.id.clone();
+                    if let Ok(mut guard) = self.video_stream_cache.lock() {
+                        if guard.len() > 200 {
+                            guard.clear();
+                        }
+                        guard.insert(cache_key, (info.clone(), Instant::now()));
+                    }
+                    return Ok(info);
+                }
+            }
+            omv_cands = Some(cands);
+        }
+
+        match self.resolve_video_stream(&track.id, max_height).await {
+            Ok(info) => Ok(info),
+            Err(err) => {
+                if !track.title.trim().is_empty() {
+                    let cands = match omv_cands {
+                        Some(c) => c,
+                        None => self.search_omv_candidates(track).await,
+                    };
+                    if let Some(omv_id) = pick_paired_omv_id(track, &cands, 60) {
+                        if let Ok(mut info) = self.resolve_video_stream(&omv_id, max_height).await {
+                            info.track_id = track.id.clone();
+                            if let Ok(mut guard) = self.video_stream_cache.lock() {
+                                if guard.len() > 200 {
+                                    guard.clear();
+                                }
+                                guard.insert(cache_key, (info.clone(), Instant::now()));
+                            }
+                            return Ok(info);
+                        }
+                    }
+                }
+                Err(err)
+            }
+        }
     }
 
     async fn fetch_bytes(&self, url: &str) -> Result<Vec<u8>, ProviderError> {
@@ -869,18 +966,55 @@ impl MusicProvider for YtMusicProvider {
     }
 }
 
+fn pick_paired_omv_id(
+    track: &Track,
+    candidates: &[(String, String, Option<u32>)],
+    max_dur_diff_secs: u64,
+) -> Option<String> {
+    let title_tokens: Vec<String> = track
+        .title
+        .to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| w.chars().count() >= 3)
+        .map(|s| s.to_string())
+        .collect();
+    candidates.iter().find_map(|(cid, cname, cdur)| {
+        if cid == &track.id || cid.is_empty() {
+            return None;
+        }
+        let low_name = cname.to_lowercase();
+        let title_ok =
+            title_tokens.is_empty() || title_tokens.iter().any(|tok| low_name.contains(tok));
+        if !title_ok {
+            return None;
+        }
+        if let (Some(td), Some(cd)) = (
+            track.duration_secs.filter(|&d| d > 0),
+            cdur.filter(|&d| d > 0),
+        ) {
+            if td.abs_diff(cd as u64) > max_dur_diff_secs {
+                return None;
+            }
+        }
+        Some(cid.clone())
+    })
+}
+
 fn select_video_candidate(
     track_id: &str,
     adaptive_avc: Vec<(u32, u32, u32, String)>,
     muxed_mp4: Vec<(u32, u32, u32, String)>,
+    adaptive_webm: Vec<(u32, u32, u32, String)>,
     hls_url: Option<String>,
     max_height: u32,
 ) -> Option<VideoStreamInfo> {
     let cap = if max_height == 0 { 720 } else { max_height };
     let candidates = if !adaptive_avc.is_empty() {
         adaptive_avc
-    } else {
+    } else if !muxed_mp4.is_empty() {
         muxed_mp4
+    } else {
+        adaptive_webm
     };
     if let Some((h, w, _, url)) = candidates
         .iter()
@@ -933,6 +1067,7 @@ mod tests {
             "t1",
             adaptive.clone(),
             vec![],
+            vec![],
             Some("https://manifest.googlevideo.com/master.m3u8?c=IOS".into()),
             0,
         )
@@ -941,8 +1076,21 @@ mod tests {
         assert!(auto.url.contains("q=720"));
         assert!(!auto.is_hls);
 
+        let webm = select_video_candidate(
+            "t_webm",
+            vec![],
+            vec![],
+            vec![(720, 1280, 30, "https://rr1.googlevideo.com/videoplayback?c=IOS&q=webm720".into())],
+            None,
+            0,
+        )
+        .expect("webm fallback picks 720p");
+        assert_eq!(webm.height, 720);
+        assert!(webm.url.contains("webm720"));
+
         let hls = select_video_candidate(
             "t2",
+            vec![],
             vec![],
             vec![],
             Some("https://manifest.googlevideo.com/master.m3u8?c=MWEB".into()),
@@ -952,6 +1100,31 @@ mod tests {
         assert!(hls.is_hls);
         assert_eq!(hls.height, 720);
         assert!(hls.user_agent.contains("Pixel 8"));
+    }
+
+    #[test]
+    fn pick_paired_omv_id_matches_title_and_duration_tolerance() {
+        let track = Track {
+            id: "atv_orig".to_string(),
+            title: "Instant Crush (feat. Julian Casablancas)".to_string(),
+            artist: "Daft Punk".to_string(),
+            artist_id: None,
+            album: Some("Random Access Memories".to_string()),
+            album_id: None,
+            duration_secs: Some(337),
+            thumbnail_url: Some("https://lh3.googleusercontent.com/cover".to_string()),
+            local_path: None,
+        };
+        let cands = vec![
+            ("atv_orig".to_string(), "Instant Crush".to_string(), Some(337)),
+            ("live_remix".to_string(), "Instant Crush Live Long".to_string(), Some(420)),
+            ("omv_123".to_string(), "Daft Punk - Instant Crush (Official Video)".to_string(), Some(340)),
+        ];
+        assert_eq!(pick_paired_omv_id(&track, &cands, 6).as_deref(), Some("omv_123"));
+        // Strict tolerance excludes mismatch, looser fallback finds live version
+        let far_only = vec![("live_remix".to_string(), "Instant Crush Live Long".to_string(), Some(365))];
+        assert_eq!(pick_paired_omv_id(&track, &far_only, 6), None);
+        assert_eq!(pick_paired_omv_id(&track, &far_only, 60).as_deref(), Some("live_remix"));
     }
 
     #[test]
