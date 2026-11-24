@@ -8,6 +8,7 @@ pub enum MediaAction {
     SeekMs(u64),
     Stop,
     CycleVideoQuality,
+    CycleSpeed,
 }
 
 #[cfg(target_os = "android")]
@@ -244,6 +245,7 @@ mod imp {
             5 => MediaAction::SeekMs(arg.max(0) as u64),
             6 => MediaAction::Stop,
             7 => MediaAction::CycleVideoQuality,
+            8 => MediaAction::CycleSpeed,
             _ => return,
         };
         if let Some(tx) = ACTION_TX.lock().ok().and_then(|g| g.clone()) {

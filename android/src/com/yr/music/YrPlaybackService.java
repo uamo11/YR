@@ -50,6 +50,7 @@ import android.util.Log;
 import android.view.GestureDetector;
 import android.view.Gravity;
 import android.view.MotionEvent;
+import android.view.ScaleGestureDetector;
 import android.view.Surface;
 import android.view.TextureView;
 import android.view.View;
@@ -96,6 +97,7 @@ public class YrPlaybackService extends Service {
     public static final int NATIVE_SEEK = 5;
     public static final int NATIVE_STOP = 6;
     public static final int NATIVE_CYCLE_VIDEO_QUALITY = 7;
+    public static final int NATIVE_CYCLE_SPEED = 8;
 
     private static volatile String currentTitle = "YR Music";
     private static volatile String currentArtist = "";
@@ -132,6 +134,7 @@ public class YrPlaybackService extends Service {
     private static volatile TextView sVideoFullscreenQuality = null;
     private static volatile String sVideoQualityLabel = "Auto";
     private static volatile boolean sVideoFullscreen = false;
+    private static volatile boolean sVideoFillZoom = false;
     private static volatile int sCompactX = 0;
     private static volatile int sCompactY = 0;
     private static volatile int sCompactW = 0;
@@ -143,6 +146,8 @@ public class YrPlaybackService extends Service {
     private static volatile TextView sFsTimeDur = null;
     private static volatile SeekBar sFsSeekBar = null;
     private static volatile HudIconView sFsPlayPauseBtn = null;
+    private static volatile TextView sFsSpeedBtn = null;
+    private static volatile TextView sFsZoomBtn = null;
     private static volatile boolean sFsHudVisible = false;
     private static volatile boolean sFsSeeking = false;
     private static Runnable sAutoHideFsHudRunnable = null;
@@ -681,10 +686,18 @@ public class YrPlaybackService extends Service {
         float videoAspect = (float) sVideoWidth / (float) sVideoHeight;
         float scaleX = 1.0f;
         float scaleY = 1.0f;
-        if (videoAspect > viewAspect) {
-            scaleY = viewAspect / videoAspect;
+        if (sVideoFullscreen && sVideoFillZoom) {
+            if (videoAspect > viewAspect) {
+                scaleX = videoAspect / viewAspect;
+            } else {
+                scaleY = viewAspect / videoAspect;
+            }
         } else {
-            scaleX = videoAspect / viewAspect;
+            if (videoAspect > viewAspect) {
+                scaleY = viewAspect / videoAspect;
+            } else {
+                scaleX = videoAspect / viewAspect;
+            }
         }
         Matrix matrix = new Matrix();
         matrix.setScale(scaleX, scaleY, viewWidth * 0.5f, viewHeight * 0.5f);
@@ -869,6 +882,15 @@ public class YrPlaybackService extends Service {
         }
     }
 
+    private static String formatSpeedPillLabel(float speed) {
+        if (Math.abs(speed - 0.75f) < 0.04f) return "0.75x";
+        if (Math.abs(speed - 1.0f) < 0.04f) return "1x";
+        if (Math.abs(speed - 1.25f) < 0.04f) return "1.25x";
+        if (Math.abs(speed - 1.5f) < 0.04f) return "1.5x";
+        if (Math.abs(speed - 2.0f) < 0.04f) return "2x";
+        return String.format(Locale.US, "%.2gx", speed);
+    }
+
     private static void syncFsHudControls() {
         if (sFsPlayPauseBtn != null) {
             sFsPlayPauseBtn.setKind(sPendingPlaying ? HudIconView.KIND_PAUSE : HudIconView.KIND_PLAY);
@@ -881,6 +903,22 @@ public class YrPlaybackService extends Service {
         }
         if (sVideoFullscreenQuality != null) {
             sVideoFullscreenQuality.setText(sVideoQualityLabel);
+        }
+        if (sFsSpeedBtn != null) {
+            sFsSpeedBtn.setText(formatSpeedPillLabel(sPendingSpeed));
+            if (sFsSpeedBtn.getBackground() instanceof GradientDrawable) {
+                ((GradientDrawable) sFsSpeedBtn.getBackground()).setColor(
+                        Math.abs(sPendingSpeed - 1.0f) > 0.03f ? 0xCCFF0033 : 0x33FFFFFF
+                );
+            }
+        }
+        if (sFsZoomBtn != null) {
+            sFsZoomBtn.setText(sVideoFillZoom ? "Original" : "Llenar");
+            if (sFsZoomBtn.getBackground() instanceof GradientDrawable) {
+                ((GradientDrawable) sFsZoomBtn.getBackground()).setColor(
+                        sVideoFillZoom ? 0xCCFF0033 : 0x33FFFFFF
+                );
+            }
         }
         if (!sFsSeeking && sFsSeekBar != null) {
             long pos = (sPendingPosMs > 0) ? sPendingPosMs : currentPosMs;
@@ -989,6 +1027,7 @@ public class YrPlaybackService extends Service {
             }
             setFullscreenHudVisible(true);
         } else {
+            sVideoFillZoom = false;
             try {
                 targetAct.setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_PORTRAIT);
             } catch (Throwable ignored) {
@@ -1290,7 +1329,34 @@ public class YrPlaybackService extends Service {
                             return true;
                         }
                     });
-                    sVideoOverlayRoot.setOnTouchListener((v, ev) -> gd.onTouchEvent(ev));
+                    final ScaleGestureDetector sgd = new ScaleGestureDetector(act, new ScaleGestureDetector.SimpleOnScaleGestureListener() {
+                        @Override
+                        public boolean onScale(ScaleGestureDetector detector) {
+                            if (!sVideoFullscreen) return false;
+                            float sf = detector.getScaleFactor();
+                            if (sf > 1.07f && !sVideoFillZoom) {
+                                sVideoFillZoom = true;
+                                applyVideoAspectTransform();
+                                syncFsHudControls();
+                                showVideoSeekBadge(act, "Zoom para llenar pantalla", true);
+                                return true;
+                            } else if (sf < 0.93f && sVideoFillZoom) {
+                                sVideoFillZoom = false;
+                                applyVideoAspectTransform();
+                                syncFsHudControls();
+                                showVideoSeekBadge(act, "Tama\u00F1o original", false);
+                                return true;
+                            }
+                            return false;
+                        }
+                    });
+                    sVideoOverlayRoot.setOnTouchListener((v, ev) -> {
+                        sgd.onTouchEvent(ev);
+                        if (!sgd.isInProgress() && ev.getPointerCount() <= 1) {
+                            gd.onTouchEvent(ev);
+                        }
+                        return true;
+                    });
 
                     sVideoTextureView = new TextureView(act);
                     sVideoTextureView.setSurfaceTextureListener(new TextureView.SurfaceTextureListener() {
@@ -1584,6 +1650,34 @@ public class YrPlaybackService extends Service {
                     int btnW = (int) (44f * badgeDensity);
                     int btnH = (int) (40f * badgeDensity);
                     int btnGap = (int) (24f * badgeDensity);
+                    int pillPadH = (int) (12f * badgeDensity);
+
+                    sFsSpeedBtn = new TextView(act);
+                    sFsSpeedBtn.setText(formatSpeedPillLabel(sPendingSpeed));
+                    sFsSpeedBtn.setTextColor(0xFFFFFFFF);
+                    sFsSpeedBtn.setTextSize(12.5f);
+                    sFsSpeedBtn.setTypeface(Typeface.DEFAULT_BOLD);
+                    sFsSpeedBtn.setGravity(Gravity.CENTER);
+                    sFsSpeedBtn.setMinWidth((int) (52f * badgeDensity));
+                    sFsSpeedBtn.setPadding(pillPadH, 0, pillPadH, 0);
+                    GradientDrawable spdBg = new GradientDrawable();
+                    spdBg.setColor(Math.abs(sPendingSpeed - 1.0f) > 0.03f ? 0xCCFF0033 : 0x33FFFFFF);
+                    spdBg.setCornerRadius(14f * badgeDensity);
+                    sFsSpeedBtn.setBackground(spdBg);
+                    sFsSpeedBtn.setClickable(true);
+                    sFsSpeedBtn.setOnClickListener(v -> {
+                        try {
+                            nativeOnMediaAction(NATIVE_CYCLE_SPEED, 0);
+                        } catch (Throwable ignored) {
+                        }
+                        scheduleFsHudAutoHide();
+                    });
+                    LinearLayout.LayoutParams spdLp = new LinearLayout.LayoutParams(
+                            LinearLayout.LayoutParams.WRAP_CONTENT,
+                            (int) (34f * badgeDensity)
+                    );
+                    spdLp.setMargins(0, 0, (int) (20f * badgeDensity), 0);
+                    ctrlRow.addView(sFsSpeedBtn, spdLp);
 
                     HudIconView prevBtn = new HudIconView(act, HudIconView.KIND_PREV);
                     prevBtn.setClickable(true);
@@ -1626,6 +1720,37 @@ public class YrPlaybackService extends Service {
                         scheduleFsHudAutoHide();
                     });
                     ctrlRow.addView(nextBtn, new LinearLayout.LayoutParams(btnW, btnH));
+
+                    sFsZoomBtn = new TextView(act);
+                    sFsZoomBtn.setText(sVideoFillZoom ? "Original" : "Llenar");
+                    sFsZoomBtn.setTextColor(0xFFFFFFFF);
+                    sFsZoomBtn.setTextSize(12.5f);
+                    sFsZoomBtn.setTypeface(Typeface.DEFAULT_BOLD);
+                    sFsZoomBtn.setGravity(Gravity.CENTER);
+                    sFsZoomBtn.setMinWidth((int) (68f * badgeDensity));
+                    sFsZoomBtn.setPadding(pillPadH, 0, pillPadH, 0);
+                    GradientDrawable zoomBg = new GradientDrawable();
+                    zoomBg.setColor(sVideoFillZoom ? 0xCCFF0033 : 0x33FFFFFF);
+                    zoomBg.setCornerRadius(14f * badgeDensity);
+                    sFsZoomBtn.setBackground(zoomBg);
+                    sFsZoomBtn.setClickable(true);
+                    sFsZoomBtn.setOnClickListener(v -> {
+                        sVideoFillZoom = !sVideoFillZoom;
+                        applyVideoAspectTransform();
+                        syncFsHudControls();
+                        showVideoSeekBadge(
+                                act,
+                                sVideoFillZoom ? "Zoom para llenar pantalla" : "Tama\u00F1o original",
+                                sVideoFillZoom
+                        );
+                        scheduleFsHudAutoHide();
+                    });
+                    LinearLayout.LayoutParams zoomLp = new LinearLayout.LayoutParams(
+                            LinearLayout.LayoutParams.WRAP_CONTENT,
+                            (int) (34f * badgeDensity)
+                    );
+                    zoomLp.setMargins((int) (20f * badgeDensity), 0, 0, 0);
+                    ctrlRow.addView(sFsZoomBtn, zoomLp);
 
                     LinearLayout.LayoutParams ctrlRowLp = new LinearLayout.LayoutParams(
                             LinearLayout.LayoutParams.MATCH_PARENT,
@@ -1678,6 +1803,9 @@ public class YrPlaybackService extends Service {
                         sFsTimeDur = null;
                         sFsSeekBar = null;
                         sFsPlayPauseBtn = null;
+                        sFsSpeedBtn = null;
+                        sFsZoomBtn = null;
+                        sVideoFillZoom = false;
                         sVideoParams = null;
                         sVideoAdded = false;
                         return;
@@ -1733,11 +1861,12 @@ public class YrPlaybackService extends Service {
     public static void syncNativeVideo(final Context ctx, final boolean playing, final long posMs, final float speed) {
         new Handler(Looper.getMainLooper()).post(() -> {
             try {
+                float prevSpeed = sPendingSpeed;
                 sPendingPlaying = playing;
                 sPendingPosMs = posMs;
                 sPendingSpeed = speed;
                 updateVideoPauseIcon();
-                if (sVideoFullscreen && sFsHudVisible) {
+                if (sVideoFullscreen && (sFsHudVisible || Math.abs(prevSpeed - speed) > 0.02f)) {
                     syncFsHudControls();
                 }
                 MediaPlayer mp = sMediaPlayer;
@@ -1883,8 +2012,11 @@ public class YrPlaybackService extends Service {
                 sFsTimeDur = null;
                 sFsSeekBar = null;
                 sFsPlayPauseBtn = null;
+                sFsSpeedBtn = null;
+                sFsZoomBtn = null;
                 sVideoActivityRef = null;
                 sVideoFullscreen = false;
+                sVideoFillZoom = false;
                 sFsHudVisible = false;
                 sFsSeeking = false;
                 if (sAutoHideFsHudRunnable != null) {

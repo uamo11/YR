@@ -33,6 +33,7 @@ enum NavTab {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SearchFilter {
+    All,
     Songs,
     Albums,
     Artists,
@@ -598,7 +599,7 @@ impl YrApp {
             library_search: String::new(),
             show_new_playlist_dialog: false,
             search_query: String::new(),
-            search_filter: SearchFilter::Songs,
+            search_filter: SearchFilter::All,
             search_results: SearchResults::default(),
             search_loading: false,
             search_suggestions: Vec::new(),
@@ -894,7 +895,7 @@ impl YrApp {
                         }
                     }
                     MediaAction::Stop => audio_bg.stop(),
-                    MediaAction::CycleVideoQuality => {}
+                    MediaAction::CycleVideoQuality | MediaAction::CycleSpeed => {}
                     MediaAction::Next => {
                         let next = queue_bg.lock().ok().and_then(|mut q| q.next_track(true).cloned());
                         if let Some(track) = next {
@@ -1231,6 +1232,7 @@ impl YrApp {
         }
         self.search_suggestions.clear();
         self.suggestions_last_query = q.clone();
+        self.search_filter = SearchFilter::All;
         self.search_loading = true;
         self.detail_view = DetailView::None;
         let provider = Arc::clone(&self.provider);
@@ -2248,6 +2250,26 @@ impl YrApp {
                                 self.cycle_video_quality(tid, ctx);
                             }
                         }
+                    } else if matches!(act, MediaAction::CycleSpeed) {
+                        let cur = self.audio.snapshot().speed;
+                        let presets = [0.75_f32, 1.0, 1.25, 1.5, 2.0];
+                        let idx = presets
+                            .iter()
+                            .position(|&p| (p - cur).abs() < 0.05)
+                            .unwrap_or(1);
+                        let next = presets[(idx + 1) % presets.len()];
+                        self.audio.set_speed(next);
+                        self.store.data.config.playback_speed = next;
+                        let _ = self.store.save();
+                        if self.is_video_mode {
+                            let s = self.audio.snapshot();
+                            crate::android_media::sync_native_video(
+                                s.status == PlaybackStatus::Playing,
+                                (s.position_secs * 1000.0).max(0.0) as u64,
+                                next,
+                            );
+                        }
+                        self.set_banner(format!("Velocidad: {next}x"));
                     }
                 }
                 AppEvent::VideoStreamResolved { track_id, result } => {
@@ -5114,26 +5136,32 @@ impl YrApp {
 
         if has_results || self.search_loading {
             ui.add_space(6.0);
-            ui.horizontal(|ui| {
-                for (filt, label) in [
-                    (SearchFilter::Songs, "Canciones"),
-                    (SearchFilter::Albums, "Álbumes"),
-                    (SearchFilter::Artists, "Artistas"),
-                    (SearchFilter::Playlists, "Playlists"),
-                ] {
-                    let active = self.search_filter == filt;
-                    let btn = egui::Button::new(
-                        RichText::new(label)
-                            .size(13.0)
-                            .color(if active { Color32::BLACK } else { TEXT_PRIMARY }),
-                    )
-                    .fill(if active { Color32::WHITE } else { BG_ELEVATED })
-                    .corner_radius(CornerRadius::same(16));
-                    if ui.add(btn).clicked() {
-                        self.search_filter = filt;
-                    }
-                }
-            });
+            egui::ScrollArea::horizontal()
+                .id_salt("search_filter_chips")
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 6.0;
+                        for (filt, label) in [
+                            (SearchFilter::All, "Todo"),
+                            (SearchFilter::Songs, "Canciones"),
+                            (SearchFilter::Albums, "Álbumes"),
+                            (SearchFilter::Artists, "Artistas"),
+                            (SearchFilter::Playlists, "Playlists"),
+                        ] {
+                            let active = self.search_filter == filt;
+                            let btn = egui::Button::new(
+                                RichText::new(label)
+                                    .size(13.0)
+                                    .color(if active { Color32::BLACK } else { TEXT_PRIMARY }),
+                            )
+                            .fill(if active { Color32::WHITE } else { BG_ELEVATED })
+                            .corner_radius(CornerRadius::same(16));
+                            if ui.add(btn).clicked() {
+                                self.search_filter = filt;
+                            }
+                        }
+                    });
+                });
         }
 
         if self.search_loading {
@@ -5154,7 +5182,9 @@ impl YrApp {
             .show(ui, |ui| {
                 let mut shown_local_ids: HashSet<String> = HashSet::new();
                 let q_trimmed = self.search_query.trim().to_string();
-                if q_trimmed.len() >= 2 && self.search_filter == SearchFilter::Songs {
+                if q_trimmed.len() >= 2
+                    && matches!(self.search_filter, SearchFilter::All | SearchFilter::Songs)
+                {
                     let mut local_hits = self.store.search_local(&q_trimmed);
                     let q_low = q_trimmed.to_lowercase();
                     for dl in &self.downloads {
@@ -5634,7 +5664,116 @@ impl YrApp {
                     return;
                 }
 
+                let search_section_header = |ui: &mut egui::Ui,
+                                             title: &str,
+                                             has_more: bool,
+                                             target: SearchFilter|
+                 -> Option<SearchFilter> {
+                    let mut jump = None;
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(title).size(16.0).strong().color(TEXT_PRIMARY));
+                        if has_more {
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                if ui
+                                    .add(
+                                        egui::Button::new(
+                                            RichText::new("Ver todo")
+                                                .size(12.0)
+                                                .color(TEXT_SECONDARY),
+                                        )
+                                        .fill(Color32::TRANSPARENT),
+                                    )
+                                    .clicked()
+                                {
+                                    jump = Some(target);
+                                }
+                            });
+                        }
+                    });
+                    ui.add_space(4.0);
+                    jump
+                };
+
                 match self.search_filter {
+                    SearchFilter::All => {
+                        let artists = self.search_results.artists.clone();
+                        if !artists.is_empty() {
+                            if let Some(next) = search_section_header(
+                                ui,
+                                "Artistas",
+                                artists.len() > 2,
+                                SearchFilter::Artists,
+                            ) {
+                                self.search_filter = next;
+                            }
+                            for artist in artists.into_iter().take(2) {
+                                if render_artist_card_row(
+                                    ui,
+                                    ("artist_all_row", &artist.id),
+                                    artist.thumbnail_url.as_deref(),
+                                    &artist.name,
+                                    artist.subscribers.as_deref(),
+                                    icons::Icon::Account,
+                                ) {
+                                    self.open_artist(artist.id.clone(), ctx);
+                                }
+                                ui.add_space(4.0);
+                            }
+                        }
+
+                        let songs: Vec<Track> = self
+                            .search_results
+                            .songs
+                            .iter()
+                            .filter(|t| !shown_local_ids.contains(&t.id))
+                            .cloned()
+                            .collect();
+                        if !songs.is_empty() {
+                            if let Some(next) = search_section_header(
+                                ui,
+                                "Canciones",
+                                songs.len() > 5,
+                                SearchFilter::Songs,
+                            ) {
+                                self.search_filter = next;
+                            }
+                            for (idx, track) in songs.iter().take(5).enumerate() {
+                                self.render_track_row(ui, ctx, track, &songs, idx, false);
+                                ui.add_space(3.0);
+                            }
+                        }
+
+                        let albums = self.search_results.albums.clone();
+                        if !albums.is_empty() {
+                            if let Some(next) = search_section_header(
+                                ui,
+                                "Álbumes",
+                                albums.len() > 4,
+                                SearchFilter::Albums,
+                            ) {
+                                self.search_filter = next;
+                            }
+                            for album in albums.iter().take(4) {
+                                self.render_album_row(ui, ctx, album);
+                            }
+                        }
+
+                        let playlists = self.search_results.playlists.clone();
+                        if !playlists.is_empty() {
+                            if let Some(next) = search_section_header(
+                                ui,
+                                "Playlists",
+                                playlists.len() > 3,
+                                SearchFilter::Playlists,
+                            ) {
+                                self.search_filter = next;
+                            }
+                            for pl in playlists.iter().take(3) {
+                                self.render_playlist_row(ui, ctx, pl);
+                            }
+                        }
+                    }
                     SearchFilter::Songs => {
                         let songs: Vec<Track> = self
                             .search_results
@@ -5685,6 +5824,7 @@ impl YrApp {
                         }
                     }
                 }
+                ui.add_space(48.0);
             });
         self.search_scroller.sync_bounds(search_scroll.content_size.y, search_scroll.inner_rect.height());
         if self.handle_pull_to_refresh(
@@ -10029,7 +10169,7 @@ impl YrApp {
                     }
                 }
                 SettingsCategory::About => {
-                    ui.heading("YR Music v0.9.13");
+                    ui.heading("YR Music v0.9.14");
                     ui.label("Cliente nativo de música 100% en Rust para Android y escritorio.");
                     ui.add_space(6.0);
                     ui.label(RichText::new("Motor de audio Symphonia PCM con DSP Morphe 3D binaural, reproductor integrado de video en la app, auto-scroll inteligente de cola, prefetch predictivo en disco y compatibilidad completa con YouTube Music.").size(12.0).color(TEXT_SECONDARY));
@@ -10403,43 +10543,61 @@ impl YrApp {
                     });
                     self.action_sheet_track = None;
                 }
-                ui.add_space(4.0);
+                ui.add_space(6.0);
                 ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 4.0;
-                    let (ic_r, _) = ui.allocate_exact_size(Vec2::splat(18.0), Sense::hover());
-                    icons::draw_icon(ui.painter(), ic_r, icons::Icon::Play, Color32::WHITE);
-                    ui.label(RichText::new("Velocidad:").size(13.5).color(Color32::WHITE));
-                    let cur_speed = self.audio.snapshot().speed;
-                    egui::ScrollArea::horizontal()
-                        .id_salt("action_sheet_speed_pills")
-                        .show(ui, |ui| {
-                            ui.horizontal(|ui| {
-                                ui.spacing_mut().item_spacing.x = 4.0;
-                                for &(spd, lbl) in &[
-                                    (0.75_f32, "0.75x"),
-                                    (1.0, "1.0x"),
-                                    (1.25, "1.25x"),
-                                    (1.5, "1.5x"),
-                                    (2.0, "2.0x"),
-                                ] {
-                                    let selected = (cur_speed - spd).abs() < 0.05;
-                                    if settings_choice_pill(ui, selected, lbl) {
-                                        self.audio.set_speed(spd);
-                                        self.store.data.config.playback_speed = spd;
-                                        let _ = self.store.save();
-                                        if self.is_video_mode {
-                                            let s = self.audio.snapshot();
-                                            crate::android_media::sync_native_video(
-                                                s.status == PlaybackStatus::Playing,
-                                                (s.position_secs * 1000.0).max(0.0) as u64,
-                                                spd,
-                                            );
-                                        }
-                                        self.set_banner(format!("Velocidad ajustada a {lbl}"));
-                                    }
+                    ui.spacing_mut().item_spacing.x = 6.0;
+                    let (ic_r, _) = ui.allocate_exact_size(Vec2::splat(16.0), Sense::hover());
+                    icons::draw_icon(ui.painter(), ic_r, icons::Icon::Speed, Color32::WHITE);
+                    ui.label(
+                        RichText::new("Velocidad de reproducción")
+                            .size(13.0)
+                            .color(TEXT_SECONDARY),
+                    );
+                });
+                ui.add_space(4.0);
+                let cur_speed = self.audio.snapshot().speed;
+                ui.columns(5, |cols| {
+                    for (ci, &(spd, lbl)) in [
+                        (0.75_f32, "0.75x"),
+                        (1.0, "1.0x"),
+                        (1.25, "1.25x"),
+                        (1.5, "1.5x"),
+                        (2.0, "2.0x"),
+                    ]
+                    .iter()
+                    .enumerate()
+                    {
+                        cols[ci].vertical_centered(|ui| {
+                            let selected = (cur_speed - spd).abs() < 0.05;
+                            let btn = egui::Button::new(
+                                RichText::new(lbl)
+                                    .size(12.0)
+                                    .strong()
+                                    .color(Color32::WHITE),
+                            )
+                            .fill(if selected {
+                                ACCENT_RED
+                            } else {
+                                Color32::from_rgb(38, 38, 44)
+                            })
+                            .corner_radius(CornerRadius::same(14))
+                            .min_size(Vec2::new(52.0, 28.0));
+                            if ui.add(btn).clicked() {
+                                self.audio.set_speed(spd);
+                                self.store.data.config.playback_speed = spd;
+                                let _ = self.store.save();
+                                if self.is_video_mode {
+                                    let s = self.audio.snapshot();
+                                    crate::android_media::sync_native_video(
+                                        s.status == PlaybackStatus::Playing,
+                                        (s.position_secs * 1000.0).max(0.0) as u64,
+                                        spd,
+                                    );
                                 }
-                            });
+                                self.set_banner(format!("Velocidad ajustada a {lbl}"));
+                            }
                         });
+                    }
                 });
                 ui.add_space(6.0);
                 let timer_active = self.sleep_timer_until.lock().unwrap().is_some()
@@ -11284,7 +11442,7 @@ impl YrApp {
                         }
                         if menu_row(ui, icons::Icon::Help, "Ayuda y comentarios").clicked() {
                             self.show_account_modal = false;
-                            self.set_banner("YR Music v0.9.13 • Pure Rust");
+                            self.set_banner("YR Music v0.9.14 • Pure Rust");
                         }
 
                         #[cfg(target_os = "android")]
@@ -11431,9 +11589,13 @@ impl YrApp {
                             });
                         });
 
-                        ui.add_space(14.0);
+                        ui.add_space(10.0);
 
-                        let scroll_h = (screen.bottom() - ui.cursor().top() - 12.0).max(200.0);
+                        #[cfg(target_os = "android")]
+                        let nav_pad = 54.0;
+                        #[cfg(not(target_os = "android"))]
+                        let nav_pad = 12.0;
+                        let scroll_h = (screen.bottom() - ui.cursor().top() - nav_pad).max(200.0);
                         egui::ScrollArea::vertical()
                             .id_salt("yr_recap_scroll")
                             .max_height(scroll_h)
@@ -11467,36 +11629,36 @@ impl YrApp {
                                     });
                                 });
 
-                                ui.add_space(16.0);
+                                ui.add_space(10.0);
 
                                 // Main Hero Card: Minutos de Música
-                                let hero_rect = ui.allocate_space(Vec2::new(inner_w, 100.0)).1;
+                                let hero_rect = ui.allocate_space(Vec2::new(inner_w, 88.0)).1;
                                 if ui.is_rect_visible(hero_rect) {
                                     ui.painter().rect_filled(hero_rect, CornerRadius::same(14), Color32::from_rgb(180, 24, 44));
                                     ui.painter().text(
-                                        Pos2::new(hero_rect.left() + 18.0, hero_rect.top() + 32.0),
+                                        Pos2::new(hero_rect.left() + 18.0, hero_rect.top() + 28.0),
                                         Align2::LEFT_CENTER,
                                         format!("{total_mins} min"),
-                                        egui::FontId::proportional(32.0),
+                                        egui::FontId::proportional(30.0),
                                         Color32::WHITE,
                                     );
                                     ui.painter().text(
-                                        Pos2::new(hero_rect.left() + 18.0, hero_rect.top() + 66.0),
+                                        Pos2::new(hero_rect.left() + 18.0, hero_rect.top() + 58.0),
                                         Align2::LEFT_CENTER,
                                         "Tiempo total de escucha acumulado",
-                                        egui::FontId::proportional(14.0),
+                                        egui::FontId::proportional(13.5),
                                         Color32::from_white_alpha(230),
                                     );
                                     ui.painter().text(
-                                        Pos2::new(hero_rect.left() + 18.0, hero_rect.top() + 84.0),
+                                        Pos2::new(hero_rect.left() + 18.0, hero_rect.top() + 75.0),
                                         Align2::LEFT_CENTER,
                                         "Música en alta calidad sin interrupciones",
-                                        egui::FontId::proportional(11.5),
-                                        Color32::from_white_alpha(170),
+                                        egui::FontId::proportional(11.0),
+                                        Color32::from_white_alpha(175),
                                     );
                                 }
 
-                                ui.add_space(12.0);
+                                ui.add_space(10.0);
 
                                 // Three Stats Columns: Favoritas, Escuchadas, Offline
                                 ui.horizontal(|ui| {
@@ -11507,20 +11669,20 @@ impl YrApp {
                                         (icons::Icon::History, Color32::from_rgb(108, 168, 255), total_recent, "Escuchadas"),
                                         (icons::Icon::DownloadDone, GREEN_OK, total_offline, "Offline"),
                                     ] {
-                                        let (c_rect, _) = ui.allocate_exact_size(Vec2::new(col_w, 78.0), Sense::hover());
+                                        let (c_rect, _) = ui.allocate_exact_size(Vec2::new(col_w, 68.0), Sense::hover());
                                         if ui.is_rect_visible(c_rect) {
                                             ui.painter().rect_filled(c_rect, CornerRadius::same(12), Color32::from_rgb(28, 28, 34));
-                                            let ic_r = Rect::from_center_size(Pos2::new(c_rect.left() + 20.0, c_rect.top() + 26.0), Vec2::splat(17.0));
+                                            let ic_r = Rect::from_center_size(Pos2::new(c_rect.left() + 20.0, c_rect.top() + 23.0), Vec2::splat(16.0));
                                             icons::draw_icon(ui.painter(), ic_r, icon, icon_col);
                                             ui.painter().text(
-                                                Pos2::new(c_rect.left() + 36.0, c_rect.top() + 26.0),
+                                                Pos2::new(c_rect.left() + 36.0, c_rect.top() + 23.0),
                                                 Align2::LEFT_CENTER,
                                                 format!("{val}"),
-                                                egui::FontId::proportional(20.0),
+                                                egui::FontId::proportional(19.0),
                                                 Color32::WHITE,
                                             );
                                             ui.painter().text(
-                                                Pos2::new(c_rect.left() + 12.0, c_rect.top() + 56.0),
+                                                Pos2::new(c_rect.left() + 12.0, c_rect.top() + 49.0),
                                                 Align2::LEFT_CENTER,
                                                 lbl,
                                                 egui::FontId::proportional(12.0),
@@ -11530,7 +11692,7 @@ impl YrApp {
                                     }
                                 });
 
-                                ui.add_space(14.0);
+                                ui.add_space(10.0);
 
                                 fn truncate_chars(s: &str, max_chars: usize) -> String {
                                     if s.chars().count() > max_chars {
@@ -11544,8 +11706,8 @@ impl YrApp {
                                 // Card: Tu Top Canción
                                 if let Some(top) = &top_track {
                                     ui.label(RichText::new("Tu tema más escuchado").size(15.0).strong().color(Color32::WHITE));
-                                    ui.add_space(6.0);
-                                    let (t_rect, t_resp) = ui.allocate_exact_size(Vec2::new(inner_w, 68.0), Sense::click());
+                                    ui.add_space(4.0);
+                                    let (t_rect, t_resp) = ui.allocate_exact_size(Vec2::new(inner_w, 62.0), Sense::click());
                                     if ui.is_rect_visible(t_rect) {
                                         let bg = if t_resp.hovered() {
                                             Color32::from_white_alpha(24)
@@ -11554,7 +11716,7 @@ impl YrApp {
                                         };
                                         ui.painter().rect_filled(t_rect, CornerRadius::same(12), bg);
 
-                                        let thumb_sz = 52.0;
+                                        let thumb_sz = 46.0;
                                         let thumb_r = Rect::from_min_size(
                                             Pos2::new(t_rect.left() + 8.0, t_rect.top() + 8.0),
                                             Vec2::splat(thumb_sz),
@@ -11576,7 +11738,7 @@ impl YrApp {
                                             ui.painter().rect_filled(thumb_r, CornerRadius::same(8), Color32::from_rgb(44, 44, 52));
                                             icons::draw_icon(
                                                 ui.painter(),
-                                                Rect::from_center_size(thumb_r.center(), Vec2::splat(22.0)),
+                                                Rect::from_center_size(thumb_r.center(), Vec2::splat(20.0)),
                                                 icons::Icon::MusicNote,
                                                 TEXT_SECONDARY,
                                             );
@@ -11586,14 +11748,14 @@ impl YrApp {
                                         let short_title = truncate_chars(&top.title, 28);
                                         let short_artist = truncate_chars(&top.artist, 32);
                                         ui.painter().text(
-                                            Pos2::new(text_x, t_rect.top() + 24.0),
+                                            Pos2::new(text_x, t_rect.top() + 22.0),
                                             Align2::LEFT_CENTER,
                                             short_title,
                                             egui::FontId::proportional(14.5),
                                             Color32::WHITE,
                                         );
                                         ui.painter().text(
-                                            Pos2::new(text_x, t_rect.top() + 46.0),
+                                            Pos2::new(text_x, t_rect.top() + 42.0),
                                             Align2::LEFT_CENTER,
                                             short_artist,
                                             egui::FontId::proportional(12.5),
@@ -11616,15 +11778,15 @@ impl YrApp {
                                         track_to_play = Some(top.clone());
                                         close_modal = true;
                                     }
-                                    ui.add_space(14.0);
+                                    ui.add_space(10.0);
                                 }
 
                                 // Top Artists Section
                                 if !top_artists.is_empty() {
                                     ui.label(RichText::new("Tus artistas más reproducidos").size(15.0).strong().color(Color32::WHITE));
-                                    ui.add_space(6.0);
+                                    ui.add_space(4.0);
                                     for (idx, (artist_name, play_cnt)) in top_artists.iter().enumerate() {
-                                        let (row_r, _) = ui.allocate_exact_size(Vec2::new(inner_w, 40.0), Sense::hover());
+                                        let (row_r, _) = ui.allocate_exact_size(Vec2::new(inner_w, 36.0), Sense::hover());
                                         if ui.is_rect_visible(row_r) {
                                             ui.painter().rect_filled(row_r, CornerRadius::same(8), Color32::from_rgb(22, 22, 28));
                                             let badge_color = match idx {
@@ -11656,21 +11818,21 @@ impl YrApp {
                                                 TEXT_SECONDARY,
                                             );
                                         }
-                                        ui.add_space(4.0);
+                                        ui.add_space(3.0);
                                     }
                                 }
 
-                                ui.add_space(18.0);
+                                ui.add_space(10.0);
 
                                 // Compartir mi Recap Button
-                                let (share_r, share_resp) = ui.allocate_exact_size(Vec2::new(inner_w, 48.0), Sense::click());
+                                let (share_r, share_resp) = ui.allocate_exact_size(Vec2::new(inner_w, 44.0), Sense::click());
                                 if ui.is_rect_visible(share_r) {
                                     let fill = if share_resp.hovered() {
                                         Color32::from_rgb(240, 40, 60)
                                     } else {
                                         ACCENT_RED
                                     };
-                                    ui.painter().rect_filled(share_r, CornerRadius::same(24), fill);
+                                    ui.painter().rect_filled(share_r, CornerRadius::same(22), fill);
                                     let ic_r = Rect::from_center_size(Pos2::new(share_r.center().x - 70.0, share_r.center().y), Vec2::splat(18.0));
                                     icons::draw_icon(ui.painter(), ic_r, icons::Icon::Share, Color32::WHITE);
                                     ui.painter().text(
@@ -11685,10 +11847,7 @@ impl YrApp {
                                     trigger_share = true;
                                 }
 
-                                #[cfg(target_os = "android")]
-                                ui.add_space(60.0);
-                                #[cfg(not(target_os = "android"))]
-                                ui.add_space(24.0);
+                                ui.add_space(16.0);
                             });
                     });
             });
