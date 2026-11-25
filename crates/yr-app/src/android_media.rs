@@ -189,7 +189,7 @@ mod imp {
         );
     }
 
-    fn resolve_media_url(video_id: &str, method_name: &str) -> Option<String> {
+    fn resolve_media_url(video_id: &str, method_name: &str, interactive: bool) -> Option<String> {
         let Some(bridge) = bridge() else {
             log::warn!("android_media: {method_name} BRIDGE not initialized");
             return None;
@@ -203,14 +203,17 @@ mod imp {
         };
         let j_vid = env.new_string(video_id).ok()?;
         let service_cls: &JClass = bridge.service_class.as_obj().into();
-        log::info!("android_media: calling YrPlaybackService.{method_name}({video_id})");
+        log::info!(
+            "android_media: calling YrPlaybackService.{method_name}({video_id}, interactive={interactive})"
+        );
         let res = env.call_static_method(
             service_cls,
             method_name,
-            "(Landroid/content/Context;Ljava/lang/String;)Ljava/lang/String;",
+            "(Landroid/content/Context;Ljava/lang/String;Z)Ljava/lang/String;",
             &[
                 JValue::Object(bridge.app_ctx.as_obj()),
                 JValue::Object(&j_vid),
+                JValue::Bool(if interactive { 1 } else { 0 }),
             ],
         );
         match res {
@@ -230,12 +233,20 @@ mod imp {
         }
     }
 
+    pub fn resolve_audio_url_with_priority(video_id: &str, interactive: bool) -> Option<String> {
+        resolve_media_url(video_id, "resolveAudioUrlPriority", interactive)
+    }
+
+    pub fn resolve_video_url_with_priority(video_id: &str, interactive: bool) -> Option<String> {
+        resolve_media_url(video_id, "resolveVideoUrlPriority", interactive)
+    }
+
     pub fn resolve_audio_url(video_id: &str) -> Option<String> {
-        resolve_media_url(video_id, "resolveAudioUrl")
+        resolve_audio_url_with_priority(video_id, false)
     }
 
     pub fn resolve_video_url(video_id: &str) -> Option<String> {
-        resolve_media_url(video_id, "resolveVideoUrl")
+        resolve_video_url_with_priority(video_id, true)
     }
 
     #[no_mangle]
@@ -654,6 +665,12 @@ mod imp {
     }
     pub fn set_artwork_url(_url: &str) {}
     pub fn stop_service() {}
+    pub fn resolve_audio_url_with_priority(_video_id: &str, _interactive: bool) -> Option<String> {
+        None
+    }
+    pub fn resolve_video_url_with_priority(_video_id: &str, _interactive: bool) -> Option<String> {
+        None
+    }
     pub fn resolve_audio_url(_video_id: &str) -> Option<String> {
         None
     }
@@ -667,8 +684,9 @@ pub use imp::init;
 pub use imp::{
     attach_native_video, check_for_updates, hide_embedded_video, is_metered_network,
     is_wifi_connected, open_audio_output_panel, open_google_login, prepare_next_embedded_video,
-    resolve_audio_url, resolve_video_url, set_action_sender, set_artwork_url,
-    set_auto_check_updates, set_cookie_sender, set_egui_ctx, set_ui_at_root,
-    set_video_quality_label, set_video_seek_seconds, share_text, stop_service,
-    sync_native_video, take_back_pressed, update_playback,
+    resolve_audio_url, resolve_audio_url_with_priority, resolve_video_url,
+    resolve_video_url_with_priority, set_action_sender, set_artwork_url, set_auto_check_updates,
+    set_cookie_sender, set_egui_ctx, set_ui_at_root, set_video_quality_label,
+    set_video_seek_seconds, share_text, stop_service, sync_native_video, take_back_pressed,
+    update_playback,
 };

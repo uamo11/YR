@@ -391,180 +391,322 @@ public class YrPlaybackService extends Service {
     }
 
     private static final Object sWebResolveLock = new Object();
+    private static final Object sWebCacheLock = new Object();
+    private static final java.util.concurrent.atomic.AtomicInteger sInteractiveWaiters =
+            new java.util.concurrent.atomic.AtomicInteger(0);
+    private static final long WEB_POS_TTL_MS = 15L * 60L * 1000L;
+    private static final long WEB_NEG_BG_TTL_MS = 45L * 1000L;
+    private static final long WEB_NEG_FG_TTL_MS = 8L * 1000L;
+    private static final java.util.HashMap<String, String> sWebPosUrl =
+            new java.util.HashMap<String, String>();
+    private static final java.util.HashMap<String, Long> sWebPosTime =
+            new java.util.HashMap<String, Long>();
+    private static final java.util.HashMap<String, Long> sWebNegTime =
+            new java.util.HashMap<String, Long>();
 
     public static String resolveAudioUrl(final Context ctx, final String videoId) {
-        return resolveMediaUrlInternal(ctx, videoId, false);
+        return resolveMediaUrlInternal(ctx, videoId, false, false);
     }
 
     public static String resolveVideoUrl(final Context ctx, final String videoId) {
-        return resolveMediaUrlInternal(ctx, videoId, true);
+        return resolveMediaUrlInternal(ctx, videoId, true, true);
+    }
+
+    public static String resolveAudioUrlPriority(
+            final Context ctx,
+            final String videoId,
+            final boolean isInteractive
+    ) {
+        return resolveMediaUrlInternal(ctx, videoId, false, isInteractive);
+    }
+
+    public static String resolveVideoUrlPriority(
+            final Context ctx,
+            final String videoId,
+            final boolean isInteractive
+    ) {
+        return resolveMediaUrlInternal(ctx, videoId, true, isInteractive);
+    }
+
+    private static String checkWebResolveCache(final String cacheKey, final boolean isInteractive) {
+        final long now = android.os.SystemClock.elapsedRealtime();
+        synchronized (sWebCacheLock) {
+            String cachedUrl = sWebPosUrl.get(cacheKey);
+            Long cachedAt = sWebPosTime.get(cacheKey);
+            if (cachedUrl != null && cachedAt != null) {
+                if (now - cachedAt.longValue() < WEB_POS_TTL_MS) {
+                    return cachedUrl;
+                }
+                sWebPosUrl.remove(cacheKey);
+                sWebPosTime.remove(cacheKey);
+            }
+            Long failedAt = sWebNegTime.get(cacheKey);
+            if (failedAt != null) {
+                long negTtl = isInteractive ? WEB_NEG_FG_TTL_MS : WEB_NEG_BG_TTL_MS;
+                if (now - failedAt.longValue() < negTtl) {
+                    return "";
+                }
+                sWebNegTime.remove(cacheKey);
+            }
+        }
+        return null;
+    }
+
+    private static void storeWebPositiveCache(final String cacheKey, final String url) {
+        if (url == null || url.isEmpty()) return;
+        final long now = android.os.SystemClock.elapsedRealtime();
+        synchronized (sWebCacheLock) {
+            if (sWebPosUrl.size() > 160) {
+                sWebPosUrl.clear();
+                sWebPosTime.clear();
+            }
+            sWebPosUrl.put(cacheKey, url);
+            sWebPosTime.put(cacheKey, Long.valueOf(now));
+            sWebNegTime.remove(cacheKey);
+        }
+    }
+
+    private static void storeWebNegativeCache(final String cacheKey) {
+        final long now = android.os.SystemClock.elapsedRealtime();
+        synchronized (sWebCacheLock) {
+            if (sWebNegTime.size() > 200) {
+                sWebNegTime.clear();
+            }
+            sWebNegTime.put(cacheKey, Long.valueOf(now));
+        }
     }
 
     private static String resolveMediaUrlInternal(
             final Context ctx,
             final String videoId,
-            final boolean wantVideo
+            final boolean wantVideo,
+            final boolean isInteractive
     ) {
-        synchronized (sWebResolveLock) {
-            Log.i("YR_WEB", "resolveMediaUrl start vid=" + videoId + " wantVideo=" + wantVideo);
-            if (ctx == null || videoId == null || videoId.isEmpty()) return null;
-            if (Looper.myLooper() == Looper.getMainLooper()) {
-                Log.w("YR_WEB", "resolveMediaUrl called on main looper");
-                return null;
-            }
+        if (ctx == null || videoId == null || videoId.isEmpty()) return null;
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            Log.w("YR_WEB", "resolveMediaUrl called on main looper");
+            return null;
+        }
+        final String cacheKey = videoId + (wantVideo ? ":v" : ":a");
+        final String preHit = checkWebResolveCache(cacheKey, isInteractive);
+        if ("".equals(preHit)) {
+            Log.i("YR_WEB", "resolveMediaUrl skip cooldown vid=" + videoId + " wantVideo=" + wantVideo + " fg=" + isInteractive);
+            return null;
+        }
+        if (preHit != null) {
+            Log.i("YR_WEB", "resolveMediaUrl cache hit vid=" + videoId + " wantVideo=" + wantVideo);
+            return preHit;
+        }
+        if (!isInteractive && sInteractiveWaiters.get() > 0) {
+            Log.i("YR_WEB", "resolveMediaUrl yield to interactive vid=" + videoId);
+            return null;
+        }
 
-            final Handler mainHandler = new Handler(Looper.getMainLooper());
-            final CountDownLatch latch = new CountDownLatch(1);
-            final AtomicReference<String> audioResult = new AtomicReference<>(null);
-            final AtomicReference<String> webmAudioFallback = new AtomicReference<>(null);
-            final AtomicReference<String> videoResult = new AtomicReference<>(null);
-            final int[] bestVideoRank = new int[]{0};
-            final Object videoPickLock = new Object();
-            final AtomicReference<WebView> webRef = new AtomicReference<>(null);
-            final String cookies = mergeYoutubeCookies();
+        if (isInteractive) {
+            sInteractiveWaiters.incrementAndGet();
+        }
+        try {
+            synchronized (sWebResolveLock) {
+                final String insideHit = checkWebResolveCache(cacheKey, isInteractive);
+                if ("".equals(insideHit)) {
+                    return null;
+                }
+                if (insideHit != null) {
+                    return insideHit;
+                }
+                if (!isInteractive && sInteractiveWaiters.get() > 0) {
+                    Log.i("YR_WEB", "resolveMediaUrl yield inside lock vid=" + videoId);
+                    return null;
+                }
 
-            mainHandler.post(() -> {
-                try {
-                    if (cookies != null && !cookies.isEmpty()) {
-                        CookieManager cm = CookieManager.getInstance();
-                        cm.setAcceptCookie(true);
-                    }
-                    WebView wv = new WebView(ctx.getApplicationContext());
-                    webRef.set(wv);
-                    wv.layout(0, 0, 360, 200);
-                    wv.onResume();
-                    wv.resumeTimers();
-                    WebSettings ws = wv.getSettings();
-                    ws.setJavaScriptEnabled(true);
-                    ws.setDomStorageEnabled(true);
-                    ws.setMediaPlaybackRequiresUserGesture(false);
-                    ws.setUserAgentString(
-                            "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 "
-                                    + "(KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
-                    );
-                    wv.setWebViewClient(new WebViewClient() {
-                        private int gvCount = 0;
+                Log.i("YR_WEB", "resolveMediaUrl start vid=" + videoId + " wantVideo=" + wantVideo + " fg=" + isInteractive);
+                final Handler mainHandler = new Handler(Looper.getMainLooper());
+                final CountDownLatch latch = new CountDownLatch(1);
+                final AtomicReference<String> audioResult = new AtomicReference<>(null);
+                final AtomicReference<String> webmAudioFallback = new AtomicReference<>(null);
+                final AtomicReference<String> videoResult = new AtomicReference<>(null);
+                final int[] bestVideoRank = new int[]{0};
+                final Object videoPickLock = new Object();
+                final AtomicReference<WebView> webRef = new AtomicReference<>(null);
+                final String cookies = mergeYoutubeCookies();
 
-                        @Override
-                        public void onPageStarted(WebView view, String url, android.graphics.Bitmap favicon) {
-                            try {
-                                view.evaluateJavascript(
-                                        "try{if(window.MediaSource&&MediaSource.isTypeSupported){"
-                                                + "var o=MediaSource.isTypeSupported.bind(MediaSource);"
-                                                + "MediaSource.isTypeSupported=function(t){"
-                                                + "if(t&&t.indexOf('webm')!==-1)return false;return o(t);};}}catch(e){}",
-                                        null
-                                );
-                            } catch (Throwable ignored) {
-                            }
+                mainHandler.post(() -> {
+                    try {
+                        if (cookies != null && !cookies.isEmpty()) {
+                            CookieManager cm = CookieManager.getInstance();
+                            cm.setAcceptCookie(true);
                         }
+                        WebView wv = new WebView(ctx.getApplicationContext());
+                        webRef.set(wv);
+                        wv.layout(0, 0, 360, 200);
+                        wv.onResume();
+                        wv.resumeTimers();
+                        WebSettings ws = wv.getSettings();
+                        ws.setJavaScriptEnabled(true);
+                        ws.setDomStorageEnabled(true);
+                        ws.setMediaPlaybackRequiresUserGesture(false);
+                        ws.setUserAgentString(
+                                "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 "
+                                        + "(KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
+                        );
+                        wv.setWebViewClient(new WebViewClient() {
+                            private int gvCount = 0;
 
-                        @Override
-                        public android.webkit.WebResourceResponse shouldInterceptRequest(
-                                WebView view, WebResourceRequest request
-                        ) {
-                            try {
-                                String u = request.getUrl().toString();
-                                if (u.contains("googlevideo.com/videoplayback")) {
-                                    if (gvCount < 8) {
-                                        gvCount++;
-                                        Log.i("YR_WEB", "gv[" + gvCount + "] hasPot=" + u.contains("pot=")
-                                                + " hasUmp=" + u.contains("ump=")
-                                                + ": " + u.substring(0, Math.min(200, u.length())));
-                                    }
-                                    if (u.contains("mime=audio/mp4")
-                                            || u.contains("mime%3Daudio%2Fmp4")
-                                            || u.contains("itag=140")
-                                            || u.contains("itag=139")) {
-                                        String clean = u.replaceAll("([?&])(range|rn|rbuf|ump|srfvp)=[^&]*", "$1")
-                                                .replace("?&", "?")
-                                                .replaceAll("&&+", "&");
-                                        Log.i("YR_WEB", "Intercepted audio/mp4 URL for " + videoId + " hasPot=" + clean.contains("pot="));
-                                        audioResult.compareAndSet(null, clean);
-                                        if (!wantVideo) {
-                                            latch.countDown();
+                            @Override
+                            public void onPageStarted(WebView view, String url, android.graphics.Bitmap favicon) {
+                                try {
+                                    view.evaluateJavascript(
+                                            "try{if(window.MediaSource&&MediaSource.isTypeSupported){"
+                                                    + "var o=MediaSource.isTypeSupported.bind(MediaSource);"
+                                                    + "MediaSource.isTypeSupported=function(t){"
+                                                    + "if(t&&t.indexOf('webm')!==-1)return false;return o(t);};}}catch(e){}",
+                                            null
+                                    );
+                                } catch (Throwable ignored) {
+                                }
+                            }
+
+                            @Override
+                            public android.webkit.WebResourceResponse shouldInterceptRequest(
+                                    WebView view, WebResourceRequest request
+                            ) {
+                                try {
+                                    String u = request.getUrl().toString();
+                                    if (u.contains("googlevideo.com/videoplayback")) {
+                                        if (gvCount < 8) {
+                                            gvCount++;
+                                            Log.i("YR_WEB", "gv[" + gvCount + "] hasPot=" + u.contains("pot=")
+                                                    + " hasUmp=" + u.contains("ump=")
+                                                    + ": " + u.substring(0, Math.min(200, u.length())));
                                         }
-                                    } else if (u.contains("mime=audio/webm")
-                                            || u.contains("mime%3Daudio%2Fwebm")
-                                            || u.contains("itag=251")
-                                            || u.contains("itag=250")
-                                            || u.contains("itag=249")) {
-                                        String clean = u.replaceAll("([?&])(range|rn|rbuf|ump|srfvp)=[^&]*", "$1")
-                                                .replace("?&", "?")
-                                                .replaceAll("&&+", "&");
-                                        webmAudioFallback.compareAndSet(null, clean);
-                                    } else {
-                                        int rank = 0;
-                                        if (u.contains("itag=136") || u.contains("itag=137") || u.contains("itag=298")) {
-                                            rank = 4;
-                                        } else if (u.contains("itag=135")) {
-                                            rank = 3;
-                                        } else if (u.contains("itag=18") || u.contains("itag=134")) {
-                                            rank = 2;
-                                        } else if (u.contains("mime=video/mp4") || u.contains("mime%3Dvideo%2Fmp4")) {
-                                            rank = 1;
-                                        }
-                                        if (rank > 0) {
+                                        if (u.contains("mime=audio/mp4")
+                                                || u.contains("mime%3Daudio%2Fmp4")
+                                                || u.contains("itag=140")
+                                                || u.contains("itag=139")) {
                                             String clean = u.replaceAll("([?&])(range|rn|rbuf|ump|srfvp)=[^&]*", "$1")
                                                     .replace("?&", "?")
                                                     .replaceAll("&&+", "&");
-                                            synchronized (videoPickLock) {
-                                                if (rank > bestVideoRank[0]) {
-                                                    bestVideoRank[0] = rank;
-                                                    videoResult.set(clean);
-                                                    if (wantVideo && rank >= 2) {
-                                                        latch.countDown();
+                                            Log.i("YR_WEB", "Intercepted audio/mp4 URL for " + videoId + " hasPot=" + clean.contains("pot="));
+                                            audioResult.compareAndSet(null, clean);
+                                            if (!wantVideo) {
+                                                latch.countDown();
+                                            }
+                                        } else if (u.contains("mime=audio/webm")
+                                                || u.contains("mime%3Daudio%2Fwebm")
+                                                || u.contains("itag=251")
+                                                || u.contains("itag=250")
+                                                || u.contains("itag=249")) {
+                                            String clean = u.replaceAll("([?&])(range|rn|rbuf|ump|srfvp)=[^&]*", "$1")
+                                                    .replace("?&", "?")
+                                                    .replaceAll("&&+", "&");
+                                            webmAudioFallback.compareAndSet(null, clean);
+                                        } else {
+                                            int rank = 0;
+                                            if (u.contains("itag=136") || u.contains("itag=137") || u.contains("itag=298")) {
+                                                rank = 4;
+                                            } else if (u.contains("itag=135")) {
+                                                rank = 3;
+                                            } else if (u.contains("itag=18") || u.contains("itag=134")) {
+                                                rank = 2;
+                                            } else if (u.contains("mime=video/mp4") || u.contains("mime%3Dvideo%2Fmp4")) {
+                                                rank = 1;
+                                            }
+                                            if (rank > 0) {
+                                                String clean = u.replaceAll("([?&])(range|rn|rbuf|ump|srfvp)=[^&]*", "$1")
+                                                        .replace("?&", "?")
+                                                        .replaceAll("&&+", "&");
+                                                synchronized (videoPickLock) {
+                                                    if (rank > bestVideoRank[0]) {
+                                                        bestVideoRank[0] = rank;
+                                                        videoResult.set(clean);
+                                                        if (wantVideo && rank >= 2) {
+                                                            latch.countDown();
+                                                        }
                                                     }
                                                 }
                                             }
                                         }
                                     }
+                                } catch (Throwable ignored) {
                                 }
-                            } catch (Throwable ignored) {
+                                return super.shouldInterceptRequest(view, request);
                             }
-                            return super.shouldInterceptRequest(view, request);
-                        }
 
-                        @Override
-                        public void onPageFinished(WebView view, String url) {
-                            try {
-                                view.evaluateJavascript(
-                                        "(function(){function poke(){try{var v=document.querySelector('video');if(v){v.muted=true;v.play();}var b=document.querySelector('.ytp-large-play-button,.ytp-play-button,button[aria-label*=\"Play\"],button[aria-label*=\"Reproducir\"]');if(b)b.click();}catch(e){}}poke();setTimeout(poke,400);setTimeout(poke,1200);})();",
-                                        null
-                                );
-                            } catch (Throwable ignored) {
+                            @Override
+                            public void onPageFinished(WebView view, String url) {
+                                try {
+                                    view.evaluateJavascript(
+                                            "(function(){function poke(){try{var v=document.querySelector('video');if(v){v.muted=true;v.play();}var b=document.querySelector('.ytp-large-play-button,.ytp-play-button,button[aria-label*=\"Play\"],button[aria-label*=\"Reproducir\"]');if(b)b.click();}catch(e){}}poke();setTimeout(poke,400);setTimeout(poke,1200);})();",
+                                            null
+                                    );
+                                } catch (Throwable ignored) {
+                                }
                             }
-                        }
-                    });
-                    wv.loadUrl("https://m.youtube.com/watch?v=" + videoId);
-                } catch (Throwable t) {
-                    Log.e("YR_WEB", "resolveMediaUrl failed", t);
-                    latch.countDown();
-                }
-            });
-
-            try {
-                latch.await(7, TimeUnit.SECONDS);
-            } catch (InterruptedException ignored) {
-            } finally {
-                mainHandler.post(() -> {
-                    try {
-                        WebView wv = webRef.get();
-                        if (wv != null) {
-                            wv.stopLoading();
-                            wv.loadUrl("about:blank");
-                            wv.destroy();
-                        }
-                    } catch (Throwable ignored) {
+                        });
+                        wv.loadUrl("https://m.youtube.com/watch?v=" + videoId);
+                    } catch (Throwable t) {
+                        Log.e("YR_WEB", "resolveMediaUrl failed", t);
+                        latch.countDown();
                     }
                 });
+
+                boolean preempted = false;
+                try {
+                    final long maxWaitMs = isInteractive ? 7000L : 5000L;
+                    final long deadline = android.os.SystemClock.elapsedRealtime() + maxWaitMs;
+                    while (true) {
+                        if (!isInteractive && sInteractiveWaiters.get() > 0) {
+                            preempted = true;
+                            Log.i("YR_WEB", "resolveMediaUrl preempted by interactive vid=" + videoId);
+                            break;
+                        }
+                        long rem = deadline - android.os.SystemClock.elapsedRealtime();
+                        if (rem <= 0L) {
+                            break;
+                        }
+                        long step = rem < 300L ? rem : 300L;
+                        if (latch.await(step, TimeUnit.MILLISECONDS)) {
+                            break;
+                        }
+                    }
+                } catch (InterruptedException ignored) {
+                } finally {
+                    mainHandler.post(() -> {
+                        try {
+                            WebView wv = webRef.get();
+                            if (wv != null) {
+                                wv.stopLoading();
+                                wv.loadUrl("about:blank");
+                                wv.destroy();
+                            }
+                        } catch (Throwable ignored) {
+                        }
+                    });
+                }
+
+                String audioPicked = audioResult.get() != null ? audioResult.get() : webmAudioFallback.get();
+                if (audioPicked != null) {
+                    storeWebPositiveCache(videoId + ":a", audioPicked);
+                }
+                String videoPicked = videoResult.get();
+                if (videoPicked != null && bestVideoRank[0] >= 2) {
+                    storeWebPositiveCache(videoId + ":v", videoPicked);
+                }
+                String finalUrl = wantVideo
+                        ? videoPicked
+                        : (audioPicked != null ? audioPicked : videoPicked);
+                if (finalUrl != null) {
+                    storeWebPositiveCache(cacheKey, finalUrl);
+                } else if (!preempted) {
+                    storeWebNegativeCache(cacheKey);
+                }
+                Log.i("YR_WEB", "resolveMediaUrl end vid=" + videoId + " wantVideo=" + wantVideo + " fg=" + isInteractive + " ok=" + (finalUrl != null));
+                return finalUrl;
             }
-            String audioPicked = audioResult.get() != null ? audioResult.get() : webmAudioFallback.get();
-            String finalUrl = wantVideo
-                    ? videoResult.get()
-                    : (audioPicked != null ? audioPicked : videoResult.get());
-            Log.i("YR_WEB", "resolveMediaUrl end vid=" + videoId + " wantVideo=" + wantVideo + " ok=" + (finalUrl != null));
-            return finalUrl;
+        } finally {
+            if (isInteractive) {
+                sInteractiveWaiters.decrementAndGet();
+            }
         }
     }
 

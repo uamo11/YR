@@ -254,7 +254,7 @@ impl SmoothTouchScroller {
         viewport_rect: egui::Rect,
         can_pull_refresh: bool,
     ) {
-        const TOUCH_SLOP: f32 = 6.0;
+        const TOUCH_SLOP: f32 = 7.0;
         let dt = ui.input(|i| i.stable_dt).clamp(0.001, 0.05);
         let pointer = ui.input(|i| i.pointer.clone());
         let down = pointer.any_down();
@@ -403,7 +403,7 @@ impl SmoothHorizScroller {
         viewport_rect: egui::Rect,
         page_stride: Option<f32>,
     ) {
-        const TOUCH_SLOP: f32 = 6.0;
+        const TOUCH_SLOP: f32 = 7.0;
         let active_rect = if let Some(prev) = self.last_rect {
             egui::Rect::from_min_size(
                 viewport_rect.min,
@@ -703,6 +703,20 @@ fn cache_webview_audio_url(
     );
 }
 
+fn build_webview_video_info(track_id: String, url: String) -> VideoStreamInfo {
+    let ua = yr_provider::innertube::video_stream_user_agent(&url).to_string();
+    let is_hls = url.contains(".m3u8");
+    VideoStreamInfo {
+        track_id,
+        url,
+        fallback_url: None,
+        user_agent: ua,
+        width: 1280,
+        height: 720,
+        is_hls,
+    }
+}
+
 async fn play_track_bg(
     track: Track,
     quality: AudioQuality,
@@ -764,7 +778,7 @@ async fn play_track_bg(
             Err(rust_err) => {
                 let vid = track.id.clone();
                 let webview_url = tokio::task::spawn_blocking(move || {
-                    crate::android_media::resolve_audio_url(&vid)
+                    crate::android_media::resolve_audio_url_with_priority(&vid, true)
                 })
                 .await
                 .ok()
@@ -1955,10 +1969,22 @@ impl YrApp {
         let tx = self.event_tx.clone();
         let ctx = ctx.clone();
         self.runtime.spawn(async move {
-            let res = match track_meta {
+            let mut res = match track_meta {
                 Some(ref t) => provider.resolve_music_video_stream(t, max_h).await,
                 None => provider.resolve_video_stream(&next_id, max_h).await,
             };
+            if res.is_err() {
+                let vid = next_id.clone();
+                if let Ok(Some(url)) = tokio::task::spawn_blocking(move || {
+                    crate::android_media::resolve_video_url_with_priority(&vid, false)
+                })
+                .await
+                {
+                    let info = build_webview_video_info(next_id.clone(), url);
+                    provider.cache_video_stream(&next_id, max_h, info.clone());
+                    res = Ok(info);
+                }
+            }
             if let Ok(info) = res {
                 let _ = tx.send(AppEvent::VideoStreamPrewarmed {
                     track_id: next_id,
@@ -2027,21 +2053,12 @@ impl YrApp {
             .map_err(|e| e.to_string());
             if res.is_err() {
                 let vid = track_id.clone();
-                if let Ok(Some(url)) =
-                    tokio::task::spawn_blocking(move || crate::android_media::resolve_video_url(&vid))
-                        .await
+                if let Ok(Some(url)) = tokio::task::spawn_blocking(move || {
+                    crate::android_media::resolve_video_url_with_priority(&vid, true)
+                })
+                .await
                 {
-                    let ua = yr_provider::innertube::video_stream_user_agent(&url).to_string();
-                    let is_hls = url.contains(".m3u8");
-                    let info = VideoStreamInfo {
-                        track_id: track_id.clone(),
-                        url,
-                        fallback_url: None,
-                        user_agent: ua,
-                        width: 1280,
-                        height: 720,
-                        is_hls,
-                    };
+                    let info = build_webview_video_info(track_id.clone(), url);
                     provider.cache_video_stream(&track_id, max_h, info.clone());
                     res = Ok(info);
                 }
@@ -2527,7 +2544,7 @@ impl YrApp {
                         Err(rust_err) => {
                             let vid = track.id.clone();
                             let wv = tokio::task::spawn_blocking(move || {
-                                crate::android_media::resolve_audio_url(&vid)
+                                crate::android_media::resolve_audio_url_with_priority(&vid, true)
                             })
                             .await
                             .ok()
@@ -14502,7 +14519,7 @@ fn paint_ready_image(
             true
         }
         Ok(egui::load::TexturePoll::Pending { .. }) => {
-            ui.ctx().request_repaint();
+            ui.ctx().request_repaint_after(Duration::from_millis(80));
             false
         }
         Err(_) => false,
@@ -14527,7 +14544,7 @@ fn paint_antony_avatar(
             true
         }
         Ok(egui::load::TexturePoll::Pending { .. }) => {
-            ui.ctx().request_repaint();
+            ui.ctx().request_repaint_after(Duration::from_millis(80));
             false
         }
         Err(_) => false,
