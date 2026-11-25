@@ -1125,7 +1125,7 @@ fn stream_client_ua(url: &str) -> Option<&'static str> {
     } else if url.contains("c=VISIONOS") {
         Some("Mozilla/5.0 (Macintosh; Intel Mac OS X 14_6) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15")
     } else if url.contains("c=IOS") {
-        Some("com.google.ios.youtube/19.29.1 (iPhone16,2; U; CPU iOS 17_5_1 like Mac OS X;)")
+        Some("com.google.ios.youtube/20.03.02 (iPhone16,2; U; CPU iOS 18_2_1 like Mac OS X;)")
     } else if url.contains("c=ANDROID_VR") {
         Some("com.google.android.apps.youtube.vr.oculus/1.60.19 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip")
     } else {
@@ -1430,9 +1430,8 @@ mod tests {
         assert!(stream_client_ua("https://rr1.googlevideo.com/videoplayback?c=MWEB")
             .unwrap_or("")
             .contains("Android"));
-        assert!(stream_client_ua("https://rr1.googlevideo.com/videoplayback?c=IOS")
-            .unwrap_or("")
-            .contains("iPhone"));
+        let ios_ua = stream_client_ua("https://rr1.googlevideo.com/videoplayback?c=IOS").unwrap_or("");
+        assert!(ios_ua.contains("iPhone") && ios_ua.contains("20.03.02"));
         assert!(stream_client_ua("https://rr1.googlevideo.com/videoplayback?c=VISIONOS")
             .unwrap_or("")
             .contains("Macintosh"));

@@ -419,6 +419,7 @@ pub struct YrApp {
     notifications_flag: Arc<std::sync::atomic::AtomicBool>,
     max_smart_songs_atomic: Arc<std::sync::atomic::AtomicUsize>,
     known_tracks: Arc<std::sync::Mutex<HashMap<String, Track>>>,
+    consecutive_stream_failures: u8,
 }
 
 async fn play_track_bg(
@@ -717,6 +718,7 @@ impl YrApp {
             notifications_flag,
             max_smart_songs_atomic,
             known_tracks,
+            consecutive_stream_failures: 0,
         };
 
         let (media_tx, mut media_rx) = mpsc::unbounded_channel();
@@ -1809,6 +1811,7 @@ impl YrApp {
         } else {
             None
         };
+        self.consecutive_stream_failures = 0;
         self.queue.lock().unwrap().set_queue(tracks, index);
         self.now_playing_open = true;
         self.show_settings = false;
@@ -2309,21 +2312,55 @@ impl YrApp {
                     }
                     self.cover_colors.insert(url, color);
                 }
-                AppEvent::StreamResolved { track, result } => match result {
-                    Ok(url) => {
-                        let is_curr = self
-                            .queue
-                            .lock()
-                            .unwrap()
-                            .current_track()
-                            .map(|t| t.id.as_str())
-                            == Some(&track.id);
-                        if is_curr {
-                            self.audio.play_url(url, track.id, track.duration_secs);
+                AppEvent::StreamResolved { track, result } => {
+                    let is_curr = self
+                        .queue
+                        .lock()
+                        .unwrap()
+                        .current_track()
+                        .map(|t| t.id.as_str())
+                        == Some(&track.id);
+                    if is_curr {
+                        match result {
+                            Ok(url) => {
+                                self.consecutive_stream_failures = 0;
+                                self.audio.play_url(url, track.id, track.duration_secs);
+                            }
+                            Err(e) => {
+                                let err_lc = e.to_lowercase();
+                                let net_down = err_lc.contains("dns")
+                                    || err_lc.contains("network is unreachable")
+                                    || err_lc.contains("connection refused")
+                                    || err_lc.contains("timed out");
+                                let next_opt = if !net_down && self.consecutive_stream_failures < 2 {
+                                    self.queue.lock().unwrap().next_track(true).cloned()
+                                } else {
+                                    None
+                                };
+                                match next_opt {
+                                    Some(next_t) if next_t.id != track.id => {
+                                        self.consecutive_stream_failures += 1;
+                                        if let Some(pos) =
+                                            self.sample_tracks.iter().position(|t| t.id == next_t.id)
+                                        {
+                                            if self.active_tab == NavTab::Samples {
+                                                self.sample_idx = pos;
+                                            }
+                                        }
+                                        self.set_banner(
+                                            "Pista no disponible, pasando a la siguiente...".to_string(),
+                                        );
+                                        self.play_current_queue_track(ctx);
+                                    }
+                                    _ => self.set_banner(friendly_error_message(
+                                        "No se pudo reproducir",
+                                        &e,
+                                    )),
+                                }
+                            }
                         }
                     }
-                    Err(e) => self.set_banner(friendly_error_message("No se pudo reproducir", &e)),
-                },
+                }
                 AppEvent::SearchSuggestionsLoaded { query, suggestions } => {
                     if self.search_query.trim() == query {
                         self.search_suggestions = suggestions;
@@ -2665,6 +2702,12 @@ impl eframe::App for YrApp {
         }
         self.process_events(ctx);
         let snap = self.audio.snapshot();
+        if self.consecutive_stream_failures > 0
+            && snap.status == PlaybackStatus::Playing
+            && snap.position_secs > 0.3
+        {
+            self.consecutive_stream_failures = 0;
+        }
         let fullscreen_overlay = self.now_playing_open || self.show_settings;
 
         if !fullscreen_overlay {
@@ -7177,6 +7220,22 @@ impl YrApp {
                             self.show_settings = true;
                             self.settings_category = SettingsCategory::DownloadsStorage;
                         }
+                        if !smart_on
+                            && icons::icon_pill_button(
+                                ui,
+                                icons::Icon::Download,
+                                "Activar",
+                                ACCENT_RED,
+                                Color32::WHITE,
+                            )
+                            .clicked()
+                        {
+                            self.store.data.config.smart_downloads = true;
+                            self.smart_downloads_flag
+                                .store(true, std::sync::atomic::Ordering::Relaxed);
+                            let _ = self.store.save();
+                            self.trigger_smart_download_sync();
+                        }
                     });
                 });
                 ui.add_space(3.0);
@@ -7243,6 +7302,7 @@ impl YrApp {
             ui.allocate_ui(Vec2::new(ui.available_width(), 34.0), |ui| {
                 egui::ScrollArea::horizontal()
                     .id_salt("downloads_actions_row")
+                    .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
                             ui.spacing_mut().item_spacing.x = 6.0;
@@ -10726,7 +10786,7 @@ impl YrApp {
                     }
                 }
                 SettingsCategory::About => {
-                    ui.heading("YR Music v0.9.17");
+                    ui.heading("YR Music v0.9.18");
                     ui.label("Cliente nativo de música 100% en Rust para Android y escritorio.");
                     ui.add_space(6.0);
                     ui.label(RichText::new("Motor de audio Symphonia PCM con DSP Morphe 3D binaural, reproductor integrado de video en la app, auto-scroll inteligente de cola, prefetch predictivo en disco y compatibilidad completa con YouTube Music.").size(12.0).color(TEXT_SECONDARY));
@@ -11642,6 +11702,7 @@ impl YrApp {
                                 .max_height((screen.height() * 0.34).max(140.0))
                                 .show(ui, |ui| {
                                     for pl in pls {
+                                        let already_in = pl.tracks.iter().any(|t| t.id == track.id);
                                         let clicked = egui::Frame::new()
                                             .fill(BG_ELEVATED)
                                             .corner_radius(CornerRadius::same(10))
@@ -11651,9 +11712,13 @@ impl YrApp {
                                                 let resp = ui.horizontal(|ui| {
                                                     draw_inline_icon(
                                                         ui,
-                                                        icons::Icon::PlaylistAdd,
+                                                        if already_in {
+                                                            icons::Icon::Check
+                                                        } else {
+                                                            icons::Icon::PlaylistAdd
+                                                        },
                                                         18.0,
-                                                        Color32::WHITE,
+                                                        if already_in { GREEN_OK } else { Color32::WHITE },
                                                     );
                                                     ui.add_space(8.0);
                                                     ui.label(
@@ -11665,14 +11730,15 @@ impl YrApp {
                                                     ui.with_layout(
                                                         Layout::right_to_left(Align::Center),
                                                         |ui| {
-                                                            ui.label(
-                                                                RichText::new(format!(
-                                                                    "{} pistas",
-                                                                    pl.tracks.len()
-                                                                ))
-                                                                .size(12.0)
-                                                                .color(TEXT_SECONDARY),
-                                                            );
+                                                            let (txt, col) = if already_in {
+                                                                (
+                                                                    format!("Guardada • {} pistas", pl.tracks.len()),
+                                                                    GREEN_OK,
+                                                                )
+                                                            } else {
+                                                                (format!("{} pistas", pl.tracks.len()), TEXT_SECONDARY)
+                                                            };
+                                                            ui.label(RichText::new(txt).size(12.0).color(col));
                                                         },
                                                     );
                                                 });
@@ -11685,8 +11751,14 @@ impl YrApp {
                                             })
                                             .inner;
                                         if clicked {
-                                            self.store.add_to_playlist(&pl.id, track.clone());
-                                            self.set_banner(format!("Añadida a '{}'", pl.name));
+                                            if already_in {
+                                                self.store.remove_from_playlist(&pl.id, &track.id);
+                                                self.set_banner(format!("Quitada de '{}'", pl.name));
+                                            } else {
+                                                self.store.add_to_playlist(&pl.id, track.clone());
+                                                self.maybe_smart_download_track(&track, false, false);
+                                                self.set_banner(format!("Añadida a '{}'", pl.name));
+                                            }
                                             close_sheet = true;
                                         }
                                         ui.add_space(4.0);
@@ -11699,7 +11771,7 @@ impl YrApp {
                         ui.add_space(8.0);
                         ui.horizontal(|ui| {
                             let input_w = (content_w - 156.0).max(110.0);
-                            egui::Frame::new()
+                            let edit_resp = egui::Frame::new()
                                 .fill(BG_ELEVATED)
                                 .corner_radius(CornerRadius::same(18))
                                 .inner_margin(egui::Margin::symmetric(12, 6))
@@ -11709,10 +11781,13 @@ impl YrApp {
                                             .hint_text("Nueva playlist...")
                                             .frame(false)
                                             .desired_width(input_w),
-                                    );
-                                });
+                                    )
+                                })
+                                .inner;
+                            let enter_pressed = edit_resp.lost_focus()
+                                && ui.input(|i| i.key_pressed(egui::Key::Enter));
                             let can_create = !self.new_playlist_name.trim().is_empty();
-                            if ui
+                            let btn_clicked = ui
                                 .add(
                                     egui::Button::new(
                                         RichText::new("Crear y añadir")
@@ -11728,12 +11803,12 @@ impl YrApp {
                                     .corner_radius(CornerRadius::same(18))
                                     .min_size(Vec2::new(112.0, 34.0)),
                                 )
-                                .clicked()
-                                && can_create
-                            {
+                                .clicked();
+                            if (btn_clicked || enter_pressed) && can_create {
                                 let name = self.new_playlist_name.trim().to_string();
                                 let created = self.store.create_playlist(name);
                                 self.store.add_to_playlist(&created.id, track.clone());
+                                self.maybe_smart_download_track(&track, false, false);
                                 self.new_playlist_name.clear();
                                 self.set_banner(format!("Añadida a '{}'", created.name));
                                 close_sheet = true;
@@ -11999,7 +12074,7 @@ impl YrApp {
                         }
                         if menu_row(ui, icons::Icon::Help, "Ayuda y comentarios").clicked() {
                             self.show_account_modal = false;
-                            self.set_banner("YR Music v0.9.17 • Pure Rust");
+                            self.set_banner("YR Music v0.9.18 • Pure Rust");
                         }
 
                         #[cfg(target_os = "android")]

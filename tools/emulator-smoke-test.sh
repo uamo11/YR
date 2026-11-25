@@ -145,6 +145,12 @@ sleep 2
 adb shell screencap -p /data/local/tmp/07b_library.png
 adb pull /data/local/tmp/07b_library.png screenshots/07b_library.png
 
+# 7c. Biblioteca -> Descargas (Smart Downloads status card, quota bar, offline tracks)
+adb shell input tap 280 355
+sleep 1.5
+adb shell screencap -p /data/local/tmp/07c_downloads.png
+adb pull /data/local/tmp/07c_downloads.png screenshots/07c_downloads.png
+
 # 8. Notification controls, screen-off survival & lockscreen controls
 adb shell cmd statusbar expand-notifications
 sleep 2

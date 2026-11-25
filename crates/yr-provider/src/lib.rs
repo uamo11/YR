@@ -703,7 +703,10 @@ impl MusicProvider for YtMusicProvider {
         let player = self
             .client
             .query()
-            .player(track_id)
+            .player_from_clients(
+                track_id,
+                &[ClientType::Ios, ClientType::Android, ClientType::Tv, ClientType::Desktop],
+            )
             .await
             .map_err(|e| ProviderError::Api(e.to_string()))?;
 
