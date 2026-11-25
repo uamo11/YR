@@ -1964,11 +1964,30 @@ impl YrApp {
         let tx = self.event_tx.clone();
         let ctx = ctx.clone();
         self.runtime.spawn(async move {
-            let res = match track_meta {
+            let mut res = match track_meta {
                 Some(ref t) => provider.resolve_music_video_stream(t, max_h).await,
                 None => provider.resolve_video_stream(&track_id, max_h).await,
             }
             .map_err(|e| e.to_string());
+            if res.is_err() {
+                let vid = track_id.clone();
+                if let Ok(Some(url)) =
+                    tokio::task::spawn_blocking(move || crate::android_media::resolve_video_url(&vid))
+                        .await
+                {
+                    let ua = yr_provider::innertube::video_stream_user_agent(&url).to_string();
+                    let is_hls = url.contains(".m3u8");
+                    res = Ok(VideoStreamInfo {
+                        track_id: track_id.clone(),
+                        url,
+                        fallback_url: None,
+                        user_agent: ua,
+                        width: 1280,
+                        height: 720,
+                        is_hls,
+                    });
+                }
+            }
             let _ = tx.send(AppEvent::VideoStreamResolved {
                 track_id,
                 result: res,
@@ -6155,35 +6174,32 @@ impl YrApp {
             let bleed_rect =
                 egui::Rect::from_x_y_ranges(ctx.screen_rect().x_range(), row_rect.y_range());
             let mut bleed_ui = ui.new_child(egui::UiBuilder::new().max_rect(bleed_rect));
-            egui::ScrollArea::horizontal()
-                .id_salt("search_filter_chips")
-                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
-                .show(&mut bleed_ui, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = 6.0;
-                        ui.add_space(12.0);
-                        for (filt, label) in [
-                            (SearchFilter::All, "Todo"),
-                            (SearchFilter::Songs, "Canciones"),
-                            (SearchFilter::Albums, "Álbumes"),
-                            (SearchFilter::Artists, "Artistas"),
-                            (SearchFilter::Playlists, "Playlists"),
-                        ] {
-                            let active = self.search_filter == filt;
-                            let btn = egui::Button::new(
-                                RichText::new(label)
-                                    .size(13.0)
-                                    .color(if active { Color32::BLACK } else { TEXT_PRIMARY }),
-                            )
-                            .fill(if active { Color32::WHITE } else { BG_ELEVATED })
-                            .corner_radius(CornerRadius::same(16));
-                            if ui.add(btn).clicked() {
-                                self.search_filter = filt;
-                            }
+            self.show_smooth_hscroll(&mut bleed_ui, "search_filter_chips", None, |this, ui| {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 6.0;
+                    ui.add_space(12.0);
+                    for (filt, label) in [
+                        (SearchFilter::All, "Todo"),
+                        (SearchFilter::Songs, "Canciones"),
+                        (SearchFilter::Albums, "Álbumes"),
+                        (SearchFilter::Artists, "Artistas"),
+                        (SearchFilter::Playlists, "Playlists"),
+                    ] {
+                        let active = this.search_filter == filt;
+                        let btn = egui::Button::new(
+                            RichText::new(label)
+                                .size(13.0)
+                                .color(if active { Color32::BLACK } else { TEXT_PRIMARY }),
+                        )
+                        .fill(if active { Color32::WHITE } else { BG_ELEVATED })
+                        .corner_radius(CornerRadius::same(16));
+                        if ui.add(btn).clicked() {
+                            this.search_filter = filt;
                         }
-                        ui.add_space(12.0);
-                    });
+                    }
+                    ui.add_space(12.0);
                 });
+            });
         }
 
         if self.search_loading {
@@ -6352,41 +6368,36 @@ impl YrApp {
 
                     if !recent_thumbs.is_empty() {
                         ui.add_space(6.0);
-                        egui::ScrollArea::horizontal()
-                            .id_salt("recent_search_thumbs")
-                            .scroll_bar_visibility(
-                                egui::scroll_area::ScrollBarVisibility::AlwaysHidden,
-                            )
-                            .show(ui, |ui| {
-                                ui.horizontal(|ui| {
-                                    ui.spacing_mut().item_spacing.x = 10.0;
-                                    for (q, thumb) in recent_thumbs.iter().take(10) {
-                                        ui.vertical(|ui| {
-                                            ui.set_width(88.0);
-                                            let r = ui
-                                                .allocate_ui(Vec2::splat(88.0), |ui| {
-                                                    render_thumb(ui, thumb.as_deref(), 88.0);
-                                                })
-                                                .response
-                                                .interact(Sense::click());
-                                            let lbl_resp = ui.add(
-                                                egui::Label::new(
-                                                    RichText::new(q)
-                                                        .size(12.0)
-                                                        .color(TEXT_PRIMARY),
-                                                )
-                                                .truncate()
-                                                .selectable(false)
-                                                .sense(Sense::click()),
-                                            );
-                                            if r.clicked() || lbl_resp.clicked() {
-                                                self.search_query = q.clone();
-                                                self.trigger_search(ctx);
-                                            }
-                                        });
-                                    }
-                                });
+                        self.show_smooth_hscroll(ui, "recent_search_thumbs", None, |this, ui| {
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = 10.0;
+                                for (q, thumb) in recent_thumbs.iter().take(10) {
+                                    ui.vertical(|ui| {
+                                        ui.set_width(88.0);
+                                        let r = ui
+                                            .allocate_ui(Vec2::splat(88.0), |ui| {
+                                                render_thumb(ui, thumb.as_deref(), 88.0);
+                                            })
+                                            .response
+                                            .interact(Sense::click());
+                                        let lbl_resp = ui.add(
+                                            egui::Label::new(
+                                                RichText::new(q)
+                                                    .size(12.0)
+                                                    .color(TEXT_PRIMARY),
+                                            )
+                                            .truncate()
+                                            .selectable(false)
+                                            .sense(Sense::click()),
+                                        );
+                                        if r.clicked() || lbl_resp.clicked() {
+                                            this.search_query = q.clone();
+                                            this.trigger_search(ctx);
+                                        }
+                                    });
+                                }
                             });
+                        });
                     }
 
                     if !history.is_empty() {
@@ -6594,53 +6605,48 @@ impl YrApp {
                             None,
                         );
                         ui.add_space(6.0);
-                        egui::ScrollArea::horizontal()
-                            .id_salt("explore_albums_h")
-                            .scroll_bar_visibility(
-                                egui::scroll_area::ScrollBarVisibility::AlwaysHidden,
-                            )
-                            .show(ui, |ui| {
-                                ui.horizontal(|ui| {
-                                    ui.spacing_mut().item_spacing.x = 12.0;
-                                    for a in albums.iter().take(10) {
-                                        ui.vertical(|ui| {
-                                            ui.set_width(120.0);
-                                            let r = ui
-                                                .allocate_ui(Vec2::splat(120.0), |ui| {
-                                                    render_thumb(
-                                                        ui,
-                                                        a.thumbnail_url.as_deref(),
-                                                        120.0,
-                                                    );
-                                                })
-                                                .response
-                                                .interact(Sense::click());
-                                            if r.clicked() {
-                                                self.open_album(a.id.clone(), ctx);
-                                            }
-                                            ui.add(
-                                                egui::Label::new(
-                                                    RichText::new(&a.title)
-                                                        .size(13.0)
-                                                        .strong()
-                                                        .color(TEXT_PRIMARY),
-                                                )
-                                                .truncate()
-                                                .selectable(false),
-                                            );
-                                            ui.add(
-                                                egui::Label::new(
-                                                    RichText::new(&a.artist)
-                                                        .size(11.5)
-                                                        .color(TEXT_SECONDARY),
-                                                )
-                                                .truncate()
-                                                .selectable(false),
-                                            );
-                                        });
-                                    }
-                                });
+                        self.show_smooth_hscroll(ui, "explore_albums_h", None, |this, ui| {
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = 12.0;
+                                for a in albums.iter().take(10) {
+                                    ui.vertical(|ui| {
+                                        ui.set_width(120.0);
+                                        let r = ui
+                                            .allocate_ui(Vec2::splat(120.0), |ui| {
+                                                render_thumb(
+                                                    ui,
+                                                    a.thumbnail_url.as_deref(),
+                                                    120.0,
+                                                );
+                                            })
+                                            .response
+                                            .interact(Sense::click());
+                                        if r.clicked() {
+                                            this.open_album(a.id.clone(), ctx);
+                                        }
+                                        ui.add(
+                                            egui::Label::new(
+                                                RichText::new(&a.title)
+                                                    .size(13.0)
+                                                    .strong()
+                                                    .color(TEXT_PRIMARY),
+                                            )
+                                            .truncate()
+                                            .selectable(false),
+                                        );
+                                        ui.add(
+                                            egui::Label::new(
+                                                RichText::new(&a.artist)
+                                                    .size(11.5)
+                                                    .color(TEXT_SECONDARY),
+                                            )
+                                            .truncate()
+                                            .selectable(false),
+                                        );
+                                    });
+                                }
                             });
+                        });
                     }
 
                     let moods = if !self.explore_feed.moods.is_empty() {
@@ -6658,39 +6664,34 @@ impl YrApp {
                             None,
                         );
                         ui.add_space(6.0);
-                        egui::ScrollArea::horizontal()
-                            .id_salt("explore_moods_h")
-                            .scroll_bar_visibility(
-                                egui::scroll_area::ScrollBarVisibility::AlwaysHidden,
-                            )
-                            .show(ui, |ui| {
-                                ui.horizontal(|ui| {
-                                    ui.spacing_mut().item_spacing.x = 8.0;
-                                    for m in moods.iter().take(12) {
-                                        let btn = egui::Button::new(
-                                            RichText::new(&m.title).size(13.0).color(TEXT_PRIMARY),
-                                        )
-                                        .fill(BG_ELEVATED)
-                                        .corner_radius(CornerRadius::same(16));
-                                        if ui.add(btn).clicked() {
-                                            if m.params.is_some() {
-                                                self.active_tab = NavTab::Home;
-                                                self.active_mood_title = Some(m.title.clone());
-                                                self.refresh_home_with_params(
-                                                    m.params.clone(),
-                                                    ctx,
-                                                );
-                                            } else {
-                                                self.open_mood(
-                                                    m.id.clone(),
-                                                    m.title.clone(),
-                                                    ctx,
-                                                );
-                                            }
+                        self.show_smooth_hscroll(ui, "explore_moods_h", None, |this, ui| {
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = 8.0;
+                                for m in moods.iter().take(12) {
+                                    let btn = egui::Button::new(
+                                        RichText::new(&m.title).size(13.0).color(TEXT_PRIMARY),
+                                    )
+                                    .fill(BG_ELEVATED)
+                                    .corner_radius(CornerRadius::same(16));
+                                    if ui.add(btn).clicked() {
+                                        if m.params.is_some() {
+                                            this.active_tab = NavTab::Home;
+                                            this.active_mood_title = Some(m.title.clone());
+                                            this.refresh_home_with_params(
+                                                m.params.clone(),
+                                                ctx,
+                                            );
+                                        } else {
+                                            this.open_mood(
+                                                m.id.clone(),
+                                                m.title.clone(),
+                                                ctx,
+                                            );
                                         }
                                     }
-                                });
+                                }
                             });
+                        });
                     }
 
                     return;
@@ -6990,37 +6991,34 @@ impl YrApp {
             let bleed_rect =
                 egui::Rect::from_x_y_ranges(ctx.screen_rect().x_range(), row_rect.y_range());
             let mut bleed_ui = ui.new_child(egui::UiBuilder::new().max_rect(bleed_rect));
-            egui::ScrollArea::horizontal()
-                .id_salt("lib_filters")
-                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
-                .show(&mut bleed_ui, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = 8.0;
-                        ui.add_space(12.0);
-                        for (filt, label) in [
-                            (LibraryFilter::All, "Todo"),
-                            (LibraryFilter::Downloads, "Descargas"),
-                            (LibraryFilter::History, "Historial"),
-                            (LibraryFilter::Playlists, "Playlists"),
-                            (LibraryFilter::Songs, "Canciones"),
-                            (LibraryFilter::Albums, "Álbumes"),
-                            (LibraryFilter::Artists, "Artistas"),
-                        ] {
-                            let active = self.library_filter == filt;
-                            let btn = egui::Button::new(
-                                RichText::new(label)
-                                    .size(13.0)
-                                    .color(if active { Color32::BLACK } else { TEXT_PRIMARY }),
-                            )
-                            .fill(if active { Color32::WHITE } else { BG_ELEVATED })
-                            .corner_radius(CornerRadius::same(8));
-                            if ui.add(btn).clicked() {
-                                self.library_filter = filt;
-                            }
+            self.show_smooth_hscroll(&mut bleed_ui, "lib_filters", None, |this, ui| {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 8.0;
+                    ui.add_space(12.0);
+                    for (filt, label) in [
+                        (LibraryFilter::All, "Todo"),
+                        (LibraryFilter::Downloads, "Descargas"),
+                        (LibraryFilter::History, "Historial"),
+                        (LibraryFilter::Playlists, "Playlists"),
+                        (LibraryFilter::Songs, "Canciones"),
+                        (LibraryFilter::Albums, "Álbumes"),
+                        (LibraryFilter::Artists, "Artistas"),
+                    ] {
+                        let active = this.library_filter == filt;
+                        let btn = egui::Button::new(
+                            RichText::new(label)
+                                .size(13.0)
+                                .color(if active { Color32::BLACK } else { TEXT_PRIMARY }),
+                        )
+                        .fill(if active { Color32::WHITE } else { BG_ELEVATED })
+                        .corner_radius(CornerRadius::same(8));
+                        if ui.add(btn).clicked() {
+                            this.library_filter = filt;
                         }
-                        ui.add_space(12.0);
-                    });
+                    }
+                    ui.add_space(12.0);
                 });
+            });
         }
 
         if self.show_new_playlist_dialog {
@@ -7998,47 +7996,44 @@ impl YrApp {
 
         if !completed.is_empty() {
             ui.allocate_ui(Vec2::new(ui.available_width(), 34.0), |ui| {
-                egui::ScrollArea::horizontal()
-                    .id_salt("downloads_actions_row")
-                    .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
-                    .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.spacing_mut().item_spacing.x = 6.0;
-                            if icons::icon_pill_button(
-                                ui,
-                                icons::Icon::Play,
-                                "Reproducir",
-                                BG_ELEVATED,
-                                TEXT_PRIMARY,
-                            )
-                            .clicked()
-                            {
-                                self.play_track_in_list(completed.clone(), 0, ctx);
-                            }
-                            if icons::icon_pill_button(
-                                ui,
-                                icons::Icon::Shuffle,
-                                "Aleatorio",
-                                BG_ELEVATED,
-                                TEXT_PRIMARY,
-                            )
-                            .clicked()
-                            {
-                                self.play_tracks_shuffled(completed.clone(), ctx);
-                            }
-                            if icons::icon_pill_button(
-                                ui,
-                                icons::Icon::Refresh,
-                                "Sincronizar",
-                                BG_ELEVATED,
-                                TEXT_PRIMARY,
-                            )
-                            .clicked()
-                            {
-                                self.trigger_smart_download_sync();
-                            }
-                        });
+                self.show_smooth_hscroll(ui, "downloads_actions_row", None, |this, ui| {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 6.0;
+                        if icons::icon_pill_button(
+                            ui,
+                            icons::Icon::Play,
+                            "Reproducir",
+                            BG_ELEVATED,
+                            TEXT_PRIMARY,
+                        )
+                        .clicked()
+                        {
+                            this.play_track_in_list(completed.clone(), 0, ctx);
+                        }
+                        if icons::icon_pill_button(
+                            ui,
+                            icons::Icon::Shuffle,
+                            "Aleatorio",
+                            BG_ELEVATED,
+                            TEXT_PRIMARY,
+                        )
+                        .clicked()
+                        {
+                            this.play_tracks_shuffled(completed.clone(), ctx);
+                        }
+                        if icons::icon_pill_button(
+                            ui,
+                            icons::Icon::Refresh,
+                            "Sincronizar",
+                            BG_ELEVATED,
+                            TEXT_PRIMARY,
+                        )
+                        .clicked()
+                        {
+                            this.trigger_smart_download_sync();
+                        }
                     });
+                });
             });
             ui.add_space(6.0);
         } else if !self.downloads.is_empty() {

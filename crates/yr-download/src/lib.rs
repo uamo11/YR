@@ -1069,7 +1069,7 @@ mod tests {
     #[test]
     fn stream_client_ua_uses_active_ios_20_ua() {
         let ua = stream_client_ua("https://rr2.googlevideo.com/videoplayback?c=IOS").unwrap_or("");
-        assert!(ua.contains("20.03.02") && ua.contains("iPhone"));
+        assert!(ua.contains("21.02.1") && ua.contains("iPhone"));
         assert!(!ua.contains("19.29.1"));
         let tv_ua = stream_client_ua("https://rr2.googlevideo.com/videoplayback?c=TVHTML5").unwrap_or("");
         assert!(tv_ua.contains("Cobalt"));

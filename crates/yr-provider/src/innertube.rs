@@ -850,11 +850,11 @@ fn non_empty(s: String) -> Option<String> {
 }
 
 const VISIONOS_UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_6) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15";
-const ANDROID_VR_UA: &str = "com.google.android.apps.youtube.vr.oculus/1.62.27 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip";
-const IOS_PLAYER_UA: &str = "com.google.ios.youtube/20.03.02 (iPhone16,2; U; CPU iOS 18_2_1 like Mac OS X;)";
+const ANDROID_VR_UA: &str = "com.google.android.apps.youtube.vr.oculus/1.65.10 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip";
+const ANDROID_VR_LEGACY_UA: &str = "com.google.android.apps.youtube.vr.oculus/1.62.27 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip";
+const IOS_PLAYER_UA: &str = "com.google.ios.youtube/21.02.1 (iPhone16,2; U; CPU iOS 18_3_1 like Mac OS X;)";
 const ANDROID_PLAYER_UA: &str = "com.google.android.youtube/20.10.38 (Linux; U; Android 14; Mobile) gzip";
 const TVHTML5_UA: &str = "Mozilla/5.0 (ChromiumStylePlatform) Cobalt/Version";
-const TVHTML5_EMBED_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
 pub fn video_stream_user_agent(url: &str) -> &'static str {
     if url.contains("c=TVHTML5") {
@@ -1167,7 +1167,7 @@ async fn fetch_player_client_json(
             "hl": "es-419",
             "gl": "MX",
             "osName": "iPhone",
-            "osVersion": "18.2.1.22C161",
+            "osVersion": "18.3.1.22D72",
             "platform": "MOBILE"
         }),
         "ANDROID_VR" => {
@@ -1194,13 +1194,6 @@ async fn fetch_player_client_json(
             "hl": "es-419",
             "gl": "MX"
         }),
-        "TVHTML5_SIMPLY_EMBEDDED_PLAYER" => json!({
-            "clientName": "TVHTML5_SIMPLY_EMBEDDED_PLAYER",
-            "clientVersion": client_version,
-            "platform": "TV",
-            "hl": "es-419",
-            "gl": "MX"
-        }),
         _ => {
             let mut c = json!({
                 "clientName": "ANDROID",
@@ -1217,28 +1210,14 @@ async fn fetch_player_client_json(
             c
         }
     };
-    let body = if client_name == "TVHTML5_SIMPLY_EMBEDDED_PLAYER" {
-        json!({
-            "context": {
-                "client": client_obj,
-                "thirdParty": {
-                    "embedUrl": "https://www.youtube.com/"
-                }
-            },
-            "videoId": video_id,
-            "contentCheckOk": true,
-            "racyCheckOk": true
-        })
-    } else {
-        json!({
-            "context": {
-                "client": client_obj
-            },
-            "videoId": video_id,
-            "contentCheckOk": true,
-            "racyCheckOk": true
-        })
-    };
+    let body = json!({
+        "context": {
+            "client": client_obj
+        },
+        "videoId": video_id,
+        "contentCheckOk": true,
+        "racyCheckOk": true
+    });
     let mut req = http
         .post("https://www.youtube.com/youtubei/v1/player?prettyPrint=false")
         .header(CONTENT_TYPE, "application/json")
@@ -1309,6 +1288,24 @@ async fn fetch_visionos_stream(
         .ok_or_else(|| "No audio stream in VISIONOS response".to_string())
 }
 
+fn is_bot_or_auth_err(msg: &str) -> bool {
+    let low = msg.to_lowercase();
+    low.contains("bot")
+        || low.contains("sign in")
+        || low.contains("inicia sesión")
+        || low.contains("confirm")
+        || low.contains("login_required")
+}
+
+fn update_player_err(last_err: &mut String, new_err: String) {
+    if is_bot_or_auth_err(last_err) {
+        return;
+    }
+    if is_bot_or_auth_err(&new_err) || last_err.starts_with("No ") || !new_err.contains("HTTP ") {
+        *last_err = new_err;
+    }
+}
+
 /// Resolves a direct hardware-decodable H.264 MP4, VP9 WebM, or HLS video stream via InnerTube.
 pub async fn fetch_player_video_stream(
     http: &reqwest::Client,
@@ -1342,27 +1339,30 @@ pub async fn fetch_player_video_stream(
                         return Ok(v);
                     }
                 }
-                Err(e) => last_err = e,
+                Err(e) => update_player_err(&mut last_err, e),
             }
         }
     }
 
-    if let Ok(val) = fetch_visionos_player_json(http, video_id).await {
-        if let Some(v) = pick_best_video_stream(video_id, &val, max_height, VISIONOS_UA) {
-            return Ok(v);
+    match fetch_visionos_player_json(http, video_id).await {
+        Ok(val) => {
+            if let Some(v) = pick_best_video_stream(video_id, &val, max_height, VISIONOS_UA) {
+                return Ok(v);
+            }
         }
+        Err(e) => update_player_err(&mut last_err, e),
     }
 
     let clients = [
-        ("IOS", "20.03.02", IOS_PLAYER_UA, "5", None),
-        ("ANDROID_VR", "1.62.27", ANDROID_VR_UA, "28", vd.as_deref()),
+        ("ANDROID_VR", "1.65.10", ANDROID_VR_UA, "28", vd.as_deref()),
+        ("IOS", "21.02.1", IOS_PLAYER_UA, "5", None),
         ("ANDROID", "20.10.38", ANDROID_PLAYER_UA, "3", vd.as_deref()),
         (
-            "TVHTML5_SIMPLY_EMBEDDED_PLAYER",
-            "2.0",
-            TVHTML5_EMBED_UA,
-            "85",
-            None,
+            "ANDROID_VR",
+            "1.62.27",
+            ANDROID_VR_LEGACY_UA,
+            "28",
+            vd.as_deref(),
         ),
     ];
     for (client_name, client_version, ua, client_id, c_vd) in clients {
@@ -1383,18 +1383,14 @@ pub async fn fetch_player_video_stream(
                     return Ok(v);
                 }
             }
-            Err(e) => {
-                if last_err.starts_with("No ") || !e.contains("HTTP ") {
-                    last_err = e;
-                }
-            }
+            Err(e) => update_player_err(&mut last_err, e),
         }
     }
     Err(last_err)
 }
 
 /// Fast direct stream extraction via authenticated `ANDROID` / `TVHTML5`,
-/// `VISIONOS 0.1`, `IOS 20.03.02`, `ANDROID_VR 1.62.27`, and `TVHTML5_EMBED` player clients.
+/// `VISIONOS 0.1`, `ANDROID_VR 1.65.10`/`1.62.27`, `IOS 21.02.1`, and `ANDROID 20.10.38`.
 pub async fn fetch_player_stream(
     http: &reqwest::Client,
     video_id: &str,
@@ -1427,25 +1423,26 @@ pub async fn fetch_player_stream(
                         return Ok(best);
                     }
                 }
-                Err(e) => last_err = e,
+                Err(e) => update_player_err(&mut last_err, e),
             }
         }
     }
 
-    if let Ok(stream) = fetch_visionos_stream(http, video_id, quality).await {
-        return Ok(stream);
+    match fetch_visionos_stream(http, video_id, quality).await {
+        Ok(stream) => return Ok(stream),
+        Err(e) => update_player_err(&mut last_err, e),
     }
 
     let clients = [
-        ("IOS", "20.03.02", IOS_PLAYER_UA, "5", None),
-        ("ANDROID_VR", "1.62.27", ANDROID_VR_UA, "28", vd.as_deref()),
+        ("ANDROID_VR", "1.65.10", ANDROID_VR_UA, "28", vd.as_deref()),
+        ("IOS", "21.02.1", IOS_PLAYER_UA, "5", None),
         ("ANDROID", "20.10.38", ANDROID_PLAYER_UA, "3", vd.as_deref()),
         (
-            "TVHTML5_SIMPLY_EMBEDDED_PLAYER",
-            "2.0",
-            TVHTML5_EMBED_UA,
-            "85",
-            None,
+            "ANDROID_VR",
+            "1.62.27",
+            ANDROID_VR_LEGACY_UA,
+            "28",
+            vd.as_deref(),
         ),
     ];
 
@@ -1467,11 +1464,7 @@ pub async fn fetch_player_stream(
                     return Ok(best);
                 }
             }
-            Err(e) => {
-                if last_err.starts_with("No ") || !e.contains("HTTP ") {
-                    last_err = e;
-                }
-            }
+            Err(e) => update_player_err(&mut last_err, e),
         }
     }
 
@@ -2712,6 +2705,12 @@ mod tests {
         assert!(tv_ua.contains("Cobalt"));
         let vr_ua =
             video_stream_user_agent("https://rr1.googlevideo.com/videoplayback?c=ANDROID_VR");
-        assert!(vr_ua.contains("vr.oculus/1.62.27"));
+        assert!(vr_ua.contains("vr.oculus/1.65.10"));
+        let ios_ua = video_stream_user_agent("https://rr1.googlevideo.com/videoplayback?c=IOS");
+        assert!(ios_ua.contains("21.02.1"));
+        let mut err = String::from("No stream returned");
+        update_player_err(&mut err, "Sign in to confirm you're not a bot".to_string());
+        update_player_err(&mut err, "Generic error".to_string());
+        assert!(err.contains("not a bot"));
     }
 }

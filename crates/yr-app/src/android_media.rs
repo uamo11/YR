@@ -189,9 +189,9 @@ mod imp {
         );
     }
 
-    pub fn resolve_audio_url(video_id: &str) -> Option<String> {
+    fn resolve_media_url(video_id: &str, method_name: &str) -> Option<String> {
         let Some(bridge) = bridge() else {
-            log::warn!("android_media: resolve_audio_url BRIDGE not initialized");
+            log::warn!("android_media: {method_name} BRIDGE not initialized");
             return None;
         };
         let mut env = match bridge.vm.attach_current_thread() {
@@ -203,10 +203,10 @@ mod imp {
         };
         let j_vid = env.new_string(video_id).ok()?;
         let service_cls: &JClass = bridge.service_class.as_obj().into();
-        log::info!("android_media: calling YrPlaybackService.resolveAudioUrl({video_id})");
+        log::info!("android_media: calling YrPlaybackService.{method_name}({video_id})");
         let res = env.call_static_method(
             service_cls,
-            "resolveAudioUrl",
+            method_name,
             "(Landroid/content/Context;Ljava/lang/String;)Ljava/lang/String;",
             &[
                 JValue::Object(bridge.app_ctx.as_obj()),
@@ -223,11 +223,19 @@ mod imp {
                 env.get_string(&jstr).ok().map(|s| s.into())
             }
             Err(e) => {
-                log::warn!("android_media: resolveAudioUrl failed: {e:?}");
+                log::warn!("android_media: {method_name} failed: {e:?}");
                 let _ = env.exception_clear();
                 None
             }
         }
+    }
+
+    pub fn resolve_audio_url(video_id: &str) -> Option<String> {
+        resolve_media_url(video_id, "resolveAudioUrl")
+    }
+
+    pub fn resolve_video_url(video_id: &str) -> Option<String> {
+        resolve_media_url(video_id, "resolveVideoUrl")
     }
 
     #[no_mangle]
@@ -649,6 +657,9 @@ mod imp {
     pub fn resolve_audio_url(_video_id: &str) -> Option<String> {
         None
     }
+    pub fn resolve_video_url(_video_id: &str) -> Option<String> {
+        None
+    }
 }
 
 #[cfg(target_os = "android")]
@@ -656,8 +667,8 @@ pub use imp::init;
 pub use imp::{
     attach_native_video, check_for_updates, hide_embedded_video, is_metered_network,
     is_wifi_connected, open_audio_output_panel, open_google_login, prepare_next_embedded_video,
-    resolve_audio_url, set_action_sender, set_artwork_url, set_auto_check_updates,
-    set_cookie_sender, set_egui_ctx, set_ui_at_root, set_video_quality_label,
-    set_video_seek_seconds, share_text, stop_service, sync_native_video, take_back_pressed,
-    update_playback,
+    resolve_audio_url, resolve_video_url, set_action_sender, set_artwork_url,
+    set_auto_check_updates, set_cookie_sender, set_egui_ctx, set_ui_at_root,
+    set_video_quality_label, set_video_seek_seconds, share_text, stop_service,
+    sync_native_video, take_back_pressed, update_playback,
 };
