@@ -174,7 +174,7 @@ enum AppEvent {
     },
     StreamResolved {
         track: Track,
-        result: Result<String, String>,
+        result: Result<(String, Option<u64>), String>,
     },
     SearchSuggestionsLoaded {
         query: String,
@@ -478,45 +478,25 @@ async fn play_track_bg(
         return;
     }
 
-    let res = match provider.resolve_audio_stream(&track.id, quality).await {
-        Ok(s) => {
-            #[cfg(target_os = "android")]
-            if !s.url.contains("pot=")
-                && !s.url.contains("c=VISIONOS")
-                && s.content_length.unwrap_or(0) > 1_048_576
-            {
+    let res: Result<(String, Option<u64>), String> =
+        match provider.resolve_audio_stream(&track.id, quality).await {
+            Ok(s) => Ok((s.url, s.duration_secs)),
+            Err(rust_err) => {
                 let vid = track.id.clone();
-                if let Some(wv) =
-                    tokio::task::spawn_blocking(move || crate::android_media::resolve_audio_url(&vid))
-                        .await
-                        .ok()
-                        .flatten()
-                {
-                    Ok(wv)
-                } else {
-                    Ok(s.url)
-                }
-            } else {
-                Ok(s.url)
+                let webview_url = tokio::task::spawn_blocking(move || {
+                    crate::android_media::resolve_audio_url(&vid)
+                })
+                .await
+                .ok()
+                .flatten();
+                webview_url
+                    .map(|u| (u, None))
+                    .ok_or_else(|| rust_err.to_string())
             }
-            #[cfg(not(target_os = "android"))]
-            {
-                Ok(s.url)
-            }
-        }
-        Err(rust_err) => {
-            let vid = track.id.clone();
-            let webview_url =
-                tokio::task::spawn_blocking(move || crate::android_media::resolve_audio_url(&vid))
-                    .await
-                    .ok()
-                    .flatten();
-            webview_url.ok_or_else(|| rust_err.to_string())
-        }
-    };
+        };
     match res {
-        Ok(url) => {
-            audio.play_url(url, track.id, track.duration_secs);
+        Ok((url, resolved_dur)) => {
+            audio.play_url(url, track.id, resolved_dur.or(track.duration_secs));
         }
         Err(e) => {
             if cached_stream_file.exists()
@@ -771,6 +751,7 @@ impl YrApp {
                     }
                 }
                 if !wifi_only_dl || crate::android_media::is_wifi_connected() {
+                    let _ = dl_init.resume_pending().await;
                     let mut count = dl_init.completed_count().await;
                     for t in recent_to_dl {
                         if count >= max_songs {
@@ -1997,24 +1978,26 @@ impl YrApp {
                 ctx_bg.request_repaint();
                 return;
             } else {
-                let res = match provider.resolve_audio_stream(&track.id, quality).await {
-                    Ok(s) => Ok(s.url),
-                    Err(rust_err) => {
-                        let vid = track.id.clone();
-                        let wv = tokio::task::spawn_blocking(move || {
-                            crate::android_media::resolve_audio_url(&vid)
-                        })
-                        .await
-                        .ok()
-                        .flatten();
-                        wv.ok_or_else(|| rust_err.to_string())
-                    }
-                };
+                let res: Result<(String, Option<u64>), String> =
+                    match provider.resolve_audio_stream(&track.id, quality).await {
+                        Ok(s) => Ok((s.url, s.duration_secs)),
+                        Err(rust_err) => {
+                            let vid = track.id.clone();
+                            let wv = tokio::task::spawn_blocking(move || {
+                                crate::android_media::resolve_audio_url(&vid)
+                            })
+                            .await
+                            .ok()
+                            .flatten();
+                            wv.map(|u| (u, None))
+                                .ok_or_else(|| rust_err.to_string())
+                        }
+                    };
                 match res {
-                    Ok(url) => {
+                    Ok(resolved) => {
                         let _ = tx.send(AppEvent::StreamResolved {
                             track,
-                            result: Ok(url),
+                            result: Ok(resolved),
                         });
                     }
                     Err(err) => {
@@ -2325,9 +2308,13 @@ impl YrApp {
                         == Some(&track.id);
                     if is_curr {
                         match result {
-                            Ok(url) => {
+                            Ok((url, resolved_dur)) => {
                                 self.consecutive_stream_failures = 0;
-                                self.audio.play_url(url, track.id, track.duration_secs);
+                                if let Some(d) = resolved_dur.filter(|&d| d > 0) {
+                                    self.queue.lock().unwrap().fill_track_duration(&track.id, d);
+                                }
+                                let dur_hint = resolved_dur.or(track.duration_secs);
+                                self.audio.play_url(url, track.id, dur_hint);
                             }
                             Err(e) => {
                                 let err_lc = e.to_lowercase();
@@ -2933,7 +2920,7 @@ impl YrApp {
             .map(|q| q.current_track().is_some())
             .unwrap_or(false);
         let (anchor_align, anchor_offset) = if self.now_playing_open && !self.show_settings {
-            (egui::Align2::CENTER_TOP, Vec2::new(0.0, 92.0))
+            (egui::Align2::CENTER_BOTTOM, Vec2::new(0.0, -108.0))
         } else if has_mini {
             (egui::Align2::CENTER_BOTTOM, Vec2::new(0.0, -204.0))
         } else {
@@ -9488,7 +9475,7 @@ impl YrApp {
                             let quality_str = match self.store.data.config.stream_quality {
                                 AudioQuality::Low => "96 kbps",
                                 AudioQuality::Medium => "160 kbps",
-                                AudioQuality::High => "256 kbps OPUS",
+                                AudioQuality::High => "256 kbps AAC",
                                 AudioQuality::Best => "320 kbps HQ",
                             };
                             let morphe_tag = if self.store.data.config.morphe_spatial_audio {
@@ -10817,7 +10804,7 @@ impl YrApp {
                     }
                 }
                 SettingsCategory::About => {
-                    ui.heading("YR Music v0.9.19");
+                    ui.heading("YR Music v0.9.20");
                     ui.label("Cliente nativo de música 100% en Rust para Android y escritorio.");
                     ui.add_space(6.0);
                     ui.label(RichText::new("Motor de audio Symphonia PCM con DSP Morphe 3D binaural, reproductor integrado de video en la app, auto-scroll inteligente de cola, prefetch predictivo en disco y compatibilidad completa con YouTube Music.").size(12.0).color(TEXT_SECONDARY));
@@ -12105,7 +12092,7 @@ impl YrApp {
                         }
                         if menu_row(ui, icons::Icon::Help, "Ayuda y comentarios").clicked() {
                             self.show_account_modal = false;
-                            self.set_banner("YR Music v0.9.19 • Pure Rust");
+                            self.set_banner("YR Music v0.9.20 • Pure Rust");
                         }
 
                         #[cfg(target_os = "android")]

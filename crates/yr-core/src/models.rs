@@ -207,6 +207,8 @@ pub struct StreamInfo {
     pub extension: String,
     pub bitrate_bps: u32,
     pub content_length: Option<u64>,
+    #[serde(default)]
+    pub duration_secs: Option<u64>,
 }
 
 /// Resolved direct video stream metadata for native in-place video playback.

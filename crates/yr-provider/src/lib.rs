@@ -430,18 +430,27 @@ impl MusicProvider for YtMusicProvider {
             q.music_search_playlists(query, false),
         );
 
-        let songs = songs_res
+        let songs: Vec<Track> = songs_res
             .map(|r| r.items.items.into_iter().map(Self::map_track).collect())
             .unwrap_or_default();
-        let albums = albums_res
+        let albums: Vec<AlbumSummary> = albums_res
             .map(|r| r.items.items.into_iter().map(Self::map_album).collect())
             .unwrap_or_default();
-        let artists = artists_res
+        let artists: Vec<ArtistSummary> = artists_res
             .map(|r| r.items.items.into_iter().map(Self::map_artist).collect())
             .unwrap_or_default();
-        let playlists = playlists_res
+        let playlists: Vec<PlaylistSummary> = playlists_res
             .map(|r| r.items.items.into_iter().map(Self::map_playlist).collect())
             .unwrap_or_default();
+
+        if songs.is_empty() && albums.is_empty() && artists.is_empty() && playlists.is_empty() {
+            let session = self.google_session.lock().await.clone();
+            if let Ok(fallback) =
+                innertube::fetch_search_fallback(&self.http, session.as_ref(), query).await
+            {
+                return Ok(fallback);
+            }
+        }
 
         Ok(SearchResults {
             songs,
@@ -543,32 +552,35 @@ impl MusicProvider for YtMusicProvider {
     }
 
     async fn get_artist(&self, artist_id: &str) -> Result<ArtistDetail, ProviderError> {
-        let artist = self
-            .client
-            .query()
-            .music_artist(artist_id, false)
-            .await
-            .map_err(|e| ProviderError::Api(e.to_string()))?;
-
-        let summary = ArtistSummary {
-            id: artist.id,
-            name: artist.name,
-            subscribers: artist
-                .subscriber_count
-                .map(|c| Self::format_subscriber_count(c as u64)),
-            thumbnail_url: artist
-                .header_image
-                .last()
-                .or_else(|| artist.header_image.first())
-                .map(|t| t.url.clone()),
-        };
-        let top_tracks = artist.tracks.into_iter().map(Self::map_track).collect();
-        let albums = artist.albums.into_iter().map(Self::map_album).collect();
-        Ok(ArtistDetail {
-            summary,
-            top_tracks,
-            albums,
-        })
+        match self.client.query().music_artist(artist_id, false).await {
+            Ok(artist) => {
+                let summary = ArtistSummary {
+                    id: artist.id,
+                    name: artist.name,
+                    subscribers: artist
+                        .subscriber_count
+                        .map(|c| Self::format_subscriber_count(c as u64)),
+                    thumbnail_url: artist
+                        .header_image
+                        .last()
+                        .or_else(|| artist.header_image.first())
+                        .map(|t| t.url.clone()),
+                };
+                let top_tracks = artist.tracks.into_iter().map(Self::map_track).collect();
+                let albums = artist.albums.into_iter().map(Self::map_album).collect();
+                Ok(ArtistDetail {
+                    summary,
+                    top_tracks,
+                    albums,
+                })
+            }
+            Err(rust_err) => {
+                let session = self.google_session.lock().await.clone();
+                innertube::fetch_artist_fallback(&self.http, session.as_ref(), artist_id)
+                    .await
+                    .map_err(|_| ProviderError::Api(rust_err.to_string()))
+            }
+        }
     }
 
     async fn get_mood_playlists(
@@ -746,6 +758,7 @@ impl MusicProvider for YtMusicProvider {
             .map_err(|e| ProviderError::Api(e.to_string()))?;
 
         let target_bps = quality.target_bitrate_kbps() * 1000;
+        let player_dur = Some(player.details.duration as u64).filter(|&d| d > 0);
         let mut audio_streams: Vec<_> = player
             .audio_streams
             .into_iter()
@@ -786,6 +799,7 @@ impl MusicProvider for YtMusicProvider {
             } else {
                 None
             },
+            duration_secs: player_dur,
         };
         if let Ok(mut guard) = self.stream_cache.lock() {
             guard.insert(cache_key, (info.clone(), Instant::now()));
@@ -1197,6 +1211,7 @@ mod tests {
                         extension: "m4a".into(),
                         bitrate_bps: 128_000,
                         content_length: None,
+                        duration_secs: Some(180),
                     },
                     Instant::now(),
                 ),
@@ -1211,6 +1226,7 @@ mod tests {
                         extension: "m4a".into(),
                         bitrate_bps: 128_000,
                         content_length: None,
+                        duration_secs: Some(180),
                     },
                     Instant::now(),
                 ),

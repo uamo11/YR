@@ -98,6 +98,12 @@ struct SidecarMeta {
     audio_filename: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PendingEntry {
+    track: Track,
+    quality: AudioQuality,
+}
+
 struct TaskControl {
     cancel_tx: watch::Sender<bool>,
     pause_tx: watch::Sender<bool>,
@@ -151,6 +157,68 @@ impl DownloadManager {
         self
     }
 
+    fn pending_queue_path(&self) -> PathBuf {
+        self.download_dir.join("pending_downloads.json")
+    }
+
+    async fn save_pending_queue(&self) {
+        let pending: Vec<PendingEntry> = {
+            let guard = self.tasks.lock().await;
+            guard
+                .values()
+                .filter(|t| {
+                    matches!(
+                        t.status,
+                        DownloadStatus::Queued
+                            | DownloadStatus::Downloading
+                            | DownloadStatus::Paused
+                            | DownloadStatus::Failed(_)
+                    )
+                })
+                .map(|t| PendingEntry {
+                    track: t.track.clone(),
+                    quality: t.quality,
+                })
+                .collect()
+        };
+        let path = self.pending_queue_path();
+        if pending.is_empty() {
+            let _ = fs::remove_file(&path).await;
+            return;
+        }
+        let tmp_path = self.download_dir.join("pending_downloads.tmp");
+        if let Ok(json) = serde_json::to_string_pretty(&pending) {
+            if fs::write(&tmp_path, json).await.is_ok() {
+                let _ = fs::rename(&tmp_path, &path).await;
+            }
+        }
+    }
+
+    /// Re-enqueues any downloads that were interrupted (e.g. power/internet outage) before completion.
+    pub async fn resume_pending(self: &Arc<Self>) -> usize {
+        let path = self.pending_queue_path();
+        let Ok(raw) = fs::read_to_string(&path).await else {
+            return 0;
+        };
+        let Ok(entries) = serde_json::from_str::<Vec<PendingEntry>>(&raw) else {
+            return 0;
+        };
+        let mut resumed = 0usize;
+        for entry in entries {
+            let already_done = {
+                let guard = self.tasks.lock().await;
+                guard
+                    .get(&entry.track.id)
+                    .is_some_and(|t| t.status == DownloadStatus::Completed)
+            };
+            if !already_done {
+                self.enqueue(entry.track, entry.quality).await;
+                resumed += 1;
+            }
+        }
+        resumed
+    }
+
     fn scan_existing_sync(&self) {
         let Ok(entries) = std::fs::read_dir(&self.download_dir) else {
             return;
@@ -158,7 +226,15 @@ impl DownloadManager {
         let mut map = HashMap::new();
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) == Some("json") {
+            let ext = path.extension().and_then(|e| e.to_str());
+            if ext == Some("pchunk") || ext == Some("tmp") {
+                let _ = std::fs::remove_file(&path);
+                continue;
+            }
+            if path.file_name().and_then(|n| n.to_str()) == Some("pending_downloads.json") {
+                continue;
+            }
+            if ext == Some("json") {
                 if let Ok(raw) = std::fs::read_to_string(&path) {
                     if let Ok(meta) = serde_json::from_str::<SidecarMeta>(&raw) {
                         let audio_path = self.download_dir.join(&meta.audio_filename);
@@ -282,19 +358,22 @@ impl DownloadManager {
             let _ = tokio::fs::write(&sidecar, json).await;
         }
 
-        let mut guard = self.tasks.lock().await;
-        guard.insert(
-            track.id.clone(),
-            DownloadTask {
-                track,
-                quality: AudioQuality::High,
-                status: DownloadStatus::Completed,
-                downloaded_bytes: size,
-                total_bytes: Some(size),
-                speed_bps: 0,
-                output_path: Some(final_path.clone()),
-            },
-        );
+        {
+            let mut guard = self.tasks.lock().await;
+            guard.insert(
+                track.id.clone(),
+                DownloadTask {
+                    track,
+                    quality: AudioQuality::High,
+                    status: DownloadStatus::Completed,
+                    downloaded_bytes: size,
+                    total_bytes: Some(size),
+                    speed_bps: 0,
+                    output_path: Some(final_path.clone()),
+                },
+            );
+        }
+        self.save_pending_queue().await;
 
         Ok(final_path)
     }
@@ -335,6 +414,7 @@ impl DownloadManager {
             let mut ctrl = self.controls.lock().await;
             ctrl.insert(track_id.clone(), TaskControl { cancel_tx, pause_tx });
         }
+        self.save_pending_queue().await;
 
         let this = Arc::clone(self);
         tokio::spawn(async move {
@@ -352,6 +432,7 @@ impl DownloadManager {
                 task.speed_bps = 0;
             }
         }
+        self.save_pending_queue().await;
     }
 
     pub async fn resume(self: &Arc<Self>, track_id: &str) {
@@ -371,6 +452,7 @@ impl DownloadManager {
             task.status = DownloadStatus::Cancelled;
             task.speed_bps = 0;
         }
+        self.save_pending_queue().await;
     }
 
     pub async fn delete_downloaded(&self, track_id: &str) {
@@ -383,6 +465,7 @@ impl DownloadManager {
                 let _ = fs::remove_file(sidecar).await;
             }
         }
+        self.save_pending_queue().await;
     }
 
     /// Evicts oldest unprotected completed downloads (by file mtime) until completed count <= `max_songs`.
@@ -476,17 +559,26 @@ impl DownloadManager {
             {
                 Ok(final_path) => {
                     track.local_path = Some(final_path.to_string_lossy().into_owned());
-                    let mut guard = self.tasks.lock().await;
-                    if let Some(t) = guard.get_mut(&track.id) {
-                        t.track = track.clone();
-                        t.status = DownloadStatus::Completed;
-                        t.speed_bps = 0;
-                        t.output_path = Some(final_path);
+                    {
+                        let mut guard = self.tasks.lock().await;
+                        if let Some(t) = guard.get_mut(&track.id) {
+                            t.track = track.clone();
+                            t.status = DownloadStatus::Completed;
+                            t.speed_bps = 0;
+                            t.output_path = Some(final_path);
+                        }
                     }
+                    self.save_pending_queue().await;
                     return;
                 }
-                Err(DownloadInternalError::Paused) => return,
-                Err(DownloadInternalError::Cancelled) => return,
+                Err(DownloadInternalError::Paused) => {
+                    self.save_pending_queue().await;
+                    return;
+                }
+                Err(DownloadInternalError::Cancelled) => {
+                    self.save_pending_queue().await;
+                    return;
+                }
                 Err(DownloadInternalError::Retryable(msg)) => {
                     self.provider.invalidate_track_streams(&track.id);
                     last_err = msg;
@@ -494,11 +586,14 @@ impl DownloadManager {
             }
         }
 
-        let mut guard = self.tasks.lock().await;
-        if let Some(t) = guard.get_mut(&track.id) {
-            t.status = DownloadStatus::Failed(last_err);
-            t.speed_bps = 0;
+        {
+            let mut guard = self.tasks.lock().await;
+            if let Some(t) = guard.get_mut(&track.id) {
+                t.status = DownloadStatus::Failed(last_err);
+                t.speed_bps = 0;
+            }
         }
+        self.save_pending_queue().await;
     }
 
     async fn download_once(
@@ -523,12 +618,16 @@ impl DownloadManager {
                             extension: "m4a".to_string(),
                             bitrate_bps: 128_000,
                             content_length: None,
+                            duration_secs: track.duration_secs,
                         });
                     }
                 }
                 fallback_stream.ok_or(DownloadInternalError::Retryable(err_msg))?
             }
         };
+        if track.duration_secs.is_none() {
+            track.duration_secs = stream.duration_secs;
+        }
 
         let base_name = format!(
             "{} - {} [{}]",
@@ -542,6 +641,9 @@ impl DownloadManager {
         let part_path = self
             .download_dir
             .join(format!("{base_name}.{}.part", stream.extension));
+        let parallel_path = self
+            .download_dir
+            .join(format!("{base_name}.{}.pchunk", stream.extension));
 
         let existing_len = fs::metadata(&part_path).await.map(|m| m.len()).unwrap_or(0);
 
@@ -550,7 +652,7 @@ impl DownloadManager {
                 .try_download_parallel_ranges(
                     track,
                     &stream.url,
-                    &part_path,
+                    &parallel_path,
                     &final_path,
                     cancel_rx,
                     pause_rx,
@@ -571,6 +673,10 @@ impl DownloadManager {
             .await
             .map_err(|e| DownloadInternalError::Retryable(e.to_string()))?;
 
+        if resp.status().as_u16() == 416 {
+            let _ = fs::remove_file(&part_path).await;
+            return Err(DownloadInternalError::Retryable("HTTP 416".to_string()));
+        }
         if !resp.status().is_success() && resp.status().as_u16() != 206 {
             return Err(DownloadInternalError::Retryable(format!(
                 "HTTP {}",
@@ -1055,6 +1161,42 @@ mod tests {
         assert!(mgr.find_local_path("newest").await.is_some());
         assert!(!registered_paths[1].exists());
         assert!(!sidecar_path_for(&registered_paths[1]).exists());
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn pending_queue_and_pchunk_cleanup_survive_power_loss() {
+        let base = std::env::temp_dir().join(format!("yr_pchunk_test_{}", std::process::id()));
+        let dl_dir = base.join("downloads");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&dl_dir).unwrap();
+
+        let leftover_pchunk = dl_dir.join("Artist - Song [abc123].m4a.pchunk");
+        std::fs::write(&leftover_pchunk, vec![0u8; 4096]).unwrap();
+
+        let pending_entry = PendingEntry {
+            track: Track {
+                id: "abc123".into(),
+                title: "Song".into(),
+                artist: "Artist".into(),
+                artist_id: None,
+                album: None,
+                album_id: None,
+                duration_secs: Some(210),
+                thumbnail_url: None,
+                local_path: None,
+            },
+            quality: AudioQuality::High,
+        };
+        let pending_json = dl_dir.join("pending_downloads.json");
+        std::fs::write(&pending_json, serde_json::to_string(&vec![pending_entry]).unwrap()).unwrap();
+
+        let provider: Arc<dyn MusicProvider> = Arc::new(yr_provider::YtMusicProvider::new());
+        let mgr = Arc::new(DownloadManager::new(dl_dir.clone(), provider, 2));
+        assert!(!leftover_pchunk.exists(), "stale .pchunk must be cleaned on boot");
+        assert!(pending_json.exists(), "pending_downloads.json preserved");
+        assert_eq!(mgr.completed_count().await, 0, "pending file not treated as completed");
 
         let _ = std::fs::remove_dir_all(&base);
     }

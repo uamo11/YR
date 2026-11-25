@@ -7,9 +7,10 @@ use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 use yr_core::{
-    AlbumSummary, AudioQuality, ExploreFeed, GoogleAccountInfo, HomeFeed, HomeShelf,
-    HomeShelfCard, HomeShelfLayout, LyricLine, LyricsData, MoodGenre, PlaylistSummary,
-    ShelfCardKind, SponsorSegment, StreamInfo, Track, VideoStreamInfo,
+    AlbumSummary, ArtistDetail, ArtistSummary, AudioQuality, ExploreFeed, GoogleAccountInfo,
+    HomeFeed, HomeShelf, HomeShelfCard, HomeShelfLayout, LyricLine, LyricsData, MoodGenre,
+    PlaylistSummary, SearchResults, ShelfCardKind, SponsorSegment, StreamInfo, Track,
+    VideoStreamInfo,
 };
 
 const YTM_ORIGIN: &str = "https://music.youtube.com";
@@ -922,6 +923,11 @@ async fn get_or_fetch_visitor_data(
 
 fn pick_best_audio_stream(video_id: &str, val: &Value, quality: AudioQuality) -> Option<StreamInfo> {
     let target_bps = quality.target_bitrate_kbps() * 1000;
+    let player_dur = val
+        .pointer("/videoDetails/lengthSeconds")
+        .and_then(|v| v.as_str())
+        .and_then(|s| s.parse::<u64>().ok())
+        .filter(|&d| d > 0);
     let formats = val
         .pointer("/streamingData/adaptiveFormats")
         .and_then(|v| v.as_array())?;
@@ -947,6 +953,13 @@ fn pick_best_audio_stream(video_id: &str, val: &Value, quality: AudioQuality) ->
             .get("contentLength")
             .and_then(|v| v.as_str())
             .and_then(|s| s.parse::<u64>().ok());
+        let duration_secs = player_dur.or_else(|| {
+            f.get("approxDurationMs")
+                .and_then(|v| v.as_str())
+                .and_then(|s| s.parse::<u64>().ok())
+                .map(|ms| ms / 1000)
+                .filter(|&d| d > 0)
+        });
         let ext = if is_m4a { "m4a" } else { "mp3" };
         // Strongly prefer M4A/AAC since yr-audio decodes isomp4+aac natively.
         let penalty = if is_m4a { 0_u64 } else { 10_000_000_u64 };
@@ -960,6 +973,7 @@ fn pick_best_audio_stream(video_id: &str, val: &Value, quality: AudioQuality) ->
                 extension: ext.to_string(),
                 bitrate_bps: bitrate,
                 content_length,
+                duration_secs,
             },
         ));
     }
@@ -1516,6 +1530,236 @@ pub async fn fetch_browse_collection(
         return Err("La colección no devolvió pistas".to_string());
     }
     Ok((title, artist_or_author, year, thumb, tracks))
+}
+
+pub async fn fetch_search_fallback(
+    http: &reqwest::Client,
+    session: Option<&GoogleSession>,
+    query: &str,
+) -> Result<SearchResults, String> {
+    let body = json!({
+        "context": {
+            "client": {
+                "clientName": "WEB_REMIX",
+                "clientVersion": CLIENT_VERSION,
+                "hl": "es-419",
+                "gl": "MX"
+            }
+        },
+        "query": query
+    });
+    let val = post_innertube(http, "search", body, session).await?;
+    let mut out = SearchResults::default();
+    let mut seen_songs = std::collections::HashSet::new();
+    let mut seen_albums = std::collections::HashSet::new();
+    let mut seen_artists = std::collections::HashSet::new();
+    let mut seen_playlists = std::collections::HashSet::new();
+
+    fn walk_search(
+        v: &Value,
+        out: &mut SearchResults,
+        seen_songs: &mut std::collections::HashSet<String>,
+        seen_albums: &mut std::collections::HashSet<String>,
+        seen_artists: &mut std::collections::HashSet<String>,
+        seen_playlists: &mut std::collections::HashSet<String>,
+    ) {
+        if let Some(obj) = v.as_object() {
+            if let Some(card) = obj.get("musicCardShelfRenderer") {
+                let title = runs_text(card.get("title"));
+                let subtitle = runs_text(card.get("subtitle"));
+                let thumb = best_thumb(card.pointer("/thumbnail/musicThumbnailRenderer/thumbnail/thumbnails"));
+                if let Some(vid) = card
+                    .pointer("/onTap/watchEndpoint/videoId")
+                    .and_then(|x| x.as_str())
+                    .filter(|id| !id.is_empty())
+                {
+                    if seen_songs.insert(vid.to_string()) && !title.is_empty() {
+                        out.songs.push(Track {
+                            id: vid.to_string(),
+                            title: title.clone(),
+                            artist: extract_artist_from_subtitle(&subtitle),
+                            artist_id: None,
+                            album: None,
+                            album_id: None,
+                            duration_secs: parse_duration_text(&subtitle),
+                            thumbnail_url: thumb.clone(),
+                            local_path: None,
+                        });
+                    }
+                } else if let Some(bid) = card
+                    .pointer("/onTap/browseEndpoint/browseId")
+                    .and_then(|x| x.as_str())
+                {
+                    if bid.starts_with("UC") && seen_artists.insert(bid.to_string()) && !title.is_empty() {
+                        out.artists.push(ArtistSummary {
+                            id: bid.to_string(),
+                            name: title,
+                            subscribers: non_empty(subtitle),
+                            thumbnail_url: thumb,
+                        });
+                    } else if bid.starts_with("MPREb_") && seen_albums.insert(bid.to_string()) && !title.is_empty() {
+                        out.albums.push(AlbumSummary {
+                            id: bid.to_string(),
+                            title,
+                            artist: extract_artist_from_subtitle(&subtitle),
+                            year: None,
+                            thumbnail_url: thumb,
+                        });
+                    }
+                }
+            }
+            if let Some(r) = obj.get("musicResponsiveListItemRenderer") {
+                if let Some((t, _)) = parse_responsive_track(r) {
+                    if out.songs.len() < 24 && seen_songs.insert(t.id.clone()) {
+                        out.songs.push(t);
+                    }
+                } else if let Some(bid) = r
+                    .pointer("/navigationEndpoint/browseEndpoint/browseId")
+                    .or_else(|| r.pointer("/flexColumns/0/musicResponsiveListItemFlexColumnRenderer/text/runs/0/navigationEndpoint/browseEndpoint/browseId"))
+                    .and_then(|x| x.as_str())
+                {
+                    let flex = r.get("flexColumns").and_then(|c| c.as_array());
+                    let title = flex
+                        .and_then(|arr| arr.first())
+                        .and_then(|c| c.pointer("/musicResponsiveListItemFlexColumnRenderer/text"))
+                        .map(|v| runs_text(Some(v)))
+                        .unwrap_or_default();
+                    let sub = flex
+                        .and_then(|arr| arr.get(1))
+                        .and_then(|c| c.pointer("/musicResponsiveListItemFlexColumnRenderer/text"))
+                        .map(|v| runs_text(Some(v)))
+                        .unwrap_or_default();
+                    let thumb = best_thumb(r.pointer("/thumbnail/musicThumbnailRenderer/thumbnail/thumbnails"));
+                    if !title.is_empty() {
+                        if bid.starts_with("UC") && seen_artists.insert(bid.to_string()) {
+                            out.artists.push(ArtistSummary {
+                                id: bid.to_string(),
+                                name: title,
+                                subscribers: non_empty(sub),
+                                thumbnail_url: thumb,
+                            });
+                        } else if bid.starts_with("MPREb_") && seen_albums.insert(bid.to_string()) {
+                            out.albums.push(AlbumSummary {
+                                id: bid.to_string(),
+                                title,
+                                artist: extract_artist_from_subtitle(&sub),
+                                year: None,
+                                thumbnail_url: thumb,
+                            });
+                        } else if bid.starts_with("VL") || bid.starts_with("PL") || bid.starts_with("RD") {
+                            let clean_id = bid.strip_prefix("VL").unwrap_or(bid).to_string();
+                            if seen_playlists.insert(clean_id.clone()) {
+                                out.playlists.push(PlaylistSummary {
+                                    id: clean_id,
+                                    title,
+                                    author: non_empty(sub),
+                                    track_count: None,
+                                    thumbnail_url: thumb,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+            for child in obj.values() {
+                walk_search(child, out, seen_songs, seen_albums, seen_artists, seen_playlists);
+            }
+        } else if let Some(arr) = v.as_array() {
+            for child in arr {
+                walk_search(child, out, seen_songs, seen_albums, seen_artists, seen_playlists);
+            }
+        }
+    }
+
+    if let Some(root) = val
+        .pointer("/contents/tabbedSearchResultsRenderer/tabs/0/tabRenderer/content/sectionListRenderer/contents")
+        .or_else(|| val.pointer("/contents/sectionListRenderer/contents"))
+    {
+        walk_search(
+            root,
+            &mut out,
+            &mut seen_songs,
+            &mut seen_albums,
+            &mut seen_artists,
+            &mut seen_playlists,
+        );
+    }
+    Ok(out)
+}
+
+pub async fn fetch_artist_fallback(
+    http: &reqwest::Client,
+    session: Option<&GoogleSession>,
+    artist_id: &str,
+) -> Result<ArtistDetail, String> {
+    let body = json!({
+        "context": {
+            "client": {
+                "clientName": "WEB_REMIX",
+                "clientVersion": CLIENT_VERSION,
+                "hl": "es-419",
+                "gl": "MX"
+            }
+        },
+        "browseId": artist_id
+    });
+    let val = post_innertube(http, "browse", body, session).await?;
+    let hdr = val
+        .pointer("/header/musicImmersiveHeaderRenderer")
+        .or_else(|| val.pointer("/header/musicVisualHeaderRenderer"))
+        .or_else(|| val.pointer("/header/musicHeaderRenderer"));
+    let name = hdr
+        .map(|h| runs_text(h.get("title")))
+        .and_then(non_empty)
+        .ok_or_else(|| "Artista sin cabecera".to_string())?;
+    let subscribers = hdr
+        .and_then(|h| {
+            h.pointer("/subscriptionButton/subscribeButtonRenderer/longSubscriberCountText")
+                .or_else(|| h.pointer("/subscriptionButton/subscribeButtonRenderer/shortSubscriberCountText"))
+        })
+        .map(|v| runs_text(Some(v)))
+        .and_then(non_empty);
+    let thumb = hdr.and_then(|h| {
+        best_thumb(h.pointer("/thumbnail/musicThumbnailRenderer/thumbnail/thumbnails"))
+            .or_else(|| best_thumb(h.pointer("/foregroundThumbnail/musicThumbnailRenderer/thumbnail/thumbnails")))
+    });
+
+    let mut tmp = HomeFeed::default();
+    if let Some(contents) = val
+        .pointer("/contents/singleColumnBrowseResultsRenderer/tabs/0/tabRenderer/content/sectionListRenderer/contents")
+        .and_then(|c| c.as_array())
+    {
+        for item in contents {
+            parse_shelf_item(item, &mut tmp);
+        }
+    }
+    let mut top_tracks = Vec::new();
+    let mut albums = Vec::new();
+    for shelf in tmp.shelves {
+        for t in shelf.tracks {
+            if !top_tracks.iter().any(|x: &Track| x.id == t.id) {
+                top_tracks.push(t);
+            }
+        }
+        for card in shelf.cards {
+            if let ShelfCardKind::Album(a) = card.kind {
+                if !albums.iter().any(|x: &AlbumSummary| x.id == a.id) {
+                    albums.push(a);
+                }
+            }
+        }
+    }
+
+    Ok(ArtistDetail {
+        summary: ArtistSummary {
+            id: artist_id.to_string(),
+            name,
+            subscribers,
+            thumbnail_url: thumb,
+        },
+        top_tracks,
+        albums,
+    })
 }
 
 pub async fn fetch_related_tracks(
@@ -2093,6 +2337,9 @@ mod tests {
         assert!(pick_best_audio_stream("vid_webm", &webm_only, AudioQuality::High).is_none());
 
         let mixed = json!({
+            "videoDetails": {
+                "lengthSeconds": "212"
+            },
             "streamingData": {
                 "adaptiveFormats": [
                     {
@@ -2114,6 +2361,7 @@ mod tests {
         let best = pick_best_audio_stream("vid_m4a", &mixed, AudioQuality::High).expect("m4a stream");
         assert_eq!(best.extension, "m4a");
         assert_eq!(best.url, "https://rr1.googlevideo.com/m4a");
+        assert_eq!(best.duration_secs, Some(212));
     }
 
     #[tokio::test]
