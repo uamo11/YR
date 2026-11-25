@@ -72,6 +72,7 @@ enum AudioCommand {
         url: String,
         track_id: String,
     },
+    SetCacheLimitBytes(u64),
     SetEqualizer(yr_core::EqualizerConfig),
 }
 
@@ -187,6 +188,42 @@ impl AudioEngine {
     pub fn set_equalizer(&self, eq: yr_core::EqualizerConfig) {
         let _ = self.tx.send(AudioCommand::SetEqualizer(eq));
     }
+
+    pub fn set_stream_cache_limit_bytes(&self, max_bytes: u64) {
+        let _ = self.tx.send(AudioCommand::SetCacheLimitBytes(max_bytes));
+    }
+}
+
+pub fn infer_audio_hint_from_header(head: &[u8]) -> Option<&'static str> {
+    if head.len() >= 12 && &head[4..8] == b"ftyp" {
+        return Some("m4a");
+    }
+    if head.len() >= 4 && &head[0..4] == b"fLaC" {
+        return Some("flac");
+    }
+    if head.len() >= 4 && &head[0..4] == b"OggS" {
+        return Some("ogg");
+    }
+    if head.len() >= 12 && &head[0..4] == b"RIFF" && &head[8..12] == b"WAVE" {
+        return Some("wav");
+    }
+    if (head.len() >= 3 && &head[0..3] == b"ID3")
+        || (head.len() >= 2 && head[0] == 0xFF && (head[1] & 0xE0) == 0xE0)
+    {
+        return Some("mp3");
+    }
+    None
+}
+
+fn sniff_file_audio_hint(path: &std::path::Path, fallback: Option<&str>) -> Option<String> {
+    if let Ok(mut f) = File::open(path) {
+        let mut head = [0u8; 16];
+        let n = f.read(&mut head).unwrap_or(0);
+        if let Some(h) = infer_audio_hint_from_header(&head[..n]) {
+            return Some(h.to_string());
+        }
+    }
+    fallback.map(str::to_owned)
 }
 
 fn prune_stream_cache(cache_dir: &std::path::Path, max_bytes: u64, target_bytes: u64) {
@@ -231,7 +268,8 @@ fn audio_thread_main(
     initial_eq: yr_core::EqualizerConfig,
     abort_slot: Arc<Mutex<Option<StreamAbortHandle>>>,
 ) {
-    prune_stream_cache(&cache_dir, 128 * 1024 * 1024, 64 * 1024 * 1024);
+    let mut max_cache_bytes: u64 = 128 * 1024 * 1024;
+    prune_stream_cache(&cache_dir, max_cache_bytes, max_cache_bytes / 2);
     let eq_processor = Arc::new(Mutex::new(EqualizerProcessor::new(initial_eq)));
     let mut output: Option<(OutputStream, OutputStreamHandle)> = None;
     let mut sink: Option<Sink> = None;
@@ -316,13 +354,14 @@ fn audio_thread_main(
                     };
 
                     let ext_str = path.extension().and_then(|e| e.to_str()).map(str::to_owned);
-                    let is_wav = ext_str
+                    let detected_ext = sniff_file_audio_hint(&path, ext_str.as_deref());
+                    let is_wav = detected_ext
                         .as_deref()
                         .is_some_and(|e| e.eq_ignore_ascii_case("wav"));
                     match File::open(&path).map_err(|e| e.to_string()).and_then(|f| {
                         SymphoniaStreamDecoder::new(
                             Box::new(f),
-                            ext_str.as_deref(),
+                            detected_ext.as_deref(),
                             None,
                             Arc::clone(&eq_processor),
                         )
@@ -409,12 +448,13 @@ fn audio_thread_main(
                         .unwrap_or(false);
                     let mut stream_cancel: Option<Arc<AtomicBool>> = None;
                     let decoder_res = if cached_ready {
+                        let cached_hint = sniff_file_audio_hint(&final_cache, Some("m4a"));
                         File::open(&final_cache)
                             .map_err(|e| e.to_string())
                             .and_then(|f| {
                                 SymphoniaStreamDecoder::new(
                                     Box::new(f),
-                                    Some("m4a"),
+                                    cached_hint.as_deref(),
                                     None,
                                     Arc::clone(&eq_processor),
                                 )
@@ -427,16 +467,17 @@ fn audio_thread_main(
                         let res = open_progressive_stream(
                             &runtime,
                             &url,
-                            tmp_file,
+                            tmp_file.clone(),
                             Some(final_cache),
                             cancel,
                             &abort_slot,
                         )
                         .and_then(|reader| {
                             let probed_flag = Arc::clone(&reader.probed);
+                            let stream_hint = sniff_file_audio_hint(&tmp_file, Some("m4a"));
                             SymphoniaStreamDecoder::new(
                                 Box::new(reader),
-                                Some("m4a"),
+                                stream_hint.as_deref(),
                                 Some(probed_flag),
                                 Arc::clone(&eq_processor),
                             )
@@ -501,11 +542,15 @@ fn audio_thread_main(
                         }
                         pc.store(true, Ordering::Relaxed);
                     }
-                    prune_stream_cache(&cache_dir, 128 * 1024 * 1024, 64 * 1024 * 1024);
+                    prune_stream_cache(&cache_dir, max_cache_bytes, max_cache_bytes / 2);
                     let cancel = Arc::new(AtomicBool::new(false));
                     active_prefetch = Some((track_id.clone(), Arc::clone(&cancel)));
                     let part_path = cache_dir.join(format!("stream_{track_id}.pre.part"));
                     prefetch_stream_to_cache(&runtime, url, part_path, final_cache, cancel);
+                }
+                AudioCommand::SetCacheLimitBytes(limit) => {
+                    max_cache_bytes = limit.max(32 * 1024 * 1024);
+                    prune_stream_cache(&cache_dir, max_cache_bytes, (max_cache_bytes * 3) / 4);
                 }
                 AudioCommand::Pause => {
                     if let Some(s) = &sink {
@@ -650,35 +695,53 @@ impl Drop for ProgressiveFileReader {
     }
 }
 
-impl Read for ProgressiveFileReader {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+impl ProgressiveFileReader {
+    fn wait_until<F>(
+        &self,
+        mut ready: F,
+        cancelled_as_eof: bool,
+    ) -> io::Result<bool>
+    where
+        F: FnMut(&StreamState) -> bool,
+    {
         let (lock, cvar) = &*self.state;
         let mut guard = lock.lock().map_err(|_| io::Error::other("poisoned"))?;
-
-        while self.pos >= guard.written && !guard.finished {
+        let deadline = Instant::now() + Duration::from_secs(12);
+        while !ready(&guard) && !guard.finished {
             if self.cancel.load(Ordering::Relaxed) {
-                return Ok(0);
+                return if cancelled_as_eof {
+                    Ok(false)
+                } else {
+                    Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"))
+                };
             }
             if let Some(err) = &guard.error {
                 return Err(io::Error::other(err.clone()));
             }
-            let (g, wait_res) = cvar
-                .wait_timeout(guard, Duration::from_secs(12))
-                .map_err(|_| io::Error::other("poisoned"))?;
-            guard = g;
-            if wait_res.timed_out()
-                && self.pos >= guard.written
-                && !guard.finished
-                && !self.cancel.load(Ordering::Relaxed)
-            {
+            let rem = deadline.saturating_duration_since(Instant::now());
+            if rem.is_zero() {
                 return Err(io::Error::new(io::ErrorKind::TimedOut, "stream stalled"));
             }
+            let (g, _) = cvar
+                .wait_timeout(guard, rem.min(Duration::from_millis(250)))
+                .map_err(|_| io::Error::other("poisoned"))?;
+            guard = g;
         }
+        if let Some(err) = &guard.error {
+            if !ready(&guard) {
+                return Err(io::Error::other(err.clone()));
+            }
+        }
+        Ok(ready(&guard))
+    }
+}
 
-        if self.pos >= guard.written && guard.finished {
+impl Read for ProgressiveFileReader {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let pos = self.pos;
+        if !self.wait_until(|g| pos < g.written, true)? {
             return Ok(0);
         }
-        drop(guard);
 
         self.file.seek(SeekFrom::Start(self.pos))?;
         let n = self.file.read(buf)?;
@@ -689,30 +752,13 @@ impl Read for ProgressiveFileReader {
 
 impl Seek for ProgressiveFileReader {
     fn seek(&mut self, style: SeekFrom) -> io::Result<u64> {
-        let (lock, cvar) = &*self.state;
         let target: i64 = match style {
             SeekFrom::Start(p) => p as i64,
             SeekFrom::Current(delta) => self.pos as i64 + delta,
             SeekFrom::End(delta) => {
-                let mut guard = lock.lock().map_err(|_| io::Error::other("poisoned"))?;
-                while guard.total.is_none() && !guard.finished {
-                    if self.cancel.load(Ordering::Relaxed) {
-                        return Err(io::Error::new(
-                            io::ErrorKind::Interrupted,
-                            "cancelled",
-                        ));
-                    }
-                    if let Some(err) = &guard.error {
-                        return Err(io::Error::other(err.clone()));
-                    }
-                    let (g, wait_res) = cvar
-                        .wait_timeout(guard, Duration::from_secs(12))
-                        .map_err(|_| io::Error::other("poisoned"))?;
-                    guard = g;
-                    if wait_res.timed_out() && guard.total.is_none() && !guard.finished {
-                        return Err(io::Error::new(io::ErrorKind::TimedOut, "stream stalled"));
-                    }
-                }
+                let _ = self.wait_until(|g| g.total.is_some(), false)?;
+                let (lock, _) = &*self.state;
+                let guard = lock.lock().map_err(|_| io::Error::other("poisoned"))?;
                 let end = guard.total.unwrap_or(guard.written) as i64;
                 end + delta
             }
@@ -1559,5 +1605,16 @@ mod tests {
             .collect();
         assert_eq!(remaining, vec!["b.audio".to_string()]);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn infer_audio_hint_from_magic_bytes_detects_containers() {
+        assert_eq!(infer_audio_hint_from_header(b"\x00\x00\x00 ftypM4A \x00"), Some("m4a"));
+        assert_eq!(infer_audio_hint_from_header(b"fLaC\x00\x00\x00\x22"), Some("flac"));
+        assert_eq!(infer_audio_hint_from_header(b"OggS\x00\x02"), Some("ogg"));
+        assert_eq!(infer_audio_hint_from_header(b"RIFF\x24\x00\x00\x00WAVE"), Some("wav"));
+        assert_eq!(infer_audio_hint_from_header(b"ID3\x04\x00"), Some("mp3"));
+        assert_eq!(infer_audio_hint_from_header(b"\xFF\xFB\x90\x00"), Some("mp3"));
+        assert_eq!(infer_audio_hint_from_header(b"unknown"), None);
     }
 }

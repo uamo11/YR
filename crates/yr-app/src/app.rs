@@ -864,6 +864,7 @@ impl YrApp {
         );
 
         let cache_limit_bytes = (store.data.config.max_stream_cache_mb as u64) * 1024 * 1024;
+        audio.set_stream_cache_limit_bytes(cache_limit_bytes);
         let stream_cache_bytes = prune_dir_to_max_bytes(&data_dir.join("stream_cache"), cache_limit_bytes);
         let (event_tx, event_rx) = mpsc::unbounded_channel();
 
@@ -11718,9 +11719,11 @@ impl YrApp {
                             if settings_choice_pill(ui, selected, &label) {
                                 self.store.data.config.max_stream_cache_mb = limit_mb;
                                 let _ = self.store.save();
+                                let limit_bytes = (limit_mb as u64) * 1024 * 1024;
+                                self.audio.set_stream_cache_limit_bytes(limit_bytes);
                                 self.stream_cache_bytes = prune_dir_to_max_bytes(
                                     &self.data_dir.join("stream_cache"),
-                                    (limit_mb as u64) * 1024 * 1024,
+                                    limit_bytes,
                                 );
                             }
                         }

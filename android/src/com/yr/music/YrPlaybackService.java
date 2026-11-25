@@ -524,7 +524,6 @@ public class YrPlaybackService extends Service {
                 final Handler mainHandler = new Handler(Looper.getMainLooper());
                 final CountDownLatch latch = new CountDownLatch(1);
                 final AtomicReference<String> audioResult = new AtomicReference<>(null);
-                final AtomicReference<String> webmAudioFallback = new AtomicReference<>(null);
                 final AtomicReference<String> videoResult = new AtomicReference<>(null);
                 final int[] bestVideoRank = new int[]{0};
                 final Object videoPickLock = new Object();
@@ -592,15 +591,6 @@ public class YrPlaybackService extends Service {
                                             if (!wantVideo) {
                                                 latch.countDown();
                                             }
-                                        } else if (u.contains("mime=audio/webm")
-                                                || u.contains("mime%3Daudio%2Fwebm")
-                                                || u.contains("itag=251")
-                                                || u.contains("itag=250")
-                                                || u.contains("itag=249")) {
-                                            String clean = u.replaceAll("([?&])(range|rn|rbuf|ump|srfvp)=[^&]*", "$1")
-                                                    .replace("?&", "?")
-                                                    .replaceAll("&&+", "&");
-                                            webmAudioFallback.compareAndSet(null, clean);
                                         } else {
                                             int rank = 0;
                                             if (u.contains("itag=136") || u.contains("itag=137") || u.contains("itag=298")) {
@@ -685,7 +675,7 @@ public class YrPlaybackService extends Service {
                     });
                 }
 
-                String audioPicked = audioResult.get() != null ? audioResult.get() : webmAudioFallback.get();
+                String audioPicked = audioResult.get();
                 if (audioPicked != null) {
                     storeWebPositiveCache(videoId + ":a", audioPicked);
                 }
