@@ -100,6 +100,21 @@ struct TaskControl {
 /// Optional blocking URL resolver fallback (e.g., Android WebView extractor).
 pub type FallbackUrlResolver = Arc<dyn Fn(String) -> Option<String> + Send + Sync>;
 
+pub fn infer_fallback_audio_meta(url: &str) -> (&'static str, &'static str) {
+    let lc = url.to_ascii_lowercase();
+    if lc.contains("mime=audio/webm")
+        || lc.contains("mime=audio%2fwebm")
+        || lc.contains("mime%3daudio%2fwebm")
+        || lc.contains("itag=251")
+        || lc.contains("itag=250")
+        || lc.contains("itag=249")
+    {
+        ("audio/webm", "webm")
+    } else {
+        ("audio/mp4", "m4a")
+    }
+}
+
 /// Concurrent download manager with Range resume, retries, and offline metadata index.
 pub struct DownloadManager {
     download_dir: PathBuf,
@@ -553,6 +568,7 @@ impl DownloadManager {
         }
 
         let mut last_err = String::new();
+        let mut prefer_fallback = false;
         for attempt in 0..3u32 {
             if *cancel_rx.borrow() || *pause_rx.borrow() {
                 return;
@@ -563,7 +579,7 @@ impl DownloadManager {
             }
 
             match self
-                .download_once(&mut track, quality, &cancel_rx, &pause_rx)
+                .download_once(&mut track, quality, prefer_fallback, &cancel_rx, &pause_rx)
                 .await
             {
                 Ok(final_path) => {
@@ -590,6 +606,10 @@ impl DownloadManager {
                 }
                 Err(DownloadInternalError::Retryable(msg)) => {
                     self.provider.invalidate_track_streams(&track.id);
+                    prefer_fallback = self.fallback_resolver.is_some()
+                        && (msg.starts_with("HTTP 403")
+                            || msg.starts_with("HTTP 404")
+                            || msg.starts_with("HTTP 410"));
                     last_err = msg;
                 }
             }
@@ -605,33 +625,57 @@ impl DownloadManager {
         self.save_pending_queue().await;
     }
 
+    async fn resolve_via_fallback(
+        &self,
+        track: &Track,
+        quality: AudioQuality,
+    ) -> Option<yr_core::StreamInfo> {
+        let resolver = self.fallback_resolver.as_ref().map(Arc::clone)?;
+        let tid = track.id.clone();
+        let url = tokio::task::spawn_blocking(move || resolver(tid))
+            .await
+            .ok()
+            .flatten()?;
+        let (mime_type, extension) = infer_fallback_audio_meta(&url);
+        let info = yr_core::StreamInfo {
+            track_id: track.id.clone(),
+            url,
+            mime_type: mime_type.to_string(),
+            extension: extension.to_string(),
+            bitrate_bps: 128_000,
+            content_length: None,
+            duration_secs: track.duration_secs,
+        };
+        self.provider.cache_audio_stream(&track.id, quality, info.clone());
+        Some(info)
+    }
+
     async fn download_once(
         &self,
         track: &mut Track,
         quality: AudioQuality,
+        prefer_fallback: bool,
         cancel_rx: &watch::Receiver<bool>,
         pause_rx: &watch::Receiver<bool>,
     ) -> Result<PathBuf, DownloadInternalError> {
-        let stream = match self.provider.resolve_audio_stream(&track.id, quality).await {
-            Ok(s) => s,
-            Err(e) => {
-                let err_msg = e.to_string();
-                let mut fallback_stream = None;
-                if let Some(resolver) = self.fallback_resolver.as_ref().map(Arc::clone) {
-                    let tid = track.id.clone();
-                    if let Ok(Some(url)) = tokio::task::spawn_blocking(move || resolver(tid)).await {
-                        fallback_stream = Some(yr_core::StreamInfo {
-                            track_id: track.id.clone(),
-                            url,
-                            mime_type: "audio/mp4".to_string(),
-                            extension: "m4a".to_string(),
-                            bitrate_bps: 128_000,
-                            content_length: None,
-                            duration_secs: track.duration_secs,
-                        });
-                    }
+        let stream = if prefer_fallback {
+            if let Some(s) = self.resolve_via_fallback(track, quality).await {
+                s
+            } else {
+                self.provider
+                    .resolve_audio_stream(&track.id, quality)
+                    .await
+                    .map_err(|e| DownloadInternalError::Retryable(e.to_string()))?
+            }
+        } else {
+            match self.provider.resolve_audio_stream(&track.id, quality).await {
+                Ok(s) => s,
+                Err(e) => {
+                    let err_msg = e.to_string();
+                    self.resolve_via_fallback(track, quality)
+                        .await
+                        .ok_or(DownloadInternalError::Retryable(err_msg))?
                 }
-                fallback_stream.ok_or(DownloadInternalError::Retryable(err_msg))?
             }
         };
         if track.duration_secs.is_none() {
@@ -1064,6 +1108,18 @@ mod tests {
     fn sanitize_strips_illegal_chars() {
         assert_eq!(sanitize_filename("Artist: A/B*C?"), "Artist_ A_B_C_");
         assert_eq!(sanitize_filename(""), "track");
+    }
+
+    #[test]
+    fn infer_fallback_audio_meta_detects_webm_and_m4a() {
+        assert_eq!(
+            infer_fallback_audio_meta("https://rr1.googlevideo.com/videoplayback?itag=251&mime=audio%2Fwebm"),
+            ("audio/webm", "webm")
+        );
+        assert_eq!(
+            infer_fallback_audio_meta("https://rr1.googlevideo.com/videoplayback?itag=140&mime=audio/mp4"),
+            ("audio/mp4", "m4a")
+        );
     }
 
     #[test]

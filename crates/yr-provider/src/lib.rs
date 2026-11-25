@@ -74,6 +74,8 @@ pub trait MusicProvider: Send + Sync {
         None
     }
     fn invalidate_track_streams(&self, _track_id: &str) {}
+    fn cache_audio_stream(&self, _track_id: &str, _quality: AudioQuality, _info: StreamInfo) {}
+    fn cache_video_stream(&self, _track_id: &str, _max_height: u32, _info: VideoStreamInfo) {}
 }
 
 /// YouTube Music provider backed by `rustypipe` + direct InnerTube WEB_REMIX.
@@ -1062,6 +1064,24 @@ impl MusicProvider for YtMusicProvider {
             guard.retain(|(id, _), _| id != track_id);
         }
     }
+
+    fn cache_audio_stream(&self, track_id: &str, quality: AudioQuality, info: StreamInfo) {
+        if let Ok(mut guard) = self.stream_cache.lock() {
+            if guard.len() > 200 {
+                guard.clear();
+            }
+            guard.insert((track_id.to_string(), quality.target_bitrate_kbps()), (info, Instant::now()));
+        }
+    }
+
+    fn cache_video_stream(&self, track_id: &str, max_height: u32, info: VideoStreamInfo) {
+        if let Ok(mut guard) = self.video_stream_cache.lock() {
+            if guard.len() > 200 {
+                guard.clear();
+            }
+            guard.insert((track_id.to_string(), max_height), (info, Instant::now()));
+        }
+    }
 }
 
 fn pick_paired_omv_id(
@@ -1275,6 +1295,59 @@ mod tests {
         assert_eq!(YtMusicProvider::format_subscriber_count(450_000), "450 K suscriptores");
         assert_eq!(YtMusicProvider::format_subscriber_count(12_400), "12.4 K suscriptores");
         assert_eq!(YtMusicProvider::format_subscriber_count(820), "820 suscriptores");
+    }
+
+    #[tokio::test]
+    async fn cache_stream_helpers_store_and_invalidate() {
+        let provider = YtMusicProvider::new();
+        provider.cache_audio_stream(
+            "vid_cached_1",
+            AudioQuality::High,
+            StreamInfo {
+                track_id: "vid_cached_1".into(),
+                url: "https://rr1.googlevideo.com/videoplayback?c=ANDROID_VR&id=1".into(),
+                mime_type: "audio/mp4".into(),
+                extension: "m4a".into(),
+                bitrate_bps: 128_000,
+                content_length: None,
+                duration_secs: Some(200),
+            },
+        );
+        provider.cache_video_stream(
+            "vid_cached_1",
+            720,
+            VideoStreamInfo {
+                track_id: "vid_cached_1".into(),
+                url: "https://rr1.googlevideo.com/videoplayback?c=ANDROID_VR&itag=136".into(),
+                fallback_url: None,
+                user_agent: "yr".into(),
+                width: 1280,
+                height: 720,
+                is_hls: false,
+            },
+        );
+        let audio = provider
+            .resolve_audio_stream("vid_cached_1", AudioQuality::High)
+            .await
+            .expect("cached audio returns immediately");
+        assert!(audio.url.contains("id=1"));
+        let video = provider
+            .resolve_video_stream("vid_cached_1", 720)
+            .await
+            .expect("cached video returns immediately");
+        assert_eq!(video.height, 720);
+
+        provider.invalidate_track_streams("vid_cached_1");
+        assert!(!provider
+            .stream_cache
+            .lock()
+            .unwrap()
+            .contains_key(&("vid_cached_1".into(), AudioQuality::High.target_bitrate_kbps())));
+        assert!(!provider
+            .video_stream_cache
+            .lock()
+            .unwrap()
+            .contains_key(&("vid_cached_1".into(), 720)));
     }
 
     #[tokio::test]

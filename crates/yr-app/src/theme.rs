@@ -55,7 +55,7 @@ pub fn apply_ytm_theme(ctx: &egui::Context) {
 
     ctx.set_style(style);
     ctx.options_mut(|opt| {
-        opt.input_options.max_click_dist = 9.0;
+        opt.input_options.max_click_dist = 7.0;
         opt.input_options.max_click_duration = 0.5;
     });
 }

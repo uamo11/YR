@@ -416,7 +416,10 @@ public class YrPlaybackService extends Service {
             final Handler mainHandler = new Handler(Looper.getMainLooper());
             final CountDownLatch latch = new CountDownLatch(1);
             final AtomicReference<String> audioResult = new AtomicReference<>(null);
+            final AtomicReference<String> webmAudioFallback = new AtomicReference<>(null);
             final AtomicReference<String> videoResult = new AtomicReference<>(null);
+            final int[] bestVideoRank = new int[]{0};
+            final Object videoPickLock = new Object();
             final AtomicReference<WebView> webRef = new AtomicReference<>(null);
             final String cookies = mergeYoutubeCookies();
 
@@ -481,18 +484,39 @@ public class YrPlaybackService extends Service {
                                         if (!wantVideo) {
                                             latch.countDown();
                                         }
-                                    } else if (u.contains("mime=video/mp4")
-                                            || u.contains("mime%3Dvideo%2Fmp4")
-                                            || u.contains("itag=18")
-                                            || u.contains("itag=134")
-                                            || u.contains("itag=135")
-                                            || u.contains("itag=136")) {
+                                    } else if (u.contains("mime=audio/webm")
+                                            || u.contains("mime%3Daudio%2Fwebm")
+                                            || u.contains("itag=251")
+                                            || u.contains("itag=250")
+                                            || u.contains("itag=249")) {
                                         String clean = u.replaceAll("([?&])(range|rn|rbuf|ump|srfvp)=[^&]*", "$1")
                                                 .replace("?&", "?")
                                                 .replaceAll("&&+", "&");
-                                        videoResult.compareAndSet(null, clean);
-                                        if (wantVideo) {
-                                            latch.countDown();
+                                        webmAudioFallback.compareAndSet(null, clean);
+                                    } else {
+                                        int rank = 0;
+                                        if (u.contains("itag=136") || u.contains("itag=137") || u.contains("itag=298")) {
+                                            rank = 4;
+                                        } else if (u.contains("itag=135")) {
+                                            rank = 3;
+                                        } else if (u.contains("itag=18") || u.contains("itag=134")) {
+                                            rank = 2;
+                                        } else if (u.contains("mime=video/mp4") || u.contains("mime%3Dvideo%2Fmp4")) {
+                                            rank = 1;
+                                        }
+                                        if (rank > 0) {
+                                            String clean = u.replaceAll("([?&])(range|rn|rbuf|ump|srfvp)=[^&]*", "$1")
+                                                    .replace("?&", "?")
+                                                    .replaceAll("&&+", "&");
+                                            synchronized (videoPickLock) {
+                                                if (rank > bestVideoRank[0]) {
+                                                    bestVideoRank[0] = rank;
+                                                    videoResult.set(clean);
+                                                    if (wantVideo && rank >= 2) {
+                                                        latch.countDown();
+                                                    }
+                                                }
+                                            }
                                         }
                                     }
                                 }
@@ -520,7 +544,7 @@ public class YrPlaybackService extends Service {
             });
 
             try {
-                latch.await(8, TimeUnit.SECONDS);
+                latch.await(7, TimeUnit.SECONDS);
             } catch (InterruptedException ignored) {
             } finally {
                 mainHandler.post(() -> {
@@ -535,9 +559,10 @@ public class YrPlaybackService extends Service {
                     }
                 });
             }
+            String audioPicked = audioResult.get() != null ? audioResult.get() : webmAudioFallback.get();
             String finalUrl = wantVideo
                     ? videoResult.get()
-                    : (audioResult.get() != null ? audioResult.get() : videoResult.get());
+                    : (audioPicked != null ? audioPicked : videoResult.get());
             Log.i("YR_WEB", "resolveMediaUrl end vid=" + videoId + " wantVideo=" + wantVideo + " ok=" + (finalUrl != null));
             return finalUrl;
         }

@@ -235,6 +235,7 @@ pub struct SmoothTouchScroller {
     pub offset_y: f32,
     pub vel_y: f32,
     pub max_offset_y: f32,
+    pub snap_target_y: Option<f32>,
     pub is_dragging: bool,
     pub drag_slop_exceeded: bool,
     axis_lock: u8, // 0 = undecided, 1 = vertical, 2 = horizontal (yield to carousels/swipes)
@@ -242,12 +243,18 @@ pub struct SmoothTouchScroller {
 }
 
 impl SmoothTouchScroller {
+    pub fn smooth_scroll_to(&mut self, target_y: f32) {
+        self.vel_y = 0.0;
+        self.snap_target_y = Some(target_y.clamp(0.0, self.max_offset_y.max(target_y)));
+    }
+
     pub fn update(
         &mut self,
         ui: &egui::Ui,
         viewport_rect: egui::Rect,
         can_pull_refresh: bool,
     ) {
+        const TOUCH_SLOP: f32 = 6.0;
         let dt = ui.input(|i| i.stable_dt).clamp(0.001, 0.05);
         let pointer = ui.input(|i| i.pointer.clone());
         let down = pointer.any_down();
@@ -258,6 +265,7 @@ impl SmoothTouchScroller {
 
         if pressed && press_in_view {
             self.vel_y = 0.0;
+            self.snap_target_y = None;
             self.smoothed_vy = 0.0;
             self.is_dragging = false;
             self.drag_slop_exceeded = false;
@@ -270,7 +278,7 @@ impl SmoothTouchScroller {
                 _ => (0.0, 0.0),
             };
 
-            if self.axis_lock == 0 && dx.hypot(dy) > 3.5 {
+            if self.axis_lock == 0 && dx.hypot(dy) > TOUCH_SLOP {
                 if dx > dy * 1.15 {
                     self.axis_lock = 2;
                     self.is_dragging = false;
@@ -285,6 +293,7 @@ impl SmoothTouchScroller {
                 let delta = pointer.delta();
                 if delta.y.abs() > 0.05 {
                     self.vel_y = 0.0;
+                    self.snap_target_y = None;
                     let inst_vy = (delta.y / dt).clamp(-5200.0, 5200.0);
                     self.smoothed_vy = self.smoothed_vy * 0.4 + inst_vy * 0.6;
                     // If pulling down at top, let pull-to-refresh handle it without scrolling
@@ -324,21 +333,33 @@ impl SmoothTouchScroller {
         }
 
         // Exponential viscous kinetic fling momentum (smooth Android OverScroller curve)
-        if !down && self.vel_y.abs() > 8.0 {
-            let decay = (-3.1 * dt).exp();
-            let step_vy = self.vel_y * (1.0 + decay) * 0.5;
-            let next_offset = (self.offset_y - step_vy * dt).clamp(0.0, self.max_offset_y);
-            let hit_bounds = (next_offset - self.offset_y).abs() < 0.05
-                && (next_offset <= 0.0 || next_offset >= self.max_offset_y);
-            self.offset_y = next_offset;
-            self.vel_y *= decay;
-            if hit_bounds || self.vel_y.abs() <= 8.0 {
-                self.vel_y = 0.0;
+        if !down {
+            if let Some(target) = self.snap_target_y {
+                let clamped_target = target.clamp(0.0, self.max_offset_y);
+                let diff = clamped_target - self.offset_y;
+                if diff.abs() < 0.8 {
+                    self.offset_y = clamped_target;
+                    self.snap_target_y = None;
+                } else {
+                    self.offset_y += diff * (1.0 - (-9.0 * dt).exp());
+                    ui.ctx().request_repaint();
+                }
+            } else if self.vel_y.abs() > 6.0 {
+                let decay = (-2.1 * dt).exp();
+                let step_vy = self.vel_y * (1.0 + decay) * 0.5;
+                let next_offset = (self.offset_y - step_vy * dt).clamp(0.0, self.max_offset_y);
+                let hit_bounds = (next_offset - self.offset_y).abs() < 0.05
+                    && (next_offset <= 0.0 || next_offset >= self.max_offset_y);
+                self.offset_y = next_offset;
+                self.vel_y *= decay;
+                if hit_bounds || self.vel_y.abs() <= 6.0 {
+                    self.vel_y = 0.0;
+                } else {
+                    ui.ctx().request_repaint();
+                }
             } else {
-                ui.ctx().request_repaint();
+                self.vel_y = 0.0;
             }
-        } else if !down {
-            self.vel_y = 0.0;
         }
 
         // Support mouse wheel / touchpad scroll inside viewport
@@ -346,6 +367,7 @@ impl SmoothTouchScroller {
             let wheel = ui.input(|i| i.raw_scroll_delta.y);
             if wheel.abs() > 0.5 {
                 self.vel_y = 0.0;
+                self.snap_target_y = None;
                 self.offset_y = (self.offset_y - wheel).clamp(0.0, self.max_offset_y);
                 ui.ctx().request_repaint();
             }
@@ -355,6 +377,9 @@ impl SmoothTouchScroller {
     pub fn sync_bounds(&mut self, content_h: f32, view_h: f32) {
         self.max_offset_y = (content_h - view_h).max(0.0);
         self.offset_y = self.offset_y.clamp(0.0, self.max_offset_y);
+        if let Some(t) = self.snap_target_y {
+            self.snap_target_y = Some(t.clamp(0.0, self.max_offset_y));
+        }
     }
 }
 
@@ -378,6 +403,7 @@ impl SmoothHorizScroller {
         viewport_rect: egui::Rect,
         page_stride: Option<f32>,
     ) {
+        const TOUCH_SLOP: f32 = 6.0;
         let active_rect = if let Some(prev) = self.last_rect {
             egui::Rect::from_min_size(
                 viewport_rect.min,
@@ -408,7 +434,7 @@ impl SmoothHorizScroller {
                 _ => (0.0, 0.0),
             };
 
-            if self.axis_lock == 0 && dx.hypot(dy) > 3.5 {
+            if self.axis_lock == 0 && dx.hypot(dy) > TOUCH_SLOP {
                 if dx > dy * 1.15 {
                     self.axis_lock = 1;
                     self.is_dragging = true;
@@ -480,15 +506,15 @@ impl SmoothHorizScroller {
                     self.offset_x += diff * (1.0 - (-11.0 * dt).exp());
                     ui.ctx().request_repaint();
                 }
-            } else if self.vel_x.abs() > 8.0 {
-                let decay = (-3.1 * dt).exp();
+            } else if self.vel_x.abs() > 6.0 {
+                let decay = (-2.1 * dt).exp();
                 let step_vx = self.vel_x * (1.0 + decay) * 0.5;
                 let next_offset = (self.offset_x - step_vx * dt).clamp(0.0, self.max_offset_x);
                 let hit_bounds = (next_offset - self.offset_x).abs() < 0.05
                     && (next_offset <= 0.0 || next_offset >= self.max_offset_x);
                 self.offset_x = next_offset;
                 self.vel_x *= decay;
-                if hit_bounds || self.vel_x.abs() <= 8.0 {
+                if hit_bounds || self.vel_x.abs() <= 6.0 {
                     self.vel_x = 0.0;
                 } else {
                     ui.ctx().request_repaint();
@@ -621,6 +647,8 @@ pub struct YrApp {
     detail_scroller: SmoothTouchScroller,
     queue_scroller: SmoothTouchScroller,
     related_scroller: SmoothTouchScroller,
+    lyrics_scroller: SmoothTouchScroller,
+    modal_scroller: SmoothTouchScroller,
     horiz_scrollers: HashMap<egui::Id, SmoothHorizScroller>,
     last_settings_category: SettingsCategory,
     last_video_attached: Option<(String, i32, i32, i32, i32)>,
@@ -650,6 +678,29 @@ pub struct YrApp {
     retried_audio_error_track_id: Option<String>,
     retried_video_error_track_id: Option<String>,
     home_offline_mode: bool,
+}
+
+fn cache_webview_audio_url(
+    provider: &Arc<dyn MusicProvider>,
+    track_id: &str,
+    quality: AudioQuality,
+    duration_secs: Option<u64>,
+    url: &str,
+) {
+    let (mime, ext) = yr_download::infer_fallback_audio_meta(url);
+    provider.cache_audio_stream(
+        track_id,
+        quality,
+        yr_core::StreamInfo {
+            track_id: track_id.to_string(),
+            url: url.to_string(),
+            mime_type: mime.to_string(),
+            extension: ext.to_string(),
+            bitrate_bps: 128_000,
+            content_length: None,
+            duration_secs,
+        },
+    );
 }
 
 async fn play_track_bg(
@@ -718,6 +769,9 @@ async fn play_track_bg(
                 .await
                 .ok()
                 .flatten();
+                if let Some(ref u) = webview_url {
+                    cache_webview_audio_url(&provider, &track.id, quality, track.duration_secs, u);
+                }
                 webview_url
                     .map(|u| (u, None))
                     .ok_or_else(|| rust_err.to_string())
@@ -926,6 +980,8 @@ impl YrApp {
             detail_scroller: SmoothTouchScroller::default(),
             queue_scroller: SmoothTouchScroller::default(),
             related_scroller: SmoothTouchScroller::default(),
+            lyrics_scroller: SmoothTouchScroller::default(),
+            modal_scroller: SmoothTouchScroller::default(),
             horiz_scrollers: HashMap::new(),
             last_settings_category: SettingsCategory::Root,
             last_video_attached: None,
@@ -1977,7 +2033,7 @@ impl YrApp {
                 {
                     let ua = yr_provider::innertube::video_stream_user_agent(&url).to_string();
                     let is_hls = url.contains(".m3u8");
-                    res = Ok(VideoStreamInfo {
+                    let info = VideoStreamInfo {
                         track_id: track_id.clone(),
                         url,
                         fallback_url: None,
@@ -1985,7 +2041,9 @@ impl YrApp {
                         width: 1280,
                         height: 720,
                         is_hls,
-                    });
+                    };
+                    provider.cache_video_stream(&track_id, max_h, info.clone());
+                    res = Ok(info);
                 }
             }
             let _ = tx.send(AppEvent::VideoStreamResolved {
@@ -2125,6 +2183,8 @@ impl YrApp {
     ) {
         self.lyrics_track_id = Some(track.id.clone());
         self.lyrics_data = None;
+        self.lyrics_last_scrolled_idx = None;
+        self.lyrics_scroller = SmoothTouchScroller::default();
         if !force_refresh {
             let lyrics_dir = self.data_dir.join("lyrics_cache");
             if let Some(cached) = yr_core::lyrics_cache::load_cached_lyrics(&lyrics_dir, &track.id) {
@@ -2193,6 +2253,20 @@ impl YrApp {
             let _ = tx.send(AppEvent::DownloadsRefreshed { tasks, total_bytes });
             ctx.request_repaint();
         });
+    }
+
+    fn retry_failed_downloads(&mut self, max_items: usize, ctx: &egui::Context) {
+        let dl = Arc::clone(&self.downloader);
+        let tx = self.event_tx.clone();
+        let ctx = ctx.clone();
+        self.runtime.spawn(async move {
+            let _ = dl.retry_failed(max_items.max(1)).await;
+            let tasks = dl.list_tasks().await;
+            let total_bytes = dl.total_downloaded_bytes().await;
+            let _ = tx.send(AppEvent::DownloadsRefreshed { tasks, total_bytes });
+            ctx.request_repaint();
+        });
+        self.set_banner("Reintentando descargas con error...");
     }
 
     fn play_track_in_list(&mut self, tracks: Vec<Track>, index: usize, ctx: &egui::Context) {
@@ -2458,6 +2532,15 @@ impl YrApp {
                             .await
                             .ok()
                             .flatten();
+                            if let Some(ref u) = wv {
+                                cache_webview_audio_url(
+                                    &provider,
+                                    &track.id,
+                                    quality,
+                                    track.duration_secs,
+                                    u,
+                                );
+                            }
                             wv.map(|u| (u, None))
                                 .ok_or_else(|| rust_err.to_string())
                         }
@@ -4598,7 +4681,10 @@ impl YrApp {
         let key = egui::Id::new(salt);
         let fallback_rect = egui::Rect::from_min_size(
             ui.cursor().min,
-            Vec2::new(ui.available_width().max(1.0), 180.0),
+            Vec2::new(
+                ui.available_width().max(1.0),
+                ui.available_height().clamp(32.0, 220.0),
+            ),
         );
         let offset_x = {
             let sc = self.horiz_scrollers.entry(key).or_default();
@@ -5915,6 +6001,7 @@ impl YrApp {
                             )
                             .clicked()
                             {
+                                self.modal_scroller = SmoothTouchScroller::default();
                                 self.playlist_picker_track = Some(track.clone());
                             }
                             ui.add_space(8.0);
@@ -7994,6 +8081,11 @@ impl YrApp {
             });
         ui.add_space(6.0);
 
+        let retry_label = if failed_count == 1 {
+            "Reintentar (1)".to_string()
+        } else {
+            format!("Reintentar ({failed_count})")
+        };
         if !completed.is_empty() {
             ui.allocate_ui(Vec2::new(ui.available_width(), 34.0), |ui| {
                 self.show_smooth_hscroll(ui, "downloads_actions_row", None, |this, ui| {
@@ -8021,6 +8113,18 @@ impl YrApp {
                         {
                             this.play_tracks_shuffled(completed.clone(), ctx);
                         }
+                        if failed_count > 0
+                            && icons::icon_pill_button(
+                                ui,
+                                icons::Icon::Refresh,
+                                &retry_label,
+                                ACCENT_RED,
+                                Color32::WHITE,
+                            )
+                            .clicked()
+                        {
+                            this.retry_failed_downloads(failed_count, ctx);
+                        }
                         if icons::icon_pill_button(
                             ui,
                             icons::Icon::Refresh,
@@ -8038,6 +8142,18 @@ impl YrApp {
             ui.add_space(6.0);
         } else if !self.downloads.is_empty() {
             ui.horizontal(|ui| {
+                if failed_count > 0
+                    && icons::icon_pill_button(
+                        ui,
+                        icons::Icon::Refresh,
+                        &retry_label,
+                        ACCENT_RED,
+                        Color32::WHITE,
+                    )
+                    .clicked()
+                {
+                    self.retry_failed_downloads(failed_count, ctx);
+                }
                 if icons::icon_pill_button(
                     ui,
                     icons::Icon::Refresh,
@@ -8322,6 +8438,8 @@ impl YrApp {
                                         }
                                     }
                                     DownloadStatus::Paused | DownloadStatus::Failed(_) => {
+                                        let is_failed =
+                                            matches!(task.status, DownloadStatus::Failed(_));
                                         if icons::icon_button(
                                             ui,
                                             icons::Icon::Close,
@@ -8337,11 +8455,15 @@ impl YrApp {
                                         }
                                         if icons::icon_button(
                                             ui,
-                                            icons::Icon::Play,
+                                            if is_failed {
+                                                icons::Icon::Refresh
+                                            } else {
+                                                icons::Icon::Play
+                                            },
                                             30.0,
                                             14.0,
-                                            BG_ELEVATED,
-                                            TEXT_PRIMARY,
+                                            if is_failed { ACCENT_RED } else { BG_ELEVATED },
+                                            if is_failed { Color32::WHITE } else { TEXT_PRIMARY },
                                             15.0,
                                         )
                                         .clicked()
@@ -9024,92 +9146,99 @@ impl YrApp {
                             });
                         });
                         ui.add_space(6.0);
-                        egui::ScrollArea::horizontal()
-                            .id_salt("queue_actions_and_tuner_chips")
-                            .scroll_bar_visibility(
-                                egui::scroll_area::ScrollBarVisibility::AlwaysHidden,
-                            )
-                            .show(ui, |ui| {
-                                ui.horizontal(|ui| {
-                                    ui.spacing_mut().item_spacing.x = 6.0;
-                                    if queue_len > 1 {
+                        let q_track_id = track.id.clone();
+                        let q_track_title = track.title.clone();
+                        let q_ordered = ordered.clone();
+                        ui.allocate_ui(Vec2::new(ui.available_width(), 32.0), |ui| {
+                            self.show_smooth_hscroll(
+                                ui,
+                                "queue_actions_and_tuner_chips",
+                                None,
+                                |this, ui| {
+                                    ui.horizontal(|ui| {
+                                        ui.spacing_mut().item_spacing.x = 6.0;
+                                        if queue_len > 1 {
+                                            if icons::icon_pill_button(
+                                                ui,
+                                                icons::Icon::Trash,
+                                                "Limpiar",
+                                                Color32::from_white_alpha(22),
+                                                Color32::WHITE,
+                                            )
+                                            .clicked()
+                                            {
+                                                this.queue.lock().unwrap().clear_upcoming();
+                                                this.set_banner("Cola siguiente borrada");
+                                            }
+                                        }
                                         if icons::icon_pill_button(
                                             ui,
-                                            icons::Icon::Trash,
-                                            "Limpiar",
-                                            Color32::from_white_alpha(22),
+                                            icons::Icon::Radio,
+                                            "Radio",
+                                            Color32::from_white_alpha(24),
                                             Color32::WHITE,
                                         )
                                         .clicked()
                                         {
-                                            self.queue.lock().unwrap().clear_upcoming();
-                                            self.set_banner("Cola siguiente borrada");
+                                            this.start_radio(q_track_id.clone(), ctx);
                                         }
-                                    }
-                                    if icons::icon_pill_button(
-                                        ui,
-                                        icons::Icon::Radio,
-                                        "Radio",
-                                        Color32::from_white_alpha(24),
-                                        Color32::WHITE,
-                                    )
-                                    .clicked()
-                                    {
-                                        self.start_radio(track.id.clone(), ctx);
-                                    }
-                                    if icons::icon_pill_button(
-                                        ui,
-                                        icons::Icon::PlaylistAdd,
-                                        "Guardar",
-                                        Color32::from_white_alpha(24),
-                                        Color32::WHITE,
-                                    )
-                                    .clicked()
-                                    {
-                                        let q_tracks: Vec<Track> = ordered
-                                            .iter()
-                                            .map(|(_, qt)| qt.clone())
-                                            .collect();
-                                        let pl = self
-                                            .store
-                                            .create_playlist(format!("Mix • {}", track.title));
-                                        let count = q_tracks.len();
-                                        for qt in q_tracks {
-                                            self.store.add_to_playlist(&pl.id, qt);
-                                        }
-                                        self.set_banner(format!(
-                                            "Playlist guardada ({count} canciones)"
-                                        ));
-                                    }
-                                    ui.add_space(4.0);
-                                    for tuner in [
-                                        QueueTuner::All,
-                                        QueueTuner::Familiar,
-                                        QueueTuner::Discovery,
-                                        QueueTuner::Popular,
-                                        QueueTuner::Deep,
-                                    ] {
-                                        let is_sel = self.queue_tuner == tuner;
-                                        let btn = egui::Button::new(
-                                            RichText::new(tuner.label()).size(12.0).color(if is_sel {
-                                                Color32::WHITE
-                                            } else {
-                                                TEXT_PRIMARY
-                                            }),
+                                        if icons::icon_pill_button(
+                                            ui,
+                                            icons::Icon::PlaylistAdd,
+                                            "Guardar",
+                                            Color32::from_white_alpha(24),
+                                            Color32::WHITE,
                                         )
-                                        .fill(if is_sel {
-                                            ACCENT_RED
-                                        } else {
-                                            Color32::from_white_alpha(24)
-                                        })
-                                        .corner_radius(CornerRadius::same(14));
-                                        if ui.add(btn).clicked() {
-                                            self.queue_tuner = tuner;
-                                            self.apply_queue_tuner(tuner);
+                                        .clicked()
+                                        {
+                                            let q_tracks: Vec<Track> = q_ordered
+                                                .iter()
+                                                .map(|(_, qt)| qt.clone())
+                                                .collect();
+                                            let pl = this
+                                                .store
+                                                .create_playlist(format!("Mix • {q_track_title}"));
+                                            let count = q_tracks.len();
+                                            for qt in q_tracks {
+                                                this.store.add_to_playlist(&pl.id, qt);
+                                            }
+                                            this.set_banner(format!(
+                                                "Playlist guardada ({count} canciones)"
+                                            ));
                                         }
-                                    }
-                                });
-                            });
+                                        ui.add_space(4.0);
+                                        for tuner in [
+                                            QueueTuner::All,
+                                            QueueTuner::Familiar,
+                                            QueueTuner::Discovery,
+                                            QueueTuner::Popular,
+                                            QueueTuner::Deep,
+                                        ] {
+                                            let is_sel = this.queue_tuner == tuner;
+                                            let btn = egui::Button::new(
+                                                RichText::new(tuner.label()).size(12.0).color(
+                                                    if is_sel {
+                                                        Color32::WHITE
+                                                    } else {
+                                                        TEXT_PRIMARY
+                                                    },
+                                                ),
+                                            )
+                                            .fill(if is_sel {
+                                                ACCENT_RED
+                                            } else {
+                                                Color32::from_white_alpha(24)
+                                            })
+                                            .corner_radius(CornerRadius::same(14));
+                                            if ui.add(btn).clicked() {
+                                                this.queue_tuner = tuner;
+                                                this.apply_queue_tuner(tuner);
+                                            }
+                                        }
+                                    });
+                                },
+                            );
+                        });
                         ui.add_space(6.0);
                         let total_ordered = ordered.len();
                         let queue_viewport = ui.available_rect_before_wrap();
@@ -9454,11 +9583,17 @@ impl YrApp {
                                     .synced
                                     .iter()
                                     .rposition(|l| l.time_secs <= pos + 0.25);
-                                egui::ScrollArea::vertical()
+                                let lyrics_viewport = ui.available_rect_before_wrap();
+                                self.lyrics_scroller.update(ui, lyrics_viewport, false);
+                                let mut auto_center_row_y: Option<f32> = None;
+                                let mut clicked_line: Option<f64> = None;
+                                let lyr_scroll = egui::ScrollArea::vertical()
                                     .id_salt("synced_lyrics_scroll")
                                     .scroll_bar_visibility(
                                         egui::scroll_area::ScrollBarVisibility::AlwaysHidden,
                                     )
+                                    .vertical_scroll_offset(self.lyrics_scroller.offset_y)
+                                    .drag_to_scroll(false)
                                     .show(ui, |ui| {
                                         ui.add_space(6.0);
                                         for (i, line) in data.synced.iter().enumerate() {
@@ -9538,21 +9673,14 @@ impl YrApp {
                                                 && self.lyrics_last_scrolled_idx != active_idx
                                             {
                                                 self.lyrics_last_scrolled_idx = active_idx;
-                                                frame_resp.response.scroll_to_me(Some(Align::Center));
+                                                auto_center_row_y =
+                                                    Some(frame_resp.response.rect.center().y);
                                             }
                                             if row_clicked {
                                                 self.lyrics_last_scrolled_idx = Some(i);
-                                                self.audio.seek(Duration::from_secs_f64(
-                                                    line.time_secs,
-                                                ));
-                                                self.last_media_sync = None;
-                                                if self.is_video_mode {
-                                                    crate::android_media::sync_native_video(
-                                                        snap.status == PlaybackStatus::Playing,
-                                                        (line.time_secs * 1000.0).max(0.0) as u64,
-                                                        snap.speed,
-                                                    );
-                                                }
+                                                clicked_line = Some(line.time_secs);
+                                                auto_center_row_y =
+                                                    Some(frame_resp.response.rect.center().y);
                                             }
                                             ui.add_space(6.0);
                                         }
@@ -9576,12 +9704,42 @@ impl YrApp {
                                             });
                                         });
                                     });
+                                self.lyrics_scroller.sync_bounds(
+                                    lyr_scroll.content_size.y,
+                                    lyr_scroll.inner_rect.height(),
+                                );
+                                if let Some(seek_t) = clicked_line {
+                                    self.audio.seek(Duration::from_secs_f64(seek_t));
+                                    self.last_media_sync = None;
+                                    if self.is_video_mode {
+                                        crate::android_media::sync_native_video(
+                                            snap.status == PlaybackStatus::Playing,
+                                            (seek_t * 1000.0).max(0.0) as u64,
+                                            snap.speed,
+                                        );
+                                    }
+                                }
+                                if let Some(row_cy) = auto_center_row_y {
+                                    if !self.lyrics_scroller.is_dragging
+                                        && self.lyrics_scroller.vel_y.abs() < 10.0
+                                    {
+                                        let target = self.lyrics_scroller.offset_y
+                                            + (row_cy - lyr_scroll.inner_rect.center().y);
+                                        self.lyrics_scroller.smooth_scroll_to(target);
+                                        ctx.request_repaint();
+                                    }
+                                }
                             } else if !data.plain.is_empty() {
-                                egui::ScrollArea::vertical()
+                                let lyrics_viewport = ui.available_rect_before_wrap();
+                                self.lyrics_scroller.update(ui, lyrics_viewport, false);
+                                let mut retry_plain = false;
+                                let lyr_scroll = egui::ScrollArea::vertical()
                                     .id_salt("plain_lyrics_scroll")
                                     .scroll_bar_visibility(
                                         egui::scroll_area::ScrollBarVisibility::AlwaysHidden,
                                     )
+                                    .vertical_scroll_offset(self.lyrics_scroller.offset_y)
+                                    .drag_to_scroll(false)
                                     .show(ui, |ui| {
                                         ui.add_space(6.0);
                                         ui.label(
@@ -9620,10 +9778,17 @@ impl YrApp {
                                             )
                                             .clicked()
                                             {
-                                                self.load_lyrics_with_options(track.clone(), ctx, true);
+                                                retry_plain = true;
                                             }
                                         }
                                     });
+                                self.lyrics_scroller.sync_bounds(
+                                    lyr_scroll.content_size.y,
+                                    lyr_scroll.inner_rect.height(),
+                                );
+                                if retry_plain {
+                                    self.load_lyrics_with_options(track.clone(), ctx, true);
+                                }
                             } else {
                                 ui.add_space(24.0);
                                 ui.label(
@@ -10583,6 +10748,7 @@ impl YrApp {
                     )
                     .clicked()
                     {
+                        this.modal_scroller = SmoothTouchScroller::default();
                         this.playlist_picker_track = Some(track.clone());
                     }
 
@@ -11875,7 +12041,10 @@ impl YrApp {
                                         self.queue.lock().unwrap().enqueue_next(track.clone());
                                         self.set_banner(format!("Siguiente: {}", track.title));
                                     }
-                                    1 => self.playlist_picker_track = Some(track.clone()),
+                                    1 => {
+                                        self.modal_scroller = SmoothTouchScroller::default();
+                                        self.playlist_picker_track = Some(track.clone());
+                                    }
                                     _ => {
                                         crate::android_media::share_text(
                                             &track.title,
@@ -12594,12 +12763,18 @@ impl YrApp {
                                     .color(TEXT_SECONDARY),
                             );
                         } else {
-                            egui::ScrollArea::vertical()
+                            let picker_max_h = (screen.height() * 0.34).max(140.0);
+                            let mut picker_vp = ui.available_rect_before_wrap();
+                            picker_vp.set_height(picker_max_h);
+                            self.modal_scroller.update(ui, picker_vp, false);
+                            let picker_scroll = egui::ScrollArea::vertical()
                                 .id_salt("yr_playlist_picker_scroll")
                                 .scroll_bar_visibility(
                                     egui::scroll_area::ScrollBarVisibility::AlwaysHidden,
                                 )
-                                .max_height((screen.height() * 0.34).max(140.0))
+                                .max_height(picker_max_h)
+                                .vertical_scroll_offset(self.modal_scroller.offset_y)
+                                .drag_to_scroll(false)
                                 .show(ui, |ui| {
                                     for pl in pls {
                                         let already_in = pl.tracks.iter().any(|t| t.id == track.id);
@@ -12664,6 +12839,10 @@ impl YrApp {
                                         ui.add_space(4.0);
                                     }
                                 });
+                            self.modal_scroller.sync_bounds(
+                                picker_scroll.content_size.y,
+                                picker_scroll.inner_rect.height(),
+                            );
                         }
 
                         ui.add_space(6.0);
@@ -12947,10 +13126,12 @@ impl YrApp {
                         }
                         if menu_row(ui, icons::Icon::Recap, "Tu Recap").clicked() {
                             self.show_account_modal = false;
+                            self.modal_scroller = SmoothTouchScroller::default();
                             self.show_recap_modal = true;
                         }
                         if menu_row(ui, icons::Icon::Badge, "Insignias").clicked() {
                             self.show_account_modal = false;
+                            self.modal_scroller = SmoothTouchScroller::default();
                             self.show_badges_modal = true;
                         }
                         if menu_row(ui, icons::Icon::SwitchAccount, "Cambiar de cuenta").clicked() {
@@ -13132,12 +13313,17 @@ impl YrApp {
                         #[cfg(not(target_os = "android"))]
                         let nav_pad = 12.0;
                         let scroll_h = (screen.bottom() - ui.cursor().top() - nav_pad).max(200.0);
-                        egui::ScrollArea::vertical()
+                        let mut recap_vp = ui.available_rect_before_wrap();
+                        recap_vp.set_height(scroll_h);
+                        self.modal_scroller.update(ui, recap_vp, false);
+                        let recap_scroll = egui::ScrollArea::vertical()
                             .id_salt("yr_recap_scroll")
                             .scroll_bar_visibility(
                                 egui::scroll_area::ScrollBarVisibility::AlwaysHidden,
                             )
                             .max_height(scroll_h)
+                            .vertical_scroll_offset(self.modal_scroller.offset_y)
+                            .drag_to_scroll(false)
                             .auto_shrink([false, false])
                             .show(ui, |ui| {
                                 // Profile badge
@@ -13388,6 +13574,10 @@ impl YrApp {
 
                                 ui.add_space(16.0);
                             });
+                        self.modal_scroller.sync_bounds(
+                            recap_scroll.content_size.y,
+                            recap_scroll.inner_rect.height(),
+                        );
                     });
             });
 
@@ -13500,12 +13690,17 @@ impl YrApp {
                         ui.add_space(12.0);
 
                         let scroll_h = (screen.bottom() - ui.cursor().top() - 12.0).max(200.0);
-                        egui::ScrollArea::vertical()
+                        let mut badges_vp = ui.available_rect_before_wrap();
+                        badges_vp.set_height(scroll_h);
+                        self.modal_scroller.update(ui, badges_vp, false);
+                        let badges_scroll = egui::ScrollArea::vertical()
                             .id_salt("yr_badges_scroll")
                             .scroll_bar_visibility(
                                 egui::scroll_area::ScrollBarVisibility::AlwaysHidden,
                             )
                             .max_height(scroll_h)
+                            .vertical_scroll_offset(self.modal_scroller.offset_y)
+                            .drag_to_scroll(false)
                             .auto_shrink([false, false])
                             .show(ui, |ui| {
                                 // Summary Hero Card
@@ -13666,6 +13861,10 @@ impl YrApp {
                                 #[cfg(not(target_os = "android"))]
                                 ui.add_space(24.0);
                             });
+                        self.modal_scroller.sync_bounds(
+                            badges_scroll.content_size.y,
+                            badges_scroll.inner_rect.height(),
+                        );
                     });
             });
 

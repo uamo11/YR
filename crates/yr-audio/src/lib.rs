@@ -1532,7 +1532,7 @@ mod tests {
             .unwrap_or("")
             .contains("Android"));
         let ios_ua = stream_client_ua("https://rr1.googlevideo.com/videoplayback?c=IOS").unwrap_or("");
-        assert!(ios_ua.contains("iPhone") && ios_ua.contains("20.03.02"));
+        assert!(ios_ua.contains("iPhone") && ios_ua.contains("21.02.1"));
         assert!(stream_client_ua("https://rr1.googlevideo.com/videoplayback?c=VISIONOS")
             .unwrap_or("")
             .contains("Macintosh"));
