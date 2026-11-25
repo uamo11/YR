@@ -850,6 +850,7 @@ fn non_empty(s: String) -> Option<String> {
 const VISIONOS_UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_6) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15";
 const ANDROID_VR_UA: &str = "com.google.android.apps.youtube.vr.oculus/1.60.19 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip";
 const IOS_PLAYER_UA: &str = "com.google.ios.youtube/20.03.02 (iPhone16,2; U; CPU iOS 18_2_1 like Mac OS X;)";
+const ANDROID_PLAYER_UA: &str = "com.google.android.youtube/20.10.38 (Linux; U; Android 14; Mobile) gzip";
 
 pub fn video_stream_user_agent(url: &str) -> &'static str {
     if url.contains("c=MWEB") || url.contains("c=WEB") {
@@ -860,6 +861,8 @@ pub fn video_stream_user_agent(url: &str) -> &'static str {
         IOS_PLAYER_UA
     } else if url.contains("c=ANDROID_VR") {
         ANDROID_VR_UA
+    } else if url.contains("c=ANDROID") {
+        ANDROID_PLAYER_UA
     } else {
         "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
     }
@@ -928,7 +931,9 @@ fn pick_best_audio_stream(video_id: &str, val: &Value, quality: AudioQuality) ->
         let Some(mime) = f.get("mimeType").and_then(|v| v.as_str()) else {
             continue;
         };
-        if !mime.starts_with("audio/") {
+        let is_m4a = mime.contains("mp4") || mime.contains("m4a") || mime.contains("aac");
+        let is_mp3 = mime.contains("mpeg") || mime.contains("mp3");
+        if !is_m4a && !is_mp3 {
             continue;
         }
         let Some(url) = f.get("url").and_then(|v| v.as_str()) else {
@@ -942,16 +947,9 @@ fn pick_best_audio_stream(video_id: &str, val: &Value, quality: AudioQuality) ->
             .get("contentLength")
             .and_then(|v| v.as_str())
             .and_then(|s| s.parse::<u64>().ok());
-        let is_m4a = mime.contains("mp4") || mime.contains("m4a");
-        let ext = if is_m4a {
-            "m4a"
-        } else if mime.contains("webm") {
-            "webm"
-        } else {
-            "audio"
-        };
+        let ext = if is_m4a { "m4a" } else { "mp3" };
         // Strongly prefer M4A/AAC since yr-audio decodes isomp4+aac natively.
-        let penalty = if is_m4a { 0_u64 } else { 50_000_000_u64 };
+        let penalty = if is_m4a { 0_u64 } else { 10_000_000_u64 };
         let diff = (bitrate as i64 - target_bps as i64).unsigned_abs();
         candidates.push((
             penalty + diff,
@@ -1136,6 +1134,7 @@ async fn fetch_mobile_player_json(
     client_version: &str,
     ua: &str,
     client_id: &str,
+    visitor_data: Option<&str>,
 ) -> Result<Value, String> {
     let client_obj = if client_name == "IOS" {
         json!({
@@ -1150,15 +1149,19 @@ async fn fetch_mobile_player_json(
             "platform": "MOBILE"
         })
     } else {
-        json!({
-            "clientName": client_name,
+        let mut c = json!({
+            "clientName": "ANDROID",
             "clientVersion": client_version,
             "hl": "es-419",
             "gl": "MX",
-            "androidSdkVersion": 32,
+            "androidSdkVersion": 34,
             "osName": "Android",
-            "osVersion": "12"
-        })
+            "osVersion": "14"
+        });
+        if let Some(vd) = visitor_data.filter(|s| !s.is_empty()) {
+            c["visitorData"] = Value::String(vd.to_string());
+        }
+        c
     };
     let body = json!({
         "context": {
@@ -1168,12 +1171,18 @@ async fn fetch_mobile_player_json(
         "contentCheckOk": true,
         "racyCheckOk": true
     });
-    let resp = http
+    let mut req = http
         .post("https://www.youtube.com/youtubei/v1/player?prettyPrint=false")
         .header(CONTENT_TYPE, "application/json")
         .header(USER_AGENT, ua)
         .header("X-YouTube-Client-Name", client_id)
-        .header("X-YouTube-Client-Version", client_version)
+        .header("X-YouTube-Client-Version", client_version);
+    if client_name == "ANDROID" {
+        if let Some(vd) = visitor_data.filter(|s| !s.is_empty()) {
+            req = req.header("X-Goog-Visitor-Id", vd);
+        }
+    }
+    let resp = req
         .json(&body)
         .send()
         .await
@@ -1220,13 +1229,14 @@ pub async fn fetch_player_video_stream(
             return Ok(v);
         }
     }
+    let vd = get_or_fetch_visitor_data(http, false).await.ok();
     let clients = [
-        ("ANDROID_VR", "1.60.19", ANDROID_VR_UA, "28"),
-        ("IOS", "20.03.02", IOS_PLAYER_UA, "5"),
+        ("IOS", "20.03.02", IOS_PLAYER_UA, "5", None),
+        ("ANDROID", "20.10.38", ANDROID_PLAYER_UA, "3", vd.as_deref()),
     ];
     let mut last_err = "No compatible MP4/HLS video stream".to_string();
-    for (client_name, client_version, ua, client_id) in clients {
-        match fetch_mobile_player_json(http, video_id, client_name, client_version, ua, client_id).await {
+    for (client_name, client_version, ua, client_id, c_vd) in clients {
+        match fetch_mobile_player_json(http, video_id, client_name, client_version, ua, client_id, c_vd).await {
             Ok(val) => {
                 if let Some(v) = pick_best_video_stream(video_id, &val, max_height, ua) {
                     return Ok(v);
@@ -1243,7 +1253,7 @@ pub async fn fetch_player_video_stream(
 }
 
 /// Fast direct stream extraction via InnerTube `VISIONOS 0.1` (+ visitorData),
-/// falling back to `ANDROID_VR` / `IOS` player clients.
+/// falling back to `IOS 20.03.02` / `ANDROID 20.10.38` player clients.
 pub async fn fetch_player_stream(
     http: &reqwest::Client,
     video_id: &str,
@@ -1252,14 +1262,15 @@ pub async fn fetch_player_stream(
     if let Ok(stream) = fetch_visionos_stream(http, video_id, quality).await {
         return Ok(stream);
     }
+    let vd = get_or_fetch_visitor_data(http, false).await.ok();
     let clients = [
-        ("ANDROID_VR", "1.60.19", ANDROID_VR_UA, "28"),
-        ("IOS", "20.03.02", IOS_PLAYER_UA, "5"),
+        ("IOS", "20.03.02", IOS_PLAYER_UA, "5", None),
+        ("ANDROID", "20.10.38", ANDROID_PLAYER_UA, "3", vd.as_deref()),
     ];
 
     let mut last_err = String::from("No stream returned");
-    for (client_name, client_version, ua, client_id) in clients {
-        match fetch_mobile_player_json(http, video_id, client_name, client_version, ua, client_id)
+    for (client_name, client_version, ua, client_id, c_vd) in clients {
+        match fetch_mobile_player_json(http, video_id, client_name, client_version, ua, client_id, c_vd)
             .await
         {
             Ok(val) => {
@@ -1301,21 +1312,32 @@ pub async fn fetch_explore_feed(
     {
         for item in contents {
             parse_shelf_item(item, &mut tmp_feed);
-            if let Some(grid) = item.get("gridRenderer").and_then(|g| g.get("items")).and_then(|a| a.as_array()) {
-                for cell in grid {
+            let button_arrays = [
+                item.pointer("/gridRenderer/items").and_then(|a| a.as_array()),
+                item.pointer("/musicCarouselShelfRenderer/contents")
+                    .and_then(|a| a.as_array()),
+            ];
+            for arr_opt in button_arrays {
+                let Some(cells) = arr_opt else { continue };
+                for cell in cells {
                     if let Some(nav) = cell.get("musicNavigationButtonRenderer") {
                         let title = runs_text(nav.get("buttonText"));
                         let browse_id = nav
                             .pointer("/clickCommand/browseEndpoint/browseId")
-                            .and_then(|v| v.as_str())
-                            .map(|s| s.to_string());
+                            .and_then(|v| v.as_str());
                         let params = nav
                             .pointer("/clickCommand/browseEndpoint/params")
                             .and_then(|v| v.as_str())
                             .map(|s| s.to_string());
-                        if !title.is_empty() {
-                            if let Some(id) = browse_id {
-                                tmp_feed.moods.push(MoodGenre { id, title, params });
+                        if !title.is_empty()
+                            && browse_id == Some("FEmusic_moods_and_genres_category")
+                        {
+                            if let Some(p) = params.filter(|s| !s.is_empty()) {
+                                tmp_feed.moods.push(MoodGenre {
+                                    id: p,
+                                    title,
+                                    params: None,
+                                });
                             }
                         }
                     }
@@ -1331,9 +1353,26 @@ pub async fn fetch_explore_feed(
     if trending.is_empty() {
         trending = tmp_feed.recommended_tracks;
     }
-    if trending.is_empty() {
-        for shelf in &tmp_feed.shelves {
-            trending.extend(shelf.tracks.iter().cloned());
+    for shelf in &tmp_feed.shelves {
+        for card in &shelf.cards {
+            match &card.kind {
+                ShelfCardKind::Album(a) => {
+                    if tmp_feed.new_albums.len() < 24 {
+                        tmp_feed.new_albums.push(a.clone());
+                    }
+                }
+                ShelfCardKind::Track(t) => {
+                    if !trending.iter().any(|x| x.id == t.id) {
+                        trending.push(t.clone());
+                    }
+                }
+                _ => {}
+            }
+        }
+        for t in &shelf.tracks {
+            if !trending.iter().any(|x| x.id == t.id) {
+                trending.push(t.clone());
+            }
         }
     }
     Ok(ExploreFeed {
@@ -1341,6 +1380,142 @@ pub async fn fetch_explore_feed(
         trending_tracks: trending,
         moods: tmp_feed.moods,
     })
+}
+
+pub async fn fetch_mood_playlists(
+    http: &reqwest::Client,
+    session: Option<&GoogleSession>,
+    genre_params: &str,
+) -> Result<Vec<PlaylistSummary>, String> {
+    let body = json!({
+        "context": {
+            "client": {
+                "clientName": "WEB_REMIX",
+                "clientVersion": CLIENT_VERSION,
+                "hl": "es-419",
+                "gl": "MX"
+            }
+        },
+        "browseId": "FEmusic_moods_and_genres_category",
+        "params": genre_params
+    });
+    let val = post_innertube(http, "browse", body, session).await?;
+    let mut tmp = HomeFeed::default();
+    if let Some(contents) = val
+        .pointer("/contents/singleColumnBrowseResultsRenderer/tabs/0/tabRenderer/content/sectionListRenderer/contents")
+        .and_then(|c| c.as_array())
+    {
+        for item in contents {
+            parse_shelf_item(item, &mut tmp);
+        }
+    }
+    let mut out = tmp.recommended_playlists;
+    if out.is_empty() {
+        for shelf in tmp.shelves {
+            for card in shelf.cards {
+                if let ShelfCardKind::Playlist(p) = card.kind {
+                    out.push(p);
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+pub async fn fetch_browse_collection(
+    http: &reqwest::Client,
+    session: Option<&GoogleSession>,
+    raw_id: &str,
+) -> Result<(String, Option<String>, Option<u16>, Option<String>, Vec<Track>), String> {
+    let browse_id = if raw_id.starts_with("VL") || raw_id.starts_with("MPREb_") {
+        raw_id.to_string()
+    } else {
+        format!("VL{raw_id}")
+    };
+    let body = json!({
+        "context": {
+            "client": {
+                "clientName": "WEB_REMIX",
+                "clientVersion": CLIENT_VERSION,
+                "hl": "es-419",
+                "gl": "MX"
+            }
+        },
+        "browseId": browse_id
+    });
+    let val = post_innertube(http, "browse", body, session).await?;
+
+    let hdr = val
+        .pointer("/contents/twoColumnBrowseResultsRenderer/tabs/0/tabRenderer/content/sectionListRenderer/contents/0/musicResponsiveHeaderRenderer")
+        .or_else(|| val.pointer("/header/musicDetailHeaderRenderer"))
+        .or_else(|| val.pointer("/header/musicEditablePlaylistDetailHeaderRenderer/header/musicDetailHeaderRenderer"));
+
+    let title = hdr
+        .map(|h| runs_text(h.get("title")))
+        .and_then(non_empty)
+        .unwrap_or_else(|| "Lista de reproducción".to_string());
+    let subtitle = hdr.map(|h| runs_text(h.get("subtitle"))).unwrap_or_default();
+    let strapline = hdr
+        .and_then(|h| h.get("straplineTextOne"))
+        .map(|v| runs_text(Some(v)))
+        .and_then(non_empty);
+    let artist_or_author = strapline.or_else(|| {
+        let ex = extract_artist_from_subtitle(&subtitle);
+        if ex == "YouTube Music" {
+            non_empty(subtitle.clone())
+        } else {
+            Some(ex)
+        }
+    });
+    let year = subtitle.split('•').find_map(|seg| {
+        let s = seg.trim();
+        if s.len() == 4 && s.chars().all(|c| c.is_ascii_digit()) {
+            s.parse::<u16>().ok()
+        } else {
+            None
+        }
+    });
+    let thumb = hdr.and_then(|h| {
+        best_thumb(h.pointer("/thumbnail/musicThumbnailRenderer/thumbnail/thumbnails"))
+            .or_else(|| best_thumb(h.pointer("/thumbnail/croppedSquareThumbnailRenderer/thumbnail/thumbnails")))
+    });
+
+    let sections = val
+        .pointer("/contents/twoColumnBrowseResultsRenderer/secondaryContents/sectionListRenderer/contents")
+        .or_else(|| val.pointer("/contents/singleColumnBrowseResultsRenderer/tabs/0/tabRenderer/content/sectionListRenderer/contents"))
+        .and_then(|c| c.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    let mut tracks = Vec::new();
+    for sec in &sections {
+        let items = sec
+            .pointer("/musicPlaylistShelfRenderer/contents")
+            .or_else(|| sec.pointer("/musicShelfRenderer/contents"))
+            .and_then(|c| c.as_array());
+        if let Some(arr) = items {
+            for entry in arr {
+                if let Some(r) = entry.get("musicResponsiveListItemRenderer") {
+                    if let Some((mut t, _)) = parse_responsive_track(r) {
+                        if t.artist == "YouTube Music" {
+                            if let Some(ref a) = artist_or_author {
+                                t.artist = a.clone();
+                            }
+                        }
+                        if t.thumbnail_url.is_none() {
+                            t.thumbnail_url = thumb.clone();
+                        }
+                        tracks.push(t);
+                    }
+                }
+            }
+        }
+    }
+
+    if tracks.is_empty() {
+        return Err("La colección no devolvió pistas".to_string());
+    }
+    Ok((title, artist_or_author, year, thumb, tracks))
 }
 
 pub async fn fetch_related_tracks(
@@ -1876,6 +2051,10 @@ mod tests {
             video_stream_user_agent("https://rr1.googlevideo.com/videoplayback?c=ANDROID_VR"),
             ANDROID_VR_UA
         );
+        assert_eq!(
+            video_stream_user_agent("https://rr1.googlevideo.com/videoplayback?c=ANDROID"),
+            ANDROID_PLAYER_UA
+        );
         assert!(video_stream_user_agent("https://rr1.googlevideo.com/videoplayback?c=MWEB").contains("Pixel 8"));
 
         let vp9_only = json!({
@@ -1895,6 +2074,46 @@ mod tests {
         let vp9_pick = pick_best_video_stream("vid2", &vp9_only, 0, IOS_PLAYER_UA).expect("VP9 WebM fallback");
         assert_eq!(vp9_pick.height, 720);
         assert_eq!(vp9_pick.url, "https://rr1.googlevideo.com/vp9_720");
+    }
+
+    #[test]
+    fn pick_best_audio_stream_rejects_webm_and_prefers_m4a() {
+        let webm_only = json!({
+            "streamingData": {
+                "adaptiveFormats": [
+                    {
+                        "itag": 251,
+                        "mimeType": "audio/webm; codecs=\"opus\"",
+                        "bitrate": 160000,
+                        "url": "https://rr1.googlevideo.com/opus_only"
+                    }
+                ]
+            }
+        });
+        assert!(pick_best_audio_stream("vid_webm", &webm_only, AudioQuality::High).is_none());
+
+        let mixed = json!({
+            "streamingData": {
+                "adaptiveFormats": [
+                    {
+                        "itag": 251,
+                        "mimeType": "audio/webm; codecs=\"opus\"",
+                        "bitrate": 160000,
+                        "url": "https://rr1.googlevideo.com/opus"
+                    },
+                    {
+                        "itag": 140,
+                        "mimeType": "audio/mp4; codecs=\"mp4a.40.2\"",
+                        "bitrate": 129000,
+                        "contentLength": "3456789",
+                        "url": "https://rr1.googlevideo.com/m4a"
+                    }
+                ]
+            }
+        });
+        let best = pick_best_audio_stream("vid_m4a", &mixed, AudioQuality::High).expect("m4a stream");
+        assert_eq!(best.extension, "m4a");
+        assert_eq!(best.url, "https://rr1.googlevideo.com/m4a");
     }
 
     #[tokio::test]

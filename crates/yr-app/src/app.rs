@@ -420,6 +420,7 @@ pub struct YrApp {
     max_smart_songs_atomic: Arc<std::sync::atomic::AtomicUsize>,
     known_tracks: Arc<std::sync::Mutex<HashMap<String, Track>>>,
     consecutive_stream_failures: u8,
+    retried_audio_error_track_id: Option<String>,
 }
 
 async fn play_track_bg(
@@ -719,6 +720,7 @@ impl YrApp {
             max_smart_songs_atomic,
             known_tracks,
             consecutive_stream_failures: 0,
+            retried_audio_error_track_id: None,
         };
 
         let (media_tx, mut media_rx) = mpsc::unbounded_channel();
@@ -1812,6 +1814,7 @@ impl YrApp {
             None
         };
         self.consecutive_stream_failures = 0;
+        self.retried_audio_error_track_id = None;
         self.queue.lock().unwrap().set_queue(tracks, index);
         self.now_playing_open = true;
         self.show_settings = false;
@@ -2702,11 +2705,35 @@ impl eframe::App for YrApp {
         }
         self.process_events(ctx);
         let snap = self.audio.snapshot();
-        if self.consecutive_stream_failures > 0
-            && snap.status == PlaybackStatus::Playing
-            && snap.position_secs > 0.3
-        {
+        if snap.status == PlaybackStatus::Playing && snap.position_secs > 0.3 {
             self.consecutive_stream_failures = 0;
+            if snap.position_secs > 0.5 {
+                self.retried_audio_error_track_id = None;
+            }
+        }
+        if let PlaybackStatus::Error(ref audio_err) = snap.status {
+            if !audio_err.contains("Sin dispositivo") {
+                let curr_id = self
+                    .queue
+                    .lock()
+                    .unwrap()
+                    .current_track()
+                    .map(|t| t.id.clone());
+                if let Some(cid) = curr_id {
+                    if !cid.starts_with("local_")
+                        && self.retried_audio_error_track_id.as_deref() != Some(cid.as_str())
+                    {
+                        self.retried_audio_error_track_id = Some(cid.clone());
+                        self.provider.invalidate_track_streams(&cid);
+                        let bad_cache = self
+                            .data_dir
+                            .join("stream_cache")
+                            .join(format!("stream_{cid}.audio"));
+                        let _ = std::fs::remove_file(&bad_cache);
+                        self.play_current_queue_track(ctx);
+                    }
+                }
+            }
         }
         let fullscreen_overlay = self.now_playing_open || self.show_settings;
 
@@ -7554,7 +7581,7 @@ impl YrApp {
                                         DownloadStatus::Failed(err) => {
                                             ui.add(
                                                 egui::Label::new(
-                                                    RichText::new(format!("Error: {err}"))
+                                                    RichText::new(friendly_error_message("", err))
                                                         .small()
                                                         .color(ACCENT_RED),
                                                 )
@@ -9454,7 +9481,9 @@ impl YrApp {
                         PlaybackStatus::Buffering | PlaybackStatus::Loading => {
                             Some(("Cargando audio...".to_string(), Color32::from_white_alpha(210)))
                         }
-                        PlaybackStatus::Error(err) => Some((err.clone(), ACCENT_RED)),
+                        PlaybackStatus::Error(err) => {
+                            Some((friendly_error_message("Audio", err), ACCENT_RED))
+                        }
                         _ => {
                             let quality_str = match self.store.data.config.stream_quality {
                                 AudioQuality::Low => "96 kbps",
@@ -9741,11 +9770,10 @@ impl YrApp {
                         });
 
                     ui.add_space(12.0);
-                    let total = snap
+                    let known_total = snap
                         .duration_secs
-                        .or(track.duration_secs.map(|d| d as f64))
-                        .unwrap_or(1.0)
-                        .max(1.0);
+                        .or(track.duration_secs.filter(|&d| d > 0).map(|d| d as f64));
+                    let total = known_total.unwrap_or(1.0).max(1.0);
                     let pos = self.seeking_secs.unwrap_or(snap.position_secs).min(total);
                     let slider_w = avail_w.max(160.0);
                     let (bar_rect, bar_resp) = ui.allocate_exact_size(
@@ -9872,8 +9900,11 @@ impl YrApp {
                                     .color(Color32::from_white_alpha(180)),
                             );
                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                let dur_str = known_total
+                                    .map(|d| format_seconds(d as u64))
+                                    .unwrap_or_else(|| "--:--".to_string());
                                 ui.label(
-                                    RichText::new(format_seconds(total as u64))
+                                    RichText::new(dur_str)
                                         .size(12.0)
                                         .color(Color32::from_white_alpha(180)),
                                 );
@@ -10786,7 +10817,7 @@ impl YrApp {
                     }
                 }
                 SettingsCategory::About => {
-                    ui.heading("YR Music v0.9.18");
+                    ui.heading("YR Music v0.9.19");
                     ui.label("Cliente nativo de música 100% en Rust para Android y escritorio.");
                     ui.add_space(6.0);
                     ui.label(RichText::new("Motor de audio Symphonia PCM con DSP Morphe 3D binaural, reproductor integrado de video en la app, auto-scroll inteligente de cola, prefetch predictivo en disco y compatibilidad completa con YouTube Music.").size(12.0).color(TEXT_SECONDARY));
@@ -12074,7 +12105,7 @@ impl YrApp {
                         }
                         if menu_row(ui, icons::Icon::Help, "Ayuda y comentarios").clicked() {
                             self.show_account_modal = false;
-                            self.set_banner("YR Music v0.9.18 • Pure Rust");
+                            self.set_banner("YR Music v0.9.19 • Pure Rust");
                         }
 
                         #[cfg(target_os = "android")]
@@ -13564,22 +13595,50 @@ fn advance_and_prune_image_cache(ctx: &egui::Context) {
 }
 
 fn friendly_error_message(prefix: &str, raw: &str) -> String {
-    let low = raw.to_lowercase();
+    let stripped = raw
+        .trim()
+        .trim_start_matches("Error de red o API:")
+        .trim_start_matches("Error:")
+        .trim();
+    let low = stripped.to_lowercase();
+    let with_prefix = |msg: &str| {
+        if prefix.is_empty() {
+            msg.to_string()
+        } else {
+            format!("{prefix}: {msg}")
+        }
+    };
     if low.contains("error sending request")
         || low.contains("dns")
         || low.contains("failed to lookup")
         || low.contains("connection refused")
         || low.contains("network is unreachable")
     {
-        format!("{prefix}: sin conexión a internet.")
+        with_prefix("Sin conexión a internet.")
     } else if low.contains("timed out") || low.contains("timeout") {
-        format!("{prefix}: tiempo de espera agotado.")
-    } else if low.contains("extraction error:") || low.contains("was not found (no content)") {
-        format!("{prefix}: no disponible para esta pista.")
-    } else if let Some((clean, _)) = raw.split_once(" (http") {
-        format!("{prefix}: {}", clean.trim())
+        with_prefix("Tiempo de espera agotado.")
+    } else if low.contains("extraction error:")
+        || low.contains("was not found (no content)")
+        || low.contains("content unavailable")
+        || low.contains("este contenido no está disponible")
+        || low.contains("login_required")
+        || low.contains("unplayable")
+    {
+        if prefix.is_empty() {
+            "No disponible en esta región o cuenta.".to_string()
+        } else {
+            format!("{prefix}: no disponible en este momento.")
+        }
+    } else if low.contains("http 403") || low.contains("403 forbidden") {
+        if prefix.is_empty() {
+            "Enlace expirado • Toca Sincronizar".to_string()
+        } else {
+            format!("{prefix}: enlace expirado, reintentando...")
+        }
+    } else if let Some((clean, _)) = stripped.split_once(" (http") {
+        with_prefix(clean.trim())
     } else {
-        format!("{prefix}: {raw}")
+        with_prefix(stripped)
     }
 }
 

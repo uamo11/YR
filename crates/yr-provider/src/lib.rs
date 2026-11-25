@@ -73,6 +73,7 @@ pub trait MusicProvider: Send + Sync {
     async fn get_account_info(&self) -> Option<GoogleAccountInfo> {
         None
     }
+    fn invalidate_track_streams(&self, _track_id: &str) {}
 }
 
 /// YouTube Music provider backed by `rustypipe` + direct InnerTube WEB_REMIX.
@@ -461,54 +462,84 @@ impl MusicProvider for YtMusicProvider {
     }
 
     async fn get_album(&self, album_id: &str) -> Result<AlbumDetail, ProviderError> {
-        let album = self
-            .client
-            .query()
-            .music_album(album_id)
-            .await
-            .map_err(|e| ProviderError::Api(e.to_string()))?;
-
-        let artist = album
-            .artists
-            .first()
-            .map(|a| a.name.clone())
-            .unwrap_or_else(|| "Artista desconocido".to_string());
-        let summary = AlbumSummary {
-            id: album.id,
-            title: album.name,
-            artist,
-            year: album.year,
-            thumbnail_url: album
-                .cover
-                .last()
-                .or_else(|| album.cover.first())
-                .map(|c| c.url.clone()),
-        };
-        let tracks = album.tracks.into_iter().map(Self::map_track).collect();
-        Ok(AlbumDetail { summary, tracks })
+        match self.client.query().music_album(album_id).await {
+            Ok(album) => {
+                let artist = album
+                    .artists
+                    .first()
+                    .map(|a| a.name.clone())
+                    .unwrap_or_else(|| "Artista desconocido".to_string());
+                let summary = AlbumSummary {
+                    id: album.id,
+                    title: album.name,
+                    artist,
+                    year: album.year,
+                    thumbnail_url: album
+                        .cover
+                        .last()
+                        .or_else(|| album.cover.first())
+                        .map(|c| c.url.clone()),
+                };
+                let tracks = album.tracks.into_iter().map(Self::map_track).collect();
+                Ok(AlbumDetail { summary, tracks })
+            }
+            Err(rust_err) => {
+                let session = self.google_session.lock().await.clone();
+                match innertube::fetch_browse_collection(&self.http, session.as_ref(), album_id)
+                    .await
+                {
+                    Ok((title, artist_opt, year, thumb, tracks)) => Ok(AlbumDetail {
+                        summary: AlbumSummary {
+                            id: album_id.to_string(),
+                            title,
+                            artist: artist_opt.unwrap_or_else(|| "Artista desconocido".to_string()),
+                            year,
+                            thumbnail_url: thumb,
+                        },
+                        tracks,
+                    }),
+                    Err(_) => Err(ProviderError::Api(rust_err.to_string())),
+                }
+            }
+        }
     }
 
     async fn get_playlist(&self, playlist_id: &str) -> Result<PlaylistDetail, ProviderError> {
-        let pl = self
-            .client
-            .query()
-            .music_playlist(playlist_id)
-            .await
-            .map_err(|e| ProviderError::Api(e.to_string()))?;
-
-        let summary = PlaylistSummary {
-            id: pl.id,
-            title: pl.name,
-            author: pl.channel.map(|c| c.name),
-            track_count: Some(pl.tracks.items.len() as u32),
-            thumbnail_url: pl
-                .thumbnail
-                .last()
-                .or_else(|| pl.thumbnail.first())
-                .map(|t| t.url.clone()),
-        };
-        let tracks = pl.tracks.items.into_iter().map(Self::map_track).collect();
-        Ok(PlaylistDetail { summary, tracks })
+        match self.client.query().music_playlist(playlist_id).await {
+            Ok(pl) => {
+                let summary = PlaylistSummary {
+                    id: pl.id,
+                    title: pl.name,
+                    author: pl.channel.map(|c| c.name),
+                    track_count: Some(pl.tracks.items.len() as u32),
+                    thumbnail_url: pl
+                        .thumbnail
+                        .last()
+                        .or_else(|| pl.thumbnail.first())
+                        .map(|t| t.url.clone()),
+                };
+                let tracks = pl.tracks.items.into_iter().map(Self::map_track).collect();
+                Ok(PlaylistDetail { summary, tracks })
+            }
+            Err(rust_err) => {
+                let session = self.google_session.lock().await.clone();
+                match innertube::fetch_browse_collection(&self.http, session.as_ref(), playlist_id)
+                    .await
+                {
+                    Ok((title, author, _year, thumb, tracks)) => Ok(PlaylistDetail {
+                        summary: PlaylistSummary {
+                            id: playlist_id.to_string(),
+                            title,
+                            author,
+                            track_count: Some(tracks.len() as u32),
+                            thumbnail_url: thumb,
+                        },
+                        tracks,
+                    }),
+                    Err(_) => Err(ProviderError::Api(rust_err.to_string())),
+                }
+            }
+        }
     }
 
     async fn get_artist(&self, artist_id: &str) -> Result<ArtistDetail, ProviderError> {
@@ -544,20 +575,21 @@ impl MusicProvider for YtMusicProvider {
         &self,
         genre_id: &str,
     ) -> Result<Vec<PlaylistSummary>, ProviderError> {
-        let genre = self
-            .client
-            .query()
-            .music_genre(genre_id)
+        if let Ok(genre) = self.client.query().music_genre(genre_id).await {
+            let playlists: Vec<PlaylistSummary> = genre
+                .sections
+                .into_iter()
+                .flat_map(|s| s.playlists)
+                .map(Self::map_playlist)
+                .collect();
+            if !playlists.is_empty() {
+                return Ok(playlists);
+            }
+        }
+        let session = self.google_session.lock().await.clone();
+        innertube::fetch_mood_playlists(&self.http, session.as_ref(), genre_id)
             .await
-            .map_err(|e| ProviderError::Api(e.to_string()))?;
-
-        let playlists = genre
-            .sections
-            .into_iter()
-            .flat_map(|s| s.playlists)
-            .map(Self::map_playlist)
-            .collect();
-        Ok(playlists)
+            .map_err(ProviderError::Api)
     }
 
     async fn get_explore_feed(&self) -> Result<ExploreFeed, ProviderError> {
@@ -617,13 +649,16 @@ impl MusicProvider for YtMusicProvider {
     }
 
     async fn get_radio(&self, track_id: &str) -> Result<Vec<Track>, ProviderError> {
-        let radio = self
-            .client
-            .query()
-            .music_radio_track(track_id)
+        if let Ok(radio) = self.client.query().music_radio_track(track_id).await {
+            let items: Vec<Track> = radio.items.into_iter().map(Self::map_track).collect();
+            if !items.is_empty() {
+                return Ok(items);
+            }
+        }
+        let session = self.google_session.lock().await.clone();
+        innertube::fetch_related_tracks(&self.http, session.as_ref(), track_id)
             .await
-            .map_err(|e| ProviderError::Api(e.to_string()))?;
-        Ok(radio.items.into_iter().map(Self::map_track).collect())
+            .map_err(ProviderError::Api)
     }
 
     async fn get_related_tracks(&self, track_id: &str) -> Result<Vec<Track>, ProviderError> {
@@ -659,14 +694,14 @@ impl MusicProvider for YtMusicProvider {
         if let Some(lrc) = innertube::fetch_lrclib_lyrics(&self.http, track).await {
             return Ok(Some(lrc));
         }
-        match self.get_lyrics(&track.id).await? {
-            Some(plain) => Ok(Some(LyricsData {
+        if let Ok(Some(plain)) = self.get_lyrics(&track.id).await {
+            return Ok(Some(LyricsData {
                 plain,
                 synced: Vec::new(),
                 source: "YouTube Music".to_string(),
-            })),
-            None => Ok(None),
+            }));
         }
+        Ok(None)
     }
 
     async fn get_sponsor_segments(
@@ -684,7 +719,7 @@ impl MusicProvider for YtMusicProvider {
         let cache_key = (track_id.to_string(), quality.target_bitrate_kbps());
         if let Ok(guard) = self.stream_cache.lock() {
             if let Some((cached, fetched_at)) = guard.get(&cache_key) {
-                if fetched_at.elapsed() < Duration::from_secs(4 * 3600) {
+                if fetched_at.elapsed() < Duration::from_secs(25 * 60) {
                     return Ok(cached.clone());
                 }
             }
@@ -711,25 +746,33 @@ impl MusicProvider for YtMusicProvider {
             .map_err(|e| ProviderError::Api(e.to_string()))?;
 
         let target_bps = quality.target_bitrate_kbps() * 1000;
-        let mut audio_streams = player.audio_streams;
+        let mut audio_streams: Vec<_> = player
+            .audio_streams
+            .into_iter()
+            .filter(|s| {
+                s.mime.contains("mp4")
+                    || s.mime.contains("m4a")
+                    || s.mime.contains("aac")
+                    || s.mime.contains("mpeg")
+                    || s.mime.contains("mp3")
+            })
+            .collect();
         if audio_streams.is_empty() {
             return Err(ProviderError::NoAudioStream(track_id.to_string()));
         }
 
         audio_streams.sort_by_key(|s| {
-            let is_m4a = s.mime.contains("mp4") || s.mime.contains("m4a");
+            let is_m4a = s.mime.contains("mp4") || s.mime.contains("m4a") || s.mime.contains("aac");
             let m4a_penalty: u64 = if is_m4a { 0 } else { 10_000_000 };
             let bitrate_diff = (s.bitrate as i64 - target_bps as i64).unsigned_abs();
             m4a_penalty + bitrate_diff
         });
 
         let chosen = audio_streams.remove(0);
-        let extension = if chosen.mime.contains("mp4") || chosen.mime.contains("m4a") {
+        let extension = if chosen.mime.contains("mp4") || chosen.mime.contains("m4a") || chosen.mime.contains("aac") {
             "m4a"
-        } else if chosen.mime.contains("webm") {
-            "webm"
         } else {
-            "audio"
+            "mp3"
         };
 
         let info = StreamInfo {
@@ -758,7 +801,7 @@ impl MusicProvider for YtMusicProvider {
         let cache_key = (track_id.to_string(), max_height);
         if let Ok(guard) = self.video_stream_cache.lock() {
             if let Some((cached, fetched_at)) = guard.get(&cache_key) {
-                if fetched_at.elapsed() < Duration::from_secs(4 * 3600) {
+                if fetched_at.elapsed() < Duration::from_secs(25 * 60) {
                     return Ok(cached.clone());
                 }
             }
@@ -821,7 +864,7 @@ impl MusicProvider for YtMusicProvider {
         let cache_key = (track.id.clone(), max_height);
         if let Ok(guard) = self.video_stream_cache.lock() {
             if let Some((cached, fetched_at)) = guard.get(&cache_key) {
-                if fetched_at.elapsed() < Duration::from_secs(4 * 3600) {
+                if fetched_at.elapsed() < Duration::from_secs(25 * 60) {
                     return Ok(cached.clone());
                 }
             }
@@ -966,6 +1009,15 @@ impl MusicProvider for YtMusicProvider {
 
     async fn get_account_info(&self) -> Option<GoogleAccountInfo> {
         self.google_session.lock().await.as_ref().and_then(|s| s.account.clone())
+    }
+
+    fn invalidate_track_streams(&self, track_id: &str) {
+        if let Ok(mut guard) = self.stream_cache.lock() {
+            guard.retain(|(id, _), _| id != track_id);
+        }
+        if let Ok(mut guard) = self.video_stream_cache.lock() {
+            guard.retain(|(id, _), _| id != track_id);
+        }
     }
 }
 
@@ -1128,6 +1180,46 @@ mod tests {
         let far_only = vec![("live_remix".to_string(), "Instant Crush Live Long".to_string(), Some(365))];
         assert_eq!(pick_paired_omv_id(&track, &far_only, 6), None);
         assert_eq!(pick_paired_omv_id(&track, &far_only, 60).as_deref(), Some("live_remix"));
+    }
+
+    #[test]
+    fn invalidate_track_streams_clears_matching_entries() {
+        let provider = YtMusicProvider::new();
+        {
+            let mut sc = provider.stream_cache.lock().unwrap();
+            sc.insert(
+                ("t1".into(), 256),
+                (
+                    StreamInfo {
+                        track_id: "t1".into(),
+                        url: "https://example.com/a".into(),
+                        mime_type: "audio/mp4".into(),
+                        extension: "m4a".into(),
+                        bitrate_bps: 128_000,
+                        content_length: None,
+                    },
+                    Instant::now(),
+                ),
+            );
+            sc.insert(
+                ("t2".into(), 256),
+                (
+                    StreamInfo {
+                        track_id: "t2".into(),
+                        url: "https://example.com/b".into(),
+                        mime_type: "audio/mp4".into(),
+                        extension: "m4a".into(),
+                        bitrate_bps: 128_000,
+                        content_length: None,
+                    },
+                    Instant::now(),
+                ),
+            );
+        }
+        provider.invalidate_track_streams("t1");
+        let sc = provider.stream_cache.lock().unwrap();
+        assert!(!sc.contains_key(&("t1".into(), 256)));
+        assert!(sc.contains_key(&("t2".into(), 256)));
     }
 
     #[test]

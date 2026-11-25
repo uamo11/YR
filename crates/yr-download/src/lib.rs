@@ -26,6 +26,8 @@ fn stream_client_ua(url: &str) -> Option<&'static str> {
         Some("com.google.ios.youtube/20.03.02 (iPhone16,2; U; CPU iOS 18_2_1 like Mac OS X;)")
     } else if url.contains("c=ANDROID_VR") {
         Some("com.google.android.apps.youtube.vr.oculus/1.60.19 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip")
+    } else if url.contains("c=ANDROID") {
+        Some("com.google.android.youtube/20.10.38 (Linux; U; Android 14; Mobile) gzip")
     } else {
         Some("Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36")
     }
@@ -486,6 +488,7 @@ impl DownloadManager {
                 Err(DownloadInternalError::Paused) => return,
                 Err(DownloadInternalError::Cancelled) => return,
                 Err(DownloadInternalError::Retryable(msg)) => {
+                    self.provider.invalidate_track_streams(&track.id);
                     last_err = msg;
                 }
             }
