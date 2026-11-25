@@ -755,6 +755,9 @@ impl MusicProvider for YtMusicProvider {
             }
             Err(e) => e,
         };
+        if innertube::is_bot_or_auth_err(&inner_err) {
+            return Err(ProviderError::Api(inner_err));
+        }
 
         let player = self
             .client
@@ -854,6 +857,9 @@ impl MusicProvider for YtMusicProvider {
         {
             Ok(v) => v,
             Err(inner_err) => {
+                if innertube::is_bot_or_auth_err(&inner_err) {
+                    return Err(ProviderError::Api(inner_err));
+                }
                 let player = self
                     .client
                     .query()

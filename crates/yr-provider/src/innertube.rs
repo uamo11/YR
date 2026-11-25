@@ -1080,74 +1080,6 @@ fn pick_best_video_stream(
     })
 }
 
-async fn fetch_visionos_player_json(
-    http: &reqwest::Client,
-    video_id: &str,
-) -> Result<Value, String> {
-    let vd = get_or_fetch_visitor_data(http, false).await?;
-    let body = json!({
-        "videoId": video_id,
-        "context": {
-            "client": {
-                "clientName": "VISIONOS",
-                "clientVersion": "0.1",
-                "osName": "VISION_OS",
-                "osVersion": "1.3",
-                "deviceMake": "Apple",
-                "deviceModel": "RealityDevice14,1",
-                "platform": "MOBILE",
-                "hl": "es",
-                "gl": "US",
-                "visitorData": vd
-            }
-        },
-        "contentCheckOk": true,
-        "racyCheckOk": true
-    });
-    let mut last_err = "VISIONOS player failed".to_string();
-    for endpoint in [
-        "https://www.youtube.com/youtubei/v1/player?prettyPrint=false",
-        "https://music.youtube.com/youtubei/v1/player?prettyPrint=false",
-    ] {
-        let resp = match http
-            .post(endpoint)
-            .timeout(Duration::from_secs(4))
-            .header(CONTENT_TYPE, "application/json")
-            .header(USER_AGENT, VISIONOS_UA)
-            .header("X-Goog-Visitor-Id", &vd)
-            .json(&body)
-            .send()
-            .await
-        {
-            Ok(r) => r,
-            Err(e) => {
-                last_err = e.to_string();
-                continue;
-            }
-        };
-        if !resp.status().is_success() {
-            last_err = format!("HTTP {}", resp.status());
-            continue;
-        }
-        let Ok(val) = resp.json::<Value>().await else {
-            last_err = "Invalid JSON from VISIONOS player".to_string();
-            continue;
-        };
-        let status = val
-            .pointer("/playabilityStatus/status")
-            .and_then(|v| v.as_str())
-            .unwrap_or("UNKNOWN");
-        if status == "OK" && val.get("streamingData").is_some() {
-            return Ok(val);
-        }
-        last_err = format!("VISIONOS playabilityStatus={status}");
-        if status == "LOGIN_REQUIRED" || status == "UNPLAYABLE" {
-            break;
-        }
-    }
-    Err(last_err)
-}
-
 async fn fetch_player_client_json(
     http: &reqwest::Client,
     video_id: &str,
@@ -1159,6 +1091,23 @@ async fn fetch_player_client_json(
     session: Option<&GoogleSession>,
 ) -> Result<Value, String> {
     let client_obj = match client_name {
+        "VISIONOS" => {
+            let mut c = json!({
+                "clientName": "VISIONOS",
+                "clientVersion": client_version,
+                "osName": "VISION_OS",
+                "osVersion": "1.3",
+                "deviceMake": "Apple",
+                "deviceModel": "RealityDevice14,1",
+                "platform": "MOBILE",
+                "hl": "es",
+                "gl": "US"
+            });
+            if let Some(vd) = visitor_data.filter(|s| !s.is_empty()) {
+                c["visitorData"] = Value::String(vd.to_string());
+            }
+            c
+        }
         "IOS" => json!({
             "clientName": client_name,
             "clientVersion": client_version,
@@ -1221,9 +1170,12 @@ async fn fetch_player_client_json(
     let mut req = http
         .post("https://www.youtube.com/youtubei/v1/player?prettyPrint=false")
         .header(CONTENT_TYPE, "application/json")
-        .header(USER_AGENT, ua)
-        .header("X-YouTube-Client-Name", client_id)
-        .header("X-YouTube-Client-Version", client_version);
+        .header(USER_AGENT, ua);
+    if !client_id.is_empty() {
+        req = req
+            .header("X-YouTube-Client-Name", client_id)
+            .header("X-YouTube-Client-Version", client_version);
+    }
     if client_name.starts_with("TVHTML5") {
         req = req
             .header(ORIGIN, "https://www.youtube.com")
@@ -1246,13 +1198,14 @@ async fn fetch_player_client_json(
             }
         }
     }
-    if client_name.starts_with("ANDROID") {
+    if client_name.starts_with("ANDROID") || client_name == "VISIONOS" {
         if let Some(vd) = visitor_data.filter(|s| !s.is_empty()) {
             req = req.header("X-Goog-Visitor-Id", vd);
         }
     }
+    let timeout_secs = if client_name == "VISIONOS" { 4 } else { 5 };
     let resp = req
-        .timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(timeout_secs))
         .json(&body)
         .send()
         .await
@@ -1278,17 +1231,7 @@ async fn fetch_player_client_json(
     Ok(val)
 }
 
-async fn fetch_visionos_stream(
-    http: &reqwest::Client,
-    video_id: &str,
-    quality: AudioQuality,
-) -> Result<StreamInfo, String> {
-    let val = fetch_visionos_player_json(http, video_id).await?;
-    pick_best_audio_stream(video_id, &val, quality)
-        .ok_or_else(|| "No audio stream in VISIONOS response".to_string())
-}
-
-fn is_bot_or_auth_err(msg: &str) -> bool {
+pub fn is_bot_or_auth_err(msg: &str) -> bool {
     let low = msg.to_lowercase();
     low.contains("bot")
         || low.contains("sign in")
@@ -1306,169 +1249,154 @@ fn update_player_err(last_err: &mut String, new_err: String) {
     }
 }
 
-/// Resolves a direct hardware-decodable H.264 MP4, VP9 WebM, or HLS video stream via InnerTube.
+async fn race_player_clients<T: Send + 'static>(
+    http: &reqwest::Client,
+    video_id: &str,
+    specs: &[(&'static str, &'static str, &'static str, &'static str)],
+    visitor_data: Option<&str>,
+    session: Option<&GoogleSession>,
+    last_err: &mut String,
+    picker: impl Fn(&Value, &'static str) -> Option<T> + Send + Sync + 'static,
+) -> Option<T> {
+    let picker = std::sync::Arc::new(picker);
+    let mut set = tokio::task::JoinSet::new();
+    for &(client_name, client_version, ua, client_id) in specs {
+        let http = http.clone();
+        let vid = video_id.to_string();
+        let vd = if matches!(client_name, "IOS" | "TVHTML5") {
+            None
+        } else {
+            visitor_data.map(|s| s.to_string())
+        };
+        let sess = session.cloned();
+        let pick = std::sync::Arc::clone(&picker);
+        set.spawn(async move {
+            let val = fetch_player_client_json(
+                &http,
+                &vid,
+                client_name,
+                client_version,
+                ua,
+                client_id,
+                vd.as_deref(),
+                sess.as_ref(),
+            )
+            .await?;
+            pick(&val, ua).ok_or_else(|| format!("{client_name} had no matching streams"))
+        });
+    }
+    while let Some(res) = set.join_next().await {
+        match res {
+            Ok(Ok(stream)) => return Some(stream),
+            Ok(Err(e)) => update_player_err(last_err, e),
+            Err(_) => {}
+        }
+    }
+    None
+}
+
+async fn resolve_via_innertube_races<T: Send + 'static>(
+    http: &reqwest::Client,
+    video_id: &str,
+    session: Option<&GoogleSession>,
+    default_err: &str,
+    picker: impl Fn(&Value, &'static str) -> Option<T> + Send + Sync + Clone + 'static,
+) -> Result<T, String> {
+    let vd = get_or_fetch_visitor_data(http, false).await.ok();
+    let has_auth = session.is_some_and(|s| s.has_auth_cookies());
+    let mut last_err = default_err.to_string();
+
+    if has_auth {
+        const AUTH_CLIENTS: [(&str, &str, &str, &str); 2] = [
+            ("ANDROID", "20.10.38", ANDROID_PLAYER_UA, "3"),
+            ("TVHTML5", "7.20250319.10.00", TVHTML5_UA, "7"),
+        ];
+        if let Some(hit) = race_player_clients(
+            http,
+            video_id,
+            &AUTH_CLIENTS,
+            vd.as_deref(),
+            session,
+            &mut last_err,
+            picker.clone(),
+        )
+        .await
+        {
+            return Ok(hit);
+        }
+    }
+
+    const PRIMARY_CLIENTS: [(&str, &str, &str, &str); 3] = [
+        ("ANDROID_VR", "1.65.10", ANDROID_VR_UA, "28"),
+        ("IOS", "21.02.1", IOS_PLAYER_UA, "5"),
+        ("VISIONOS", "0.1", VISIONOS_UA, ""),
+    ];
+    if let Some(hit) = race_player_clients(
+        http,
+        video_id,
+        &PRIMARY_CLIENTS,
+        vd.as_deref(),
+        None,
+        &mut last_err,
+        picker.clone(),
+    )
+    .await
+    {
+        return Ok(hit);
+    }
+
+    const BACKUP_CLIENTS: [(&str, &str, &str, &str); 2] = [
+        ("ANDROID", "20.10.38", ANDROID_PLAYER_UA, "3"),
+        ("ANDROID_VR", "1.62.27", ANDROID_VR_LEGACY_UA, "28"),
+    ];
+    if let Some(hit) = race_player_clients(
+        http,
+        video_id,
+        &BACKUP_CLIENTS,
+        vd.as_deref(),
+        None,
+        &mut last_err,
+        picker,
+    )
+    .await
+    {
+        return Ok(hit);
+    }
+
+    Err(last_err)
+}
+
+/// Resolves a direct hardware-decodable H.264 MP4, VP9 WebM, or HLS video stream via concurrent InnerTube racing.
 pub async fn fetch_player_video_stream(
     http: &reqwest::Client,
     video_id: &str,
     max_height: u32,
     session: Option<&GoogleSession>,
 ) -> Result<VideoStreamInfo, String> {
-    let vd = get_or_fetch_visitor_data(http, false).await.ok();
-    let has_auth = session.is_some_and(|s| s.has_auth_cookies());
-    let mut last_err = "No compatible MP4/HLS video stream".to_string();
-
-    if has_auth {
-        for (client_name, client_version, ua, client_id) in [
-            ("ANDROID", "20.10.38", ANDROID_PLAYER_UA, "3"),
-            ("TVHTML5", "7.20250319.10.00", TVHTML5_UA, "7"),
-        ] {
-            match fetch_player_client_json(
-                http,
-                video_id,
-                client_name,
-                client_version,
-                ua,
-                client_id,
-                vd.as_deref(),
-                session,
-            )
-            .await
-            {
-                Ok(val) => {
-                    if let Some(v) = pick_best_video_stream(video_id, &val, max_height, ua) {
-                        return Ok(v);
-                    }
-                }
-                Err(e) => update_player_err(&mut last_err, e),
-            }
-        }
-    }
-
-    match fetch_visionos_player_json(http, video_id).await {
-        Ok(val) => {
-            if let Some(v) = pick_best_video_stream(video_id, &val, max_height, VISIONOS_UA) {
-                return Ok(v);
-            }
-        }
-        Err(e) => update_player_err(&mut last_err, e),
-    }
-
-    let clients = [
-        ("ANDROID_VR", "1.65.10", ANDROID_VR_UA, "28", vd.as_deref()),
-        ("IOS", "21.02.1", IOS_PLAYER_UA, "5", None),
-        ("ANDROID", "20.10.38", ANDROID_PLAYER_UA, "3", vd.as_deref()),
-        (
-            "ANDROID_VR",
-            "1.62.27",
-            ANDROID_VR_LEGACY_UA,
-            "28",
-            vd.as_deref(),
-        ),
-    ];
-    for (client_name, client_version, ua, client_id, c_vd) in clients {
-        match fetch_player_client_json(
-            http,
-            video_id,
-            client_name,
-            client_version,
-            ua,
-            client_id,
-            c_vd,
-            None,
-        )
-        .await
-        {
-            Ok(val) => {
-                if let Some(v) = pick_best_video_stream(video_id, &val, max_height, ua) {
-                    return Ok(v);
-                }
-            }
-            Err(e) => update_player_err(&mut last_err, e),
-        }
-    }
-    Err(last_err)
+    let vid = video_id.to_string();
+    resolve_via_innertube_races(
+        http,
+        video_id,
+        session,
+        "No compatible MP4/HLS video stream",
+        move |val, ua| pick_best_video_stream(&vid, val, max_height, ua),
+    )
+    .await
 }
 
-/// Fast direct stream extraction via authenticated `ANDROID` / `TVHTML5`,
-/// `VISIONOS 0.1`, `ANDROID_VR 1.65.10`/`1.62.27`, `IOS 21.02.1`, and `ANDROID 20.10.38`.
+/// Fast concurrent direct stream extraction via authenticated `ANDROID` / `TVHTML5`
+/// and raced `ANDROID_VR 1.65.10`, `IOS 21.02.1`, `VISIONOS 0.1`, `ANDROID 20.10.38`, `ANDROID_VR 1.62.27`.
 pub async fn fetch_player_stream(
     http: &reqwest::Client,
     video_id: &str,
     quality: AudioQuality,
     session: Option<&GoogleSession>,
 ) -> Result<StreamInfo, String> {
-    let vd = get_or_fetch_visitor_data(http, false).await.ok();
-    let has_auth = session.is_some_and(|s| s.has_auth_cookies());
-    let mut last_err = String::from("No stream returned");
-
-    if has_auth {
-        for (client_name, client_version, ua, client_id) in [
-            ("ANDROID", "20.10.38", ANDROID_PLAYER_UA, "3"),
-            ("TVHTML5", "7.20250319.10.00", TVHTML5_UA, "7"),
-        ] {
-            match fetch_player_client_json(
-                http,
-                video_id,
-                client_name,
-                client_version,
-                ua,
-                client_id,
-                vd.as_deref(),
-                session,
-            )
-            .await
-            {
-                Ok(val) => {
-                    if let Some(best) = pick_best_audio_stream(video_id, &val, quality) {
-                        return Ok(best);
-                    }
-                }
-                Err(e) => update_player_err(&mut last_err, e),
-            }
-        }
-    }
-
-    match fetch_visionos_stream(http, video_id, quality).await {
-        Ok(stream) => return Ok(stream),
-        Err(e) => update_player_err(&mut last_err, e),
-    }
-
-    let clients = [
-        ("ANDROID_VR", "1.65.10", ANDROID_VR_UA, "28", vd.as_deref()),
-        ("IOS", "21.02.1", IOS_PLAYER_UA, "5", None),
-        ("ANDROID", "20.10.38", ANDROID_PLAYER_UA, "3", vd.as_deref()),
-        (
-            "ANDROID_VR",
-            "1.62.27",
-            ANDROID_VR_LEGACY_UA,
-            "28",
-            vd.as_deref(),
-        ),
-    ];
-
-    for (client_name, client_version, ua, client_id, c_vd) in clients {
-        match fetch_player_client_json(
-            http,
-            video_id,
-            client_name,
-            client_version,
-            ua,
-            client_id,
-            c_vd,
-            None,
-        )
-        .await
-        {
-            Ok(val) => {
-                if let Some(best) = pick_best_audio_stream(video_id, &val, quality) {
-                    return Ok(best);
-                }
-            }
-            Err(e) => update_player_err(&mut last_err, e),
-        }
-    }
-
-    Err(last_err)
+    let vid = video_id.to_string();
+    resolve_via_innertube_races(http, video_id, session, "No stream returned", move |val, _| {
+        pick_best_audio_stream(&vid, val, quality)
+    })
+    .await
 }
 
 pub async fn fetch_explore_feed(
@@ -2712,5 +2640,7 @@ mod tests {
         update_player_err(&mut err, "Sign in to confirm you're not a bot".to_string());
         update_player_err(&mut err, "Generic error".to_string());
         assert!(err.contains("not a bot"));
+        assert!(is_bot_or_auth_err("LOGIN_REQUIRED"));
+        assert!(!is_bot_or_auth_err("HTTP 503"));
     }
 }

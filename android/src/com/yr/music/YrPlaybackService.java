@@ -126,6 +126,7 @@ public class YrPlaybackService extends Service {
     private static volatile long sLastSeekStartedElapsedMs = 0L;
     private static volatile long sLastFullscreenToggleElapsedMs = 0L;
     private static Runnable sShowBufferingSpinnerRunnable = null;
+    private static Runnable sPrepareWatchdogRunnable = null;
     private static volatile TextView sVideoSeekBadge = null;
     private static final Handler sUiHandler = new Handler(Looper.getMainLooper());
     private static Runnable sHideSeekBadgeRunnable = null;
@@ -931,6 +932,13 @@ public class YrPlaybackService extends Service {
         }
     }
 
+    private static void cancelPrepareWatchdog() {
+        if (sPrepareWatchdogRunnable != null) {
+            sUiHandler.removeCallbacks(sPrepareWatchdogRunnable);
+            sPrepareWatchdogRunnable = null;
+        }
+    }
+
     private static void maybeSyncSeek(MediaPlayer mp, long targetMs) {
         if (mp == null || !sVideoPrepared) return;
         long now = SystemClock.elapsedRealtime();
@@ -1299,6 +1307,7 @@ public class YrPlaybackService extends Service {
     }
 
     private static void releaseMediaPlayerLocked() {
+        cancelPrepareWatchdog();
         cancelPendingBufferingSpinner();
         sVideoPrepared = false;
         sVideoRenderedFirstFrame = false;
@@ -1395,6 +1404,7 @@ public class YrPlaybackService extends Service {
             });
             mp.setOnPreparedListener(player -> {
                 if (player != sMediaPlayer) return;
+                cancelPrepareWatchdog();
                 sVideoPrepared = true;
                 player.setVolume(0f, 0f);
                 if (sPendingPosMs > 1200) {
@@ -1419,6 +1429,7 @@ public class YrPlaybackService extends Service {
             mp.setOnErrorListener((player, what, extra) -> {
                 Log.w("YrPlaybackService", "Native MediaPlayer error what=" + what + " extra=" + extra);
                 if (player != sMediaPlayer) return true;
+                cancelPrepareWatchdog();
                 cancelPendingBufferingSpinner();
                 if (!sTriedFallback && sVideoFallbackUrl != null && !sVideoFallbackUrl.isEmpty()) {
                     sTriedFallback = true;
@@ -1430,12 +1441,41 @@ public class YrPlaybackService extends Service {
                 return true;
             });
             Map<String, String> headers = new HashMap<String, String>();
+            boolean isWebOrigin = streamUrl.contains("c=MWEB")
+                    || streamUrl.contains("c=WEB")
+                    || streamUrl.contains("pot=");
             if (ua != null && !ua.isEmpty()) {
                 headers.put("User-Agent", ua);
+            } else if (isWebOrigin) {
+                headers.put(
+                        "User-Agent",
+                        "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 "
+                                + "(KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
+                );
+            }
+            if (isWebOrigin) {
+                headers.put("Origin", "https://m.youtube.com");
+                headers.put("Referer", "https://m.youtube.com/");
+                String cookies = mergeYoutubeCookies();
+                if (cookies != null && !cookies.isEmpty()) {
+                    headers.put("Cookie", cookies);
+                }
             }
             mp.setDataSource(act, Uri.parse(streamUrl), headers);
             mp.prepareAsync();
+            sPrepareWatchdogRunnable = () -> {
+                if (mp != sMediaPlayer || sVideoPrepared) return;
+                Log.w("YrPlaybackService", "Native MediaPlayer prepare watchdog timed out (12s)");
+                if (!sTriedFallback && sVideoFallbackUrl != null && !sVideoFallbackUrl.isEmpty()) {
+                    sTriedFallback = true;
+                    prepareNativeMediaPlayer(act, sVideoFallbackUrl, sVideoUserAgent);
+                } else {
+                    handleTerminalVideoError(act);
+                }
+            };
+            sUiHandler.postDelayed(sPrepareWatchdogRunnable, 12000L);
         } catch (Throwable t) {
+            cancelPrepareWatchdog();
             Log.w("YrPlaybackService", "prepareNativeMediaPlayer failed: " + t);
             if (!sTriedFallback && sVideoFallbackUrl != null && !sVideoFallbackUrl.isEmpty()) {
                 sTriedFallback = true;
