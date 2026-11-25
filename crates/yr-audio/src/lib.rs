@@ -1120,14 +1120,16 @@ impl Source for SymphoniaStreamDecoder {
 }
 
 fn stream_client_ua(url: &str) -> Option<&'static str> {
-    if url.contains("c=MWEB") || url.contains("c=WEB") {
+    if url.contains("c=TVHTML5") {
+        Some("Mozilla/5.0 (ChromiumStylePlatform) Cobalt/Version")
+    } else if url.contains("c=MWEB") || url.contains("c=WEB") {
         Some("Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36")
     } else if url.contains("c=VISIONOS") {
         Some("Mozilla/5.0 (Macintosh; Intel Mac OS X 14_6) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15")
     } else if url.contains("c=IOS") {
         Some("com.google.ios.youtube/20.03.02 (iPhone16,2; U; CPU iOS 18_2_1 like Mac OS X;)")
     } else if url.contains("c=ANDROID_VR") {
-        Some("com.google.android.apps.youtube.vr.oculus/1.60.19 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip")
+        Some("com.google.android.apps.youtube.vr.oculus/1.62.27 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip")
     } else if url.contains("c=ANDROID") {
         Some("com.google.android.youtube/20.10.38 (Linux; U; Android 14; Mobile) gzip")
     } else {

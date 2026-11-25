@@ -18,19 +18,7 @@ const PARALLEL_CHUNK_BYTES: u64 = 1024 * 1024;
 const PARALLEL_CONNECTIONS: usize = 4;
 
 fn stream_client_ua(url: &str) -> Option<&'static str> {
-    if url.contains("c=MWEB") || url.contains("c=WEB") {
-        Some("Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36")
-    } else if url.contains("c=VISIONOS") {
-        Some("Mozilla/5.0 (Macintosh; Intel Mac OS X 14_6) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15")
-    } else if url.contains("c=IOS") {
-        Some("com.google.ios.youtube/20.03.02 (iPhone16,2; U; CPU iOS 18_2_1 like Mac OS X;)")
-    } else if url.contains("c=ANDROID_VR") {
-        Some("com.google.android.apps.youtube.vr.oculus/1.60.19 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip")
-    } else if url.contains("c=ANDROID") {
-        Some("com.google.android.youtube/20.10.38 (Linux; U; Android 14; Mobile) gzip")
-    } else {
-        Some("Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36")
-    }
+    Some(yr_provider::innertube::video_stream_user_agent(url))
 }
 
 fn build_download_request(
@@ -442,6 +430,27 @@ impl DownloadManager {
                 self.enqueue(task.track, task.quality).await;
             }
         }
+    }
+
+    /// Re-enqueues up to `max_items` failed download tasks (e.g. after transient anti-bot or network errors).
+    pub async fn retry_failed(self: &Arc<Self>, max_items: usize) -> usize {
+        if max_items == 0 {
+            return 0;
+        }
+        let failed_tasks: Vec<(Track, AudioQuality)> = {
+            let guard = self.tasks.lock().await;
+            guard
+                .values()
+                .filter(|t| matches!(t.status, DownloadStatus::Failed(_)))
+                .take(max_items)
+                .map(|t| (t.track.clone(), t.quality))
+                .collect()
+        };
+        let count = failed_tasks.len();
+        for (track, quality) in failed_tasks {
+            self.enqueue(track, quality).await;
+        }
+        count
     }
 
     pub async fn cancel(&self, track_id: &str) {
@@ -1062,6 +1071,8 @@ mod tests {
         let ua = stream_client_ua("https://rr2.googlevideo.com/videoplayback?c=IOS").unwrap_or("");
         assert!(ua.contains("20.03.02") && ua.contains("iPhone"));
         assert!(!ua.contains("19.29.1"));
+        let tv_ua = stream_client_ua("https://rr2.googlevideo.com/videoplayback?c=TVHTML5").unwrap_or("");
+        assert!(tv_ua.contains("Cobalt"));
     }
 
     #[test]

@@ -737,7 +737,11 @@ impl MusicProvider for YtMusicProvider {
             }
         }
 
-        let inner_err = match innertube::fetch_player_stream(&self.http, track_id, quality).await {
+        let session = self.google_session.lock().await.clone();
+        let inner_err =
+            match innertube::fetch_player_stream(&self.http, track_id, quality, session.as_ref())
+                .await
+            {
             Ok(info) => {
                 if let Ok(mut guard) = self.stream_cache.lock() {
                     if guard.len() > 200 {
@@ -837,7 +841,15 @@ impl MusicProvider for YtMusicProvider {
                 }
             }
         }
-        let info = match innertube::fetch_player_video_stream(&self.http, track_id, max_height).await {
+        let session = self.google_session.lock().await.clone();
+        let info = match innertube::fetch_player_video_stream(
+            &self.http,
+            track_id,
+            max_height,
+            session.as_ref(),
+        )
+        .await
+        {
             Ok(v) => v,
             Err(inner_err) => {
                 let player = self
