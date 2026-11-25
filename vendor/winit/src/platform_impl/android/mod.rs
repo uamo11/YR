@@ -144,6 +144,8 @@ pub struct EventLoop<T: 'static> {
     ignore_volume_keys: bool,
     combining_accent: Option<char>,
     last_scale_factor: Option<f64>,
+    last_window_size: Option<PhysicalSize<u32>>,
+    pending_config_resize_frames: u8,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -194,6 +196,8 @@ impl<T: 'static> EventLoop<T> {
             ignore_volume_keys: attributes.ignore_volume_keys,
             combining_accent: None,
             last_scale_factor: None,
+            last_window_size: None,
+            pending_config_resize_frames: 0,
         })
     }
 
@@ -222,11 +226,13 @@ impl<T: 'static> EventLoop<T> {
                 MainEvent::WindowResized { .. } => {
                     resized = true;
                     pending_redraw = true;
+                    self.pending_config_resize_frames = 6;
                 },
                 MainEvent::RedrawNeeded { .. } => pending_redraw = true,
                 MainEvent::ContentRectChanged { .. } => {
                     resized = true;
                     pending_redraw = true;
+                    self.pending_config_resize_frames = 6;
                 },
                 MainEvent::GainedFocus => {
                     HAS_FOCUS.store(true, Ordering::Relaxed);
@@ -269,6 +275,7 @@ impl<T: 'static> EventLoop<T> {
                     }
                     resized = true;
                     pending_redraw = true;
+                    self.pending_config_resize_frames = 6;
                 },
                 MainEvent::LowMemory => {
                     callback(event::Event::MemoryWarning, self.window_target());
@@ -343,22 +350,34 @@ impl<T: 'static> EventLoop<T> {
         }
 
         if self.running {
+            let live_size = if let Some(native_window) = self.android_app.native_window().as_ref() {
+                let width = native_window.width() as _;
+                let height = native_window.height() as _;
+                PhysicalSize::new(width, height)
+            } else {
+                PhysicalSize::new(0, 0)
+            };
+            if live_size.width > 0 && live_size.height > 0 {
+                if self.last_window_size != Some(live_size) {
+                    self.last_window_size = Some(live_size);
+                    resized = true;
+                    pending_redraw = true;
+                    self.pending_config_resize_frames = 0;
+                }
+            }
             if resized {
-                let size = if let Some(native_window) = self.android_app.native_window().as_ref() {
-                    let width = native_window.width() as _;
-                    let height = native_window.height() as _;
-                    PhysicalSize::new(width, height)
-                } else {
-                    PhysicalSize::new(0, 0)
-                };
                 let event = event::Event::WindowEvent {
                     window_id: window::WindowId(WindowId),
-                    event: event::WindowEvent::Resized(size),
+                    event: event::WindowEvent::Resized(live_size),
                 };
                 callback(event, self.window_target());
             }
 
             pending_redraw |= self.redraw_flag.get_and_reset();
+            if self.pending_config_resize_frames > 0 {
+                self.pending_config_resize_frames -= 1;
+                pending_redraw = true;
+            }
             if pending_redraw {
                 pending_redraw = false;
                 let event = event::Event::WindowEvent {

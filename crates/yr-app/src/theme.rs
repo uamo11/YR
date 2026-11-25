@@ -54,6 +54,10 @@ pub fn apply_ytm_theme(ctx: &egui::Context) {
     style.spacing.scroll.handle_min_length = 24.0;
 
     ctx.set_style(style);
+    ctx.options_mut(|opt| {
+        opt.input_options.max_click_dist = 9.0;
+        opt.input_options.max_click_duration = 0.5;
+    });
 }
 
 fn install_clean_fonts(ctx: &egui::Context) {

@@ -358,6 +358,163 @@ impl SmoothTouchScroller {
     }
 }
 
+/// Disambiguated horizontal kinetic touch scroller (supports optional snapping page stride).
+#[derive(Clone, Debug, Default)]
+pub struct SmoothHorizScroller {
+    pub offset_x: f32,
+    pub vel_x: f32,
+    pub max_offset_x: f32,
+    pub snap_target_x: Option<f32>,
+    pub last_rect: Option<egui::Rect>,
+    pub is_dragging: bool,
+    axis_lock: u8, // 0 = undecided, 1 = horizontal, 2 = vertical yield
+    smoothed_vx: f32,
+}
+
+impl SmoothHorizScroller {
+    pub fn update(
+        &mut self,
+        ui: &egui::Ui,
+        viewport_rect: egui::Rect,
+        page_stride: Option<f32>,
+    ) {
+        let active_rect = if let Some(prev) = self.last_rect {
+            egui::Rect::from_min_size(
+                viewport_rect.min,
+                Vec2::new(viewport_rect.width(), prev.height().max(32.0)),
+            )
+        } else {
+            viewport_rect
+        };
+        let dt = ui.input(|i| i.stable_dt).clamp(0.001, 0.05);
+        let pointer = ui.input(|i| i.pointer.clone());
+        let down = pointer.any_down();
+        let pressed = pointer.any_pressed();
+        let released = pointer.any_released();
+        let origin_opt = pointer.press_origin();
+        let press_in_view = origin_opt.is_some_and(|p| active_rect.contains(p));
+
+        if pressed && press_in_view {
+            self.vel_x = 0.0;
+            self.smoothed_vx = 0.0;
+            self.snap_target_x = None;
+            self.is_dragging = false;
+            self.axis_lock = 0;
+        }
+
+        if down && press_in_view {
+            let (dx, dy) = match (origin_opt, pointer.latest_pos()) {
+                (Some(o), Some(p)) => ((p.x - o.x).abs(), (p.y - o.y).abs()),
+                _ => (0.0, 0.0),
+            };
+
+            if self.axis_lock == 0 && dx.hypot(dy) > 3.5 {
+                if dx > dy * 1.15 {
+                    self.axis_lock = 1;
+                    self.is_dragging = true;
+                } else {
+                    self.axis_lock = 2;
+                    self.is_dragging = false;
+                }
+            }
+
+            if self.axis_lock == 1 {
+                let delta = pointer.delta();
+                if delta.x.abs() > 0.05 {
+                    self.vel_x = 0.0;
+                    self.snap_target_x = None;
+                    let inst_vx = (delta.x / dt).clamp(-5200.0, 5200.0);
+                    self.smoothed_vx = self.smoothed_vx * 0.4 + inst_vx * 0.6;
+                    self.offset_x = (self.offset_x - delta.x).clamp(0.0, self.max_offset_x);
+                    ui.ctx().request_repaint();
+                }
+            }
+        }
+
+        if released {
+            let was_dragging = self.is_dragging && self.axis_lock == 1;
+            self.is_dragging = false;
+            self.axis_lock = 0;
+            if was_dragging {
+                let raw_vx = pointer.velocity().x;
+                let vx = if raw_vx.abs() > 10.0 && self.smoothed_vx.signum() == raw_vx.signum() {
+                    if self.smoothed_vx.abs() > raw_vx.abs() {
+                        self.smoothed_vx
+                    } else {
+                        raw_vx
+                    }
+                } else if raw_vx.abs() > 10.0 {
+                    raw_vx
+                } else {
+                    self.smoothed_vx
+                }
+                .clamp(-5200.0, 5200.0);
+                if let Some(stride) = page_stride.filter(|&s| s > 10.0 && self.max_offset_x > 1.0) {
+                    let target_page = if vx.abs() > 140.0 {
+                        if vx < 0.0 {
+                            (self.offset_x / stride).floor() + 1.0
+                        } else {
+                            (self.offset_x / stride).ceil() - 1.0
+                        }
+                    } else {
+                        (self.offset_x / stride).round()
+                    };
+                    self.snap_target_x =
+                        Some((target_page.max(0.0) * stride).clamp(0.0, self.max_offset_x));
+                    self.vel_x = 0.0;
+                    ui.ctx().request_repaint();
+                } else if vx.abs() > 45.0 {
+                    self.vel_x = vx;
+                }
+            }
+            self.smoothed_vx = 0.0;
+        }
+
+        if !down {
+            if let Some(target) = self.snap_target_x {
+                let diff = target - self.offset_x;
+                if diff.abs() < 0.5 {
+                    self.offset_x = target;
+                    self.snap_target_x = None;
+                } else {
+                    self.offset_x += diff * (1.0 - (-11.0 * dt).exp());
+                    ui.ctx().request_repaint();
+                }
+            } else if self.vel_x.abs() > 8.0 {
+                let decay = (-3.1 * dt).exp();
+                let step_vx = self.vel_x * (1.0 + decay) * 0.5;
+                let next_offset = (self.offset_x - step_vx * dt).clamp(0.0, self.max_offset_x);
+                let hit_bounds = (next_offset - self.offset_x).abs() < 0.05
+                    && (next_offset <= 0.0 || next_offset >= self.max_offset_x);
+                self.offset_x = next_offset;
+                self.vel_x *= decay;
+                if hit_bounds || self.vel_x.abs() <= 8.0 {
+                    self.vel_x = 0.0;
+                } else {
+                    ui.ctx().request_repaint();
+                }
+            } else {
+                self.vel_x = 0.0;
+            }
+        }
+
+        if active_rect.contains(pointer.latest_pos().unwrap_or(Pos2::ZERO)) {
+            let wheel_x = ui.input(|i| i.raw_scroll_delta.x);
+            if wheel_x.abs() > 0.5 {
+                self.vel_x = 0.0;
+                self.snap_target_x = None;
+                self.offset_x = (self.offset_x - wheel_x).clamp(0.0, self.max_offset_x);
+                ui.ctx().request_repaint();
+            }
+        }
+    }
+
+    pub fn sync_bounds(&mut self, content_w: f32, view_w: f32) {
+        self.max_offset_x = (content_w - view_w).max(0.0);
+        self.offset_x = self.offset_x.clamp(0.0, self.max_offset_x);
+    }
+}
+
 pub struct YrApp {
     runtime: tokio::runtime::Runtime,
     provider: Arc<dyn MusicProvider>,
@@ -464,6 +621,7 @@ pub struct YrApp {
     detail_scroller: SmoothTouchScroller,
     queue_scroller: SmoothTouchScroller,
     related_scroller: SmoothTouchScroller,
+    horiz_scrollers: HashMap<egui::Id, SmoothHorizScroller>,
     last_settings_category: SettingsCategory,
     last_video_attached: Option<(String, i32, i32, i32, i32)>,
     video_stream_track_id: Option<String>,
@@ -768,6 +926,7 @@ impl YrApp {
             detail_scroller: SmoothTouchScroller::default(),
             queue_scroller: SmoothTouchScroller::default(),
             related_scroller: SmoothTouchScroller::default(),
+            horiz_scrollers: HashMap::new(),
             last_settings_category: SettingsCategory::Root,
             last_video_attached: None,
             video_stream_track_id: None,
@@ -4410,6 +4569,35 @@ impl YrApp {
         }
     }
 
+    fn show_smooth_hscroll<R>(
+        &mut self,
+        ui: &mut egui::Ui,
+        salt: impl std::hash::Hash + Copy,
+        page_stride: Option<f32>,
+        add_contents: impl FnOnce(&mut Self, &mut egui::Ui) -> R,
+    ) -> (R, f32) {
+        let key = egui::Id::new(salt);
+        let fallback_rect = egui::Rect::from_min_size(
+            ui.cursor().min,
+            Vec2::new(ui.available_width().max(1.0), 180.0),
+        );
+        let offset_x = {
+            let sc = self.horiz_scrollers.entry(key).or_default();
+            sc.update(ui, fallback_rect, page_stride);
+            sc.offset_x
+        };
+        let scroll_out = egui::ScrollArea::horizontal()
+            .id_salt(salt)
+            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+            .horizontal_scroll_offset(offset_x)
+            .drag_to_scroll(false)
+            .show(ui, |ui| add_contents(self, ui));
+        let sc = self.horiz_scrollers.entry(key).or_default();
+        sc.last_rect = Some(scroll_out.inner_rect);
+        sc.sync_bounds(scroll_out.content_size.x, scroll_out.inner_rect.width());
+        (scroll_out.inner, sc.offset_x)
+    }
+
     fn render_quick_picks_4row_shelf(
         &mut self,
         ui: &mut egui::Ui,
@@ -4433,38 +4621,35 @@ impl YrApp {
         let all_tracks = &shelf.tracks;
         let all_cards = &shelf.cards;
 
-        egui::ScrollArea::horizontal()
-            .id_salt(salt)
-            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 10.0;
-                    for (chunk_idx, chunk) in all_tracks.chunks(4).enumerate() {
-                        ui.push_id((salt, "chunk", chunk_idx), |ui| {
-                            ui.vertical(|ui| {
-                                ui.set_width(col_width);
-                                ui.spacing_mut().item_spacing.y = 2.0;
-                                for (row_i, track) in chunk.iter().enumerate() {
-                                    let abs_idx = chunk_idx * 4 + row_i;
-                                    let subtitle = all_cards
-                                        .get(abs_idx)
-                                        .map(|c| c.subtitle.as_str())
-                                        .unwrap_or(&track.artist);
-                                    self.render_compact_ytm_row(
-                                        ui,
-                                        ctx,
-                                        track,
-                                        subtitle,
-                                        all_tracks,
-                                        abs_idx,
-                                        col_width,
-                                    );
-                                }
-                            });
+        self.show_smooth_hscroll(ui, salt, None, |this, ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 10.0;
+                for (chunk_idx, chunk) in all_tracks.chunks(4).enumerate() {
+                    ui.push_id((salt, "chunk", chunk_idx), |ui| {
+                        ui.vertical(|ui| {
+                            ui.set_width(col_width);
+                            ui.spacing_mut().item_spacing.y = 2.0;
+                            for (row_i, track) in chunk.iter().enumerate() {
+                                let abs_idx = chunk_idx * 4 + row_i;
+                                let subtitle = all_cards
+                                    .get(abs_idx)
+                                    .map(|c| c.subtitle.as_str())
+                                    .unwrap_or(&track.artist);
+                                this.render_compact_ytm_row(
+                                    ui,
+                                    ctx,
+                                    track,
+                                    subtitle,
+                                    all_tracks,
+                                    abs_idx,
+                                    col_width,
+                                );
+                            }
                         });
-                    }
-                });
+                    });
+                }
             });
+        });
     }
 
     fn render_speed_dial_grid_shelf(
@@ -4635,19 +4820,16 @@ impl YrApp {
                 draw_page(ui, 0, page, self);
             }
         } else {
-            let hscroll = egui::ScrollArea::horizontal()
-                .id_salt(salt)
-                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
-                .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = 12.0;
-                        for (page_idx, page) in pages.iter().enumerate() {
-                            draw_page(ui, page_idx, page, self);
-                        }
-                    });
-                });
             let step = (page_width + 12.0).max(1.0);
-            active_page = ((hscroll.state.offset.x / step).round() as usize)
+            let (_, offset_x) = self.show_smooth_hscroll(ui, salt, Some(step), |this, ui| {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 12.0;
+                    for (page_idx, page) in pages.iter().enumerate() {
+                        draw_page(ui, page_idx, page, this);
+                    }
+                });
+            });
+            active_page = ((offset_x / step).round() as usize)
                 .min(pages.len().saturating_sub(1));
         }
 
@@ -4698,62 +4880,59 @@ impl YrApp {
 
         let card_w = 148.0_f32;
         let sibling_tracks = &shelf.tracks;
-        egui::ScrollArea::horizontal()
-            .id_salt(salt)
-            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 12.0;
-                    for (cidx, card) in shelf.cards.iter().take(16).enumerate() {
-                        let card_h = card_w + 46.0;
-                        let (_, card_rect) = ui.allocate_space(Vec2::new(card_w, card_h));
-                        let card_id = ui.make_persistent_id((salt, "carousel_card", cidx, &card.title));
-                        let card_resp = ui.interact(card_rect, card_id, Sense::click());
-                        if ui.is_rect_visible(card_rect) {
-                            let thumb_rect = Rect::from_min_size(card_rect.min, Vec2::splat(card_w));
-                            ui.painter().rect_filled(thumb_rect, CornerRadius::same(8), BG_SURFACE);
-                            let note_rect = egui::Rect::from_center_size(
-                                thumb_rect.center(),
-                                Vec2::splat((card_w * 0.44).clamp(18.0, 44.0)),
+        self.show_smooth_hscroll(ui, salt, None, |this, ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 12.0;
+                for (cidx, card) in shelf.cards.iter().take(16).enumerate() {
+                    let card_h = card_w + 46.0;
+                    let (_, card_rect) = ui.allocate_space(Vec2::new(card_w, card_h));
+                    let card_id = ui.make_persistent_id((salt, "carousel_card", cidx, &card.title));
+                    let card_resp = ui.interact(card_rect, card_id, Sense::click());
+                    if ui.is_rect_visible(card_rect) {
+                        let thumb_rect = Rect::from_min_size(card_rect.min, Vec2::splat(card_w));
+                        ui.painter().rect_filled(thumb_rect, CornerRadius::same(8), BG_SURFACE);
+                        let note_rect = egui::Rect::from_center_size(
+                            thumb_rect.center(),
+                            Vec2::splat((card_w * 0.44).clamp(18.0, 44.0)),
+                        );
+                        icons::draw_icon(
+                            ui.painter(),
+                            note_rect,
+                            icons::Icon::MusicNote,
+                            Color32::from_white_alpha(95),
+                        );
+                        if let Some(url) = card.thumbnail_url.as_deref() {
+                            let _ = paint_ready_image(
+                                ui,
+                                thumb_rect,
+                                tracked_thumb_uri(url, 224),
+                                Vec2::splat(card_w),
+                                CornerRadius::same(8),
                             );
-                            icons::draw_icon(
-                                ui.painter(),
-                                note_rect,
-                                icons::Icon::MusicNote,
-                                Color32::from_white_alpha(95),
-                            );
-                            if let Some(url) = card.thumbnail_url.as_deref() {
-                                let _ = paint_ready_image(
-                                    ui,
-                                    thumb_rect,
-                                    tracked_thumb_uri(url, 224),
-                                    Vec2::splat(card_w),
-                                    CornerRadius::same(8),
-                                );
-                            }
-                            let title_job = clamped_layout_job(&card.title, 13.5, TEXT_PRIMARY, card_w, 1);
-                            let g_title = ui.painter().layout_job(title_job);
-                            ui.painter().galley(
-                                Pos2::new(card_rect.left(), thumb_rect.bottom() + 4.0),
-                                g_title,
-                                TEXT_PRIMARY,
-                            );
-                            if !card.subtitle.is_empty() {
-                                let sub_job = clamped_layout_job(&card.subtitle, 11.5, TEXT_SECONDARY, card_w, 1);
-                                let g_sub = ui.painter().layout_job(sub_job);
-                                ui.painter().galley(
-                                    Pos2::new(card_rect.left(), thumb_rect.bottom() + 22.0),
-                                    g_sub,
-                                    TEXT_SECONDARY,
-                                );
-                            }
                         }
-                        if card_resp.clicked() {
-                            self.activate_shelf_card(card, sibling_tracks, ctx);
+                        let title_job = clamped_layout_job(&card.title, 13.5, TEXT_PRIMARY, card_w, 1);
+                        let g_title = ui.painter().layout_job(title_job);
+                        ui.painter().galley(
+                            Pos2::new(card_rect.left(), thumb_rect.bottom() + 4.0),
+                            g_title,
+                            TEXT_PRIMARY,
+                        );
+                        if !card.subtitle.is_empty() {
+                            let sub_job = clamped_layout_job(&card.subtitle, 11.5, TEXT_SECONDARY, card_w, 1);
+                            let g_sub = ui.painter().layout_job(sub_job);
+                            ui.painter().galley(
+                                Pos2::new(card_rect.left(), thumb_rect.bottom() + 22.0),
+                                g_sub,
+                                TEXT_SECONDARY,
+                            );
                         }
                     }
-                });
+                    if card_resp.clicked() {
+                        this.activate_shelf_card(card, sibling_tracks, ctx);
+                    }
+                }
             });
+        });
     }
 
     fn synthesize_speed_dial_cards(&self) -> Vec<HomeShelfCard> {
@@ -5106,47 +5285,42 @@ impl YrApp {
                 );
                 let bleed_rect = egui::Rect::from_x_y_ranges(screen_x, row_rect.y_range());
                 let mut bleed_ui = ui.new_child(egui::UiBuilder::new().max_rect(bleed_rect));
-                egui::ScrollArea::horizontal()
-                    .id_salt("home_moods")
-                    .scroll_bar_visibility(
-                        egui::scroll_area::ScrollBarVisibility::AlwaysHidden,
-                    )
-                    .show(&mut bleed_ui, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.spacing_mut().item_spacing.x = 8.0;
-                            ui.add_space(12.0);
-                            for mood in moods {
-                                let is_selected =
-                                    self.active_mood_title.as_deref() == Some(mood.title.as_str());
-                                let btn = egui::Button::new(
-                                    RichText::new(&mood.title).size(13.0).color(if is_selected {
-                                        Color32::BLACK
-                                    } else {
-                                        TEXT_PRIMARY
-                                    }),
-                                )
-                                .fill(if is_selected {
-                                    Color32::WHITE
+                self.show_smooth_hscroll(&mut bleed_ui, "home_moods", None, |this, ui| {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 8.0;
+                        ui.add_space(12.0);
+                        for mood in moods {
+                            let is_selected =
+                                this.active_mood_title.as_deref() == Some(mood.title.as_str());
+                            let btn = egui::Button::new(
+                                RichText::new(&mood.title).size(13.0).color(if is_selected {
+                                    Color32::BLACK
                                 } else {
-                                    Color32::from_rgb(32, 32, 35)
-                                })
-                                .stroke(Stroke::new(1.0_f32, Color32::from_rgb(55, 55, 60)))
-                                .corner_radius(CornerRadius::same(8));
-                                if ui.add(btn).clicked() {
-                                    if is_selected {
-                                        self.active_mood_title = None;
-                                        self.refresh_home(ctx);
-                                    } else if mood.params.is_some() {
-                                        self.active_mood_title = Some(mood.title);
-                                        self.refresh_home_with_params(mood.params, ctx);
-                                    } else {
-                                        self.open_mood(mood.id, mood.title, ctx);
-                                    }
+                                    TEXT_PRIMARY
+                                }),
+                            )
+                            .fill(if is_selected {
+                                Color32::WHITE
+                            } else {
+                                Color32::from_rgb(32, 32, 35)
+                            })
+                            .stroke(Stroke::new(1.0_f32, Color32::from_rgb(55, 55, 60)))
+                            .corner_radius(CornerRadius::same(8));
+                            if ui.add(btn).clicked() {
+                                if is_selected {
+                                    this.active_mood_title = None;
+                                    this.refresh_home(ctx);
+                                } else if mood.params.is_some() {
+                                    this.active_mood_title = Some(mood.title);
+                                    this.refresh_home_with_params(mood.params, ctx);
+                                } else {
+                                    this.open_mood(mood.id, mood.title, ctx);
                                 }
                             }
-                            ui.add_space(12.0);
-                        });
+                        }
+                        ui.add_space(12.0);
                     });
+                });
                 ui.add_space(6.0);
             }
 
@@ -10309,18 +10483,13 @@ impl YrApp {
         let bleed_rect =
             egui::Rect::from_x_y_ranges(bleed_x_range, pills_row_rect.y_range());
         let mut bleed_ui = ui.new_child(egui::UiBuilder::new().max_rect(bleed_rect));
-        egui::ScrollArea::horizontal()
-            .id_salt("np_action_pills")
-            .scroll_bar_visibility(
-                egui::scroll_area::ScrollBarVisibility::AlwaysHidden,
-            )
-            .show(&mut bleed_ui, |ui| {
+        self.show_smooth_hscroll(&mut bleed_ui, "np_action_pills", None, |this, ui| {
             ui.horizontal(|ui| {
                 if pill_lead_pad > 0.0 {
                     ui.add_space(pill_lead_pad);
                 }
-                    let liked = self.store.is_liked(&track.id);
-                    let disliked = self.store.is_disliked(&track.id);
+                    let liked = this.store.is_liked(&track.id);
+                    let disliked = this.store.is_disliked(&track.id);
                     egui::Frame::new()
                         .fill(pill_bg)
                         .corner_radius(CornerRadius::same(18))
@@ -10353,9 +10522,9 @@ impl YrApp {
                                 if like_icon_resp.clicked()
                                     || like_label_resp.clicked()
                                 {
-                                    self.store.toggle_like(track.clone());
-                                    if self.store.is_liked(&track.id) {
-                                        self.maybe_smart_download_track(track, false, false);
+                                    this.store.toggle_like(track.clone());
+                                    if this.store.is_liked(&track.id) {
+                                        this.maybe_smart_download_track(track, false, false);
                                     }
                                 }
                                 ui.label(
@@ -10375,16 +10544,16 @@ impl YrApp {
                                 .clicked()
                                 {
                                     let now_disliked =
-                                        self.store.toggle_dislike(&track.id);
+                                        this.store.toggle_dislike(&track.id);
                                     if now_disliked
-                                        && self
+                                        && this
                                             .queue
                                             .lock()
                                             .unwrap()
                                             .next_track(true)
                                             .is_some()
                                     {
-                                        self.play_current_queue_track(ctx);
+                                        this.play_current_queue_track(ctx);
                                     }
                                 }
                             });
@@ -10400,12 +10569,12 @@ impl YrApp {
                     )
                     .clicked()
                     {
-                        self.show_lyrics = true;
-                        self.show_queue = false;
-                        self.show_related = false;
-                        self.lyrics_last_scrolled_idx = None;
-                        if self.lyrics_track_id.as_deref() != Some(&track.id) {
-                            self.load_lyrics(track.clone(), ctx);
+                        this.show_lyrics = true;
+                        this.show_queue = false;
+                        this.show_related = false;
+                        this.lyrics_last_scrolled_idx = None;
+                        if this.lyrics_track_id.as_deref() != Some(&track.id) {
+                            this.load_lyrics(track.clone(), ctx);
                         }
                     }
 
@@ -10419,7 +10588,7 @@ impl YrApp {
                     )
                     .clicked()
                     {
-                        self.playlist_picker_track = Some(track.clone());
+                        this.playlist_picker_track = Some(track.clone());
                     }
 
                     ui.add_space(6.0);
@@ -10457,7 +10626,7 @@ impl YrApp {
                     .clicked()
                         && !is_offline
                     {
-                        self.enqueue_download(track.clone(), ctx);
+                        this.enqueue_download(track.clone(), ctx);
                     }
 
                     ui.add_space(6.0);
@@ -10470,7 +10639,7 @@ impl YrApp {
                     )
                     .clicked()
                     {
-                        self.start_radio(track.id.clone(), ctx);
+                        this.start_radio(track.id.clone(), ctx);
                     }
 
                     ui.add_space(6.0);
@@ -10503,17 +10672,17 @@ impl YrApp {
                             .position(|&p| (p - spd).abs() < 0.05)
                             .unwrap_or(1);
                         let next = presets[(cur_idx + 1) % presets.len()];
-                        self.audio.set_speed(next);
-                        if self.is_video_mode {
+                        this.audio.set_speed(next);
+                        if this.is_video_mode {
                             crate::android_media::sync_native_video(
                                 snap.status == PlaybackStatus::Playing,
                                 (snap.position_secs * 1000.0).max(0.0) as u64,
                                 next,
                             );
                         }
-                        self.store.data.config.playback_speed = next;
-                        let _ = self.store.save();
-                        self.set_banner(format!("Velocidad: {next}x"));
+                        this.store.data.config.playback_speed = next;
+                        let _ = this.store.save();
+                        this.set_banner(format!("Velocidad: {next}x"));
                     }
 
                     ui.add_space(6.0);
@@ -10529,7 +10698,7 @@ impl YrApp {
                     )
                     .clicked()
                     {
-                        self.show_sleep_timer_sheet = true;
+                        this.show_sleep_timer_sheet = true;
                     }
                     if pill_lead_pad > 0.0 {
                         ui.add_space(pill_lead_pad);

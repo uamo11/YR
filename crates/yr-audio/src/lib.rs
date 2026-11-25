@@ -75,11 +75,17 @@ enum AudioCommand {
     SetEqualizer(yr_core::EqualizerConfig),
 }
 
+struct StreamAbortHandle {
+    cancel: Arc<AtomicBool>,
+    state: Arc<(Mutex<StreamState>, Condvar)>,
+}
+
 /// Pure-Rust audio playback engine running on a dedicated OS thread.
 #[derive(Clone)]
 pub struct AudioEngine {
     tx: mpsc::Sender<AudioCommand>,
     snapshot: Arc<Mutex<AudioSnapshot>>,
+    abort_slot: Arc<Mutex<Option<StreamAbortHandle>>>,
 }
 
 impl AudioEngine {
@@ -96,13 +102,33 @@ impl AudioEngine {
             ..Default::default()
         }));
         let snap_clone = Arc::clone(&snapshot);
+        let abort_slot = Arc::new(Mutex::new(None));
+        let abort_clone = Arc::clone(&abort_slot);
 
         std::thread::Builder::new()
             .name("yr-audio-thread".to_string())
-            .spawn(move || audio_thread_main(rx, snap_clone, cache_dir, runtime, initial_eq))
+            .spawn(move || {
+                audio_thread_main(rx, snap_clone, cache_dir, runtime, initial_eq, abort_clone)
+            })
             .expect("failed to spawn yr-audio-thread");
 
-        Self { tx, snapshot }
+        Self {
+            tx,
+            snapshot,
+            abort_slot,
+        }
+    }
+
+    fn abort_inflight(&self) {
+        if let Ok(mut slot) = self.abort_slot.lock() {
+            if let Some(h) = slot.take() {
+                h.cancel.store(true, Ordering::SeqCst);
+                if let Ok(mut g) = h.state.0.lock() {
+                    g.finished = true;
+                }
+                h.state.1.notify_all();
+            }
+        }
     }
 
     pub fn snapshot(&self) -> AudioSnapshot {
@@ -113,6 +139,7 @@ impl AudioEngine {
     }
 
     pub fn play_file(&self, path: PathBuf, duration_hint: Option<u64>) {
+        self.abort_inflight();
         let _ = self.tx.send(AudioCommand::PlayFile {
             path,
             duration_hint,
@@ -120,6 +147,7 @@ impl AudioEngine {
     }
 
     pub fn play_url(&self, url: String, track_id: String, duration_hint: Option<u64>) {
+        self.abort_inflight();
         let _ = self.tx.send(AudioCommand::PlayUrl {
             url,
             track_id,
@@ -136,6 +164,7 @@ impl AudioEngine {
     }
 
     pub fn stop(&self) {
+        self.abort_inflight();
         let _ = self.tx.send(AudioCommand::Stop);
     }
 
@@ -200,6 +229,7 @@ fn audio_thread_main(
     cache_dir: PathBuf,
     runtime: tokio::runtime::Handle,
     initial_eq: yr_core::EqualizerConfig,
+    abort_slot: Arc<Mutex<Option<StreamAbortHandle>>>,
 ) {
     prune_stream_cache(&cache_dir, 128 * 1024 * 1024, 64 * 1024 * 1024);
     let eq_processor = Arc::new(Mutex::new(EqualizerProcessor::new(initial_eq)));
@@ -213,6 +243,8 @@ fn audio_thread_main(
     let mut active_playback = false;
     let mut base_pos_secs = 0.0_f64;
     let mut play_started_at: Option<Instant> = None;
+    let mut pending_cmds: std::collections::VecDeque<AudioCommand> =
+        std::collections::VecDeque::new();
 
     fn ensure_output(
         out: &mut Option<(OutputStream, OutputStreamHandle)>,
@@ -230,8 +262,31 @@ fn audio_thread_main(
     }
 
     loop {
-        match rx.recv_timeout(Duration::from_millis(120)) {
-            Ok(cmd) => match cmd {
+        if pending_cmds.is_empty() {
+            match rx.recv_timeout(Duration::from_millis(120)) {
+                Ok(cmd) => pending_cmds.push_back(cmd),
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+        while let Ok(c) = rx.try_recv() {
+            pending_cmds.push_back(c);
+        }
+
+        if let Some(cmd) = pending_cmds.pop_front() {
+            if matches!(
+                cmd,
+                AudioCommand::PlayFile { .. } | AudioCommand::PlayUrl { .. }
+            ) && pending_cmds.iter().any(|c| {
+                matches!(
+                    c,
+                    AudioCommand::PlayFile { .. } | AudioCommand::PlayUrl { .. } | AudioCommand::Stop
+                )
+            }) {
+                // Skip superseded playback commands during rapid next/prev taps.
+                continue;
+            }
+            match cmd {
                 AudioCommand::PlayFile {
                     path,
                     duration_hint,
@@ -352,6 +407,7 @@ fn audio_thread_main(
                     let cached_ready = std::fs::metadata(&final_cache)
                         .map(|m| m.len() > 4096)
                         .unwrap_or(false);
+                    let mut stream_cancel: Option<Arc<AtomicBool>> = None;
                     let decoder_res = if cached_ready {
                         File::open(&final_cache)
                             .map_err(|e| e.to_string())
@@ -366,13 +422,15 @@ fn audio_thread_main(
                     } else {
                         let cancel = Arc::new(AtomicBool::new(false));
                         active_cancel = Some(Arc::clone(&cancel));
+                        stream_cancel = Some(Arc::clone(&cancel));
                         let tmp_file = cache_dir.join(format!("stream_{track_id}.tmp"));
-                        open_progressive_stream(
+                        let res = open_progressive_stream(
                             &runtime,
                             &url,
                             tmp_file,
                             Some(final_cache),
                             cancel,
+                            &abort_slot,
                         )
                         .and_then(|reader| {
                             let probed_flag = Arc::clone(&reader.probed);
@@ -382,7 +440,11 @@ fn audio_thread_main(
                                 Some(probed_flag),
                                 Arc::clone(&eq_processor),
                             )
-                        })
+                        });
+                        if let Ok(mut slot) = abort_slot.lock() {
+                            *slot = None;
+                        }
+                        res
                     };
 
                     match decoder_res {
@@ -415,7 +477,12 @@ fn audio_thread_main(
                             }
                         }
                         Err(e) => {
-                            set_status(&snapshot, PlaybackStatus::Error(e));
+                            let aborted = stream_cancel
+                                .as_ref()
+                                .is_some_and(|c| c.load(Ordering::SeqCst));
+                            if !aborted {
+                                set_status(&snapshot, PlaybackStatus::Error(e));
+                            }
                         }
                     }
                 }
@@ -525,9 +592,7 @@ fn audio_thread_main(
                         ep.set_config(eq_cfg);
                     }
                 }
-            },
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            }
         }
 
         // Update position and detect natural track end.
@@ -597,9 +662,17 @@ impl Read for ProgressiveFileReader {
             if let Some(err) = &guard.error {
                 return Err(io::Error::other(err.clone()));
             }
-            guard = cvar
-                .wait(guard)
+            let (g, wait_res) = cvar
+                .wait_timeout(guard, Duration::from_secs(12))
                 .map_err(|_| io::Error::other("poisoned"))?;
+            guard = g;
+            if wait_res.timed_out()
+                && self.pos >= guard.written
+                && !guard.finished
+                && !self.cancel.load(Ordering::Relaxed)
+            {
+                return Err(io::Error::new(io::ErrorKind::TimedOut, "stream stalled"));
+            }
         }
 
         if self.pos >= guard.written && guard.finished {
@@ -623,12 +696,22 @@ impl Seek for ProgressiveFileReader {
             SeekFrom::End(delta) => {
                 let mut guard = lock.lock().map_err(|_| io::Error::other("poisoned"))?;
                 while guard.total.is_none() && !guard.finished {
+                    if self.cancel.load(Ordering::Relaxed) {
+                        return Err(io::Error::new(
+                            io::ErrorKind::Interrupted,
+                            "cancelled",
+                        ));
+                    }
                     if let Some(err) = &guard.error {
                         return Err(io::Error::other(err.clone()));
                     }
-                    guard = cvar
-                        .wait(guard)
+                    let (g, wait_res) = cvar
+                        .wait_timeout(guard, Duration::from_secs(12))
                         .map_err(|_| io::Error::other("poisoned"))?;
+                    guard = g;
+                    if wait_res.timed_out() && guard.total.is_none() && !guard.finished {
+                        return Err(io::Error::new(io::ErrorKind::TimedOut, "stream stalled"));
+                    }
                 }
                 let end = guard.total.unwrap_or(guard.written) as i64;
                 end + delta
@@ -1163,6 +1246,7 @@ fn open_progressive_stream(
     path: PathBuf,
     final_cache: Option<PathBuf>,
     cancel: Arc<AtomicBool>,
+    abort_slot: &Arc<Mutex<Option<StreamAbortHandle>>>,
 ) -> Result<ProgressiveFileReader, String> {
     let mut writer = OpenOptions::new()
         .create(true)
@@ -1181,6 +1265,12 @@ fn open_progressive_stream(
         }),
         Condvar::new(),
     ));
+    if let Ok(mut slot) = abort_slot.lock() {
+        *slot = Some(StreamAbortHandle {
+            cancel: Arc::clone(&cancel),
+            state: Arc::clone(&state),
+        });
+    }
 
     let state_bg = Arc::clone(&state);
     let url_owned = url.to_string();
@@ -1188,6 +1278,7 @@ fn open_progressive_stream(
     let path_bg = path.clone();
 
     runtime.spawn(async move {
+        const INITIAL_CHUNK_SIZE: u64 = 131_072;
         const CHUNK_SIZE: u64 = 524_288;
         let client = shared_http_client();
         let build_req = |range_val: Option<String>| stream_request_builder(client, &url_owned, range_val);
@@ -1202,7 +1293,7 @@ fn open_progressive_stream(
             cvar.notify_all();
         };
 
-        let first_resp = match build_req(Some(format!("bytes=0-{}", CHUNK_SIZE - 1)))
+        let first_resp = match build_req(Some(format!("bytes=0-{}", INITIAL_CHUNK_SIZE - 1)))
             .send()
             .await
         {
@@ -1333,8 +1424,11 @@ fn open_progressive_stream(
     {
         let (lock, cvar) = &*state;
         let mut guard = lock.lock().map_err(|_| "poisoned".to_string())?;
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while guard.written < 16_384 && !guard.finished {
+        let deadline = Instant::now() + Duration::from_secs(8);
+        while guard.written < 8_192 && !guard.finished {
+            if cancel.load(Ordering::SeqCst) {
+                return Err("cancelled".to_string());
+            }
             if let Some(err) = &guard.error {
                 return Err(err.clone());
             }
@@ -1343,9 +1437,12 @@ fn open_progressive_stream(
                 break;
             }
             let (g, _) = cvar
-                .wait_timeout(guard, rem)
+                .wait_timeout(guard, rem.min(Duration::from_millis(250)))
                 .map_err(|_| "poisoned".to_string())?;
             guard = g;
+        }
+        if cancel.load(Ordering::SeqCst) {
+            return Err("cancelled".to_string());
         }
         if let Some(err) = &guard.error {
             return Err(err.clone());

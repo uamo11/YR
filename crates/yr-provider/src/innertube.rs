@@ -186,6 +186,7 @@ async fn post_innertube(
     }
 
     let resp = req
+        .timeout(Duration::from_secs(5))
         .json(&body)
         .send()
         .await
@@ -1083,63 +1084,65 @@ async fn fetch_visionos_player_json(
     http: &reqwest::Client,
     video_id: &str,
 ) -> Result<Value, String> {
+    let vd = get_or_fetch_visitor_data(http, false).await?;
+    let body = json!({
+        "videoId": video_id,
+        "context": {
+            "client": {
+                "clientName": "VISIONOS",
+                "clientVersion": "0.1",
+                "osName": "VISION_OS",
+                "osVersion": "1.3",
+                "deviceMake": "Apple",
+                "deviceModel": "RealityDevice14,1",
+                "platform": "MOBILE",
+                "hl": "es",
+                "gl": "US",
+                "visitorData": vd
+            }
+        },
+        "contentCheckOk": true,
+        "racyCheckOk": true
+    });
     let mut last_err = "VISIONOS player failed".to_string();
-    for attempt in 0..2 {
-        let vd = get_or_fetch_visitor_data(http, attempt > 0).await?;
-        let body = json!({
-            "videoId": video_id,
-            "context": {
-                "client": {
-                    "clientName": "VISIONOS",
-                    "clientVersion": "0.1",
-                    "osName": "VISION_OS",
-                    "osVersion": "1.3",
-                    "deviceMake": "Apple",
-                    "deviceModel": "RealityDevice14,1",
-                    "platform": "MOBILE",
-                    "hl": "es",
-                    "gl": "US",
-                    "visitorData": vd
-                }
-            },
-            "contentCheckOk": true,
-            "racyCheckOk": true
-        });
-        for endpoint in [
-            "https://music.youtube.com/youtubei/v1/player?prettyPrint=false",
-            "https://www.youtube.com/youtubei/v1/player?prettyPrint=false",
-        ] {
-            let resp = match http
-                .post(endpoint)
-                .header(CONTENT_TYPE, "application/json")
-                .header(USER_AGENT, VISIONOS_UA)
-                .header("X-Goog-Visitor-Id", &vd)
-                .json(&body)
-                .send()
-                .await
-            {
-                Ok(r) => r,
-                Err(e) => {
-                    last_err = e.to_string();
-                    continue;
-                }
-            };
-            if !resp.status().is_success() {
-                last_err = format!("HTTP {}", resp.status());
+    for endpoint in [
+        "https://www.youtube.com/youtubei/v1/player?prettyPrint=false",
+        "https://music.youtube.com/youtubei/v1/player?prettyPrint=false",
+    ] {
+        let resp = match http
+            .post(endpoint)
+            .timeout(Duration::from_secs(4))
+            .header(CONTENT_TYPE, "application/json")
+            .header(USER_AGENT, VISIONOS_UA)
+            .header("X-Goog-Visitor-Id", &vd)
+            .json(&body)
+            .send()
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                last_err = e.to_string();
                 continue;
             }
-            let Ok(val) = resp.json::<Value>().await else {
-                last_err = "Invalid JSON from VISIONOS player".to_string();
-                continue;
-            };
-            let status = val
-                .pointer("/playabilityStatus/status")
-                .and_then(|v| v.as_str())
-                .unwrap_or("UNKNOWN");
-            if status == "OK" && val.get("streamingData").is_some() {
-                return Ok(val);
-            }
-            last_err = format!("VISIONOS playabilityStatus={status}");
+        };
+        if !resp.status().is_success() {
+            last_err = format!("HTTP {}", resp.status());
+            continue;
+        }
+        let Ok(val) = resp.json::<Value>().await else {
+            last_err = "Invalid JSON from VISIONOS player".to_string();
+            continue;
+        };
+        let status = val
+            .pointer("/playabilityStatus/status")
+            .and_then(|v| v.as_str())
+            .unwrap_or("UNKNOWN");
+        if status == "OK" && val.get("streamingData").is_some() {
+            return Ok(val);
+        }
+        last_err = format!("VISIONOS playabilityStatus={status}");
+        if status == "LOGIN_REQUIRED" || status == "UNPLAYABLE" {
+            break;
         }
     }
     Err(last_err)
@@ -1270,6 +1273,7 @@ async fn fetch_player_client_json(
         }
     }
     let resp = req
+        .timeout(Duration::from_secs(5))
         .json(&body)
         .send()
         .await
