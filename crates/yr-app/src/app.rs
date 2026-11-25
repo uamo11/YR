@@ -147,11 +147,25 @@ enum DetailView {
 enum AppEvent {
     HomeLoaded(Result<HomeFeed, String>),
     ExploreLoaded(Result<ExploreFeed, String>),
-    SearchLoaded(Result<SearchResults, String>),
-    AlbumLoaded(Result<AlbumDetail, String>),
-    PlaylistLoaded(Result<PlaylistDetail, String>),
-    ArtistLoaded(Result<ArtistDetail, String>),
+    SearchLoaded {
+        seq: u64,
+        query: String,
+        result: Result<SearchResults, String>,
+    },
+    AlbumLoaded {
+        seq: u64,
+        result: Result<AlbumDetail, String>,
+    },
+    PlaylistLoaded {
+        seq: u64,
+        result: Result<PlaylistDetail, String>,
+    },
+    ArtistLoaded {
+        seq: u64,
+        result: Result<ArtistDetail, String>,
+    },
     MoodLoaded {
+        seq: u64,
         title: String,
         result: Result<Vec<PlaylistSummary>, String>,
     },
@@ -702,6 +716,7 @@ pub struct YrApp {
     search_filter: SearchFilter,
     search_results: SearchResults,
     search_loading: bool,
+    search_req_seq: u64,
     search_suggestions: Vec<String>,
     last_search_input_at: Option<Instant>,
     suggestions_last_query: String,
@@ -715,6 +730,7 @@ pub struct YrApp {
     detail_view: DetailView,
     detail_filter_query: String,
     detail_loading: bool,
+    detail_req_seq: u64,
 
     downloads: Vec<DownloadTask>,
     total_downloaded_bytes: u64,
@@ -804,6 +820,7 @@ pub struct YrApp {
     wifi_only_dl_flag: Arc<std::sync::atomic::AtomicBool>,
     notifications_flag: Arc<std::sync::atomic::AtomicBool>,
     max_smart_songs_atomic: Arc<std::sync::atomic::AtomicUsize>,
+    max_smart_bytes_atomic: Arc<std::sync::atomic::AtomicU64>,
     wifi_connected_atomic: Arc<std::sync::atomic::AtomicBool>,
     metered_network_atomic: Arc<std::sync::atomic::AtomicBool>,
     stream_quality_atomic: Arc<std::sync::atomic::AtomicU8>,
@@ -1121,6 +1138,9 @@ impl YrApp {
         let max_smart_songs_atomic = Arc::new(std::sync::atomic::AtomicUsize::new(
             store.data.config.max_smart_download_songs,
         ));
+        let max_smart_bytes_atomic = Arc::new(std::sync::atomic::AtomicU64::new(
+            (store.data.config.max_smart_download_mb as u64) * 1024 * 1024,
+        ));
         let wifi_connected_atomic = Arc::new(std::sync::atomic::AtomicBool::new(
             crate::android_media::is_wifi_connected(),
         ));
@@ -1167,6 +1187,7 @@ impl YrApp {
             search_filter: SearchFilter::All,
             search_results: SearchResults::default(),
             search_loading: false,
+            search_req_seq: 0,
             search_suggestions: Vec::new(),
             last_search_input_at: None,
             suggestions_last_query: String::new(),
@@ -1179,6 +1200,7 @@ impl YrApp {
             detail_view: DetailView::None,
             detail_filter_query: String::new(),
             detail_loading: false,
+            detail_req_seq: 0,
             downloads: Vec::new(),
             total_downloaded_bytes: 0,
             last_download_poll: Instant::now() - Duration::from_secs(10),
@@ -1260,6 +1282,7 @@ impl YrApp {
             wifi_only_dl_flag,
             notifications_flag,
             max_smart_songs_atomic,
+            max_smart_bytes_atomic,
             wifi_connected_atomic,
             metered_network_atomic,
             stream_quality_atomic,
@@ -1298,6 +1321,7 @@ impl YrApp {
             let q_init = app.store.data.config.download_quality;
             let c_dir = app.data_dir.join("stream_cache");
             let max_songs = app.store.data.config.max_smart_download_songs;
+            let max_bytes = (app.store.data.config.max_smart_download_mb as u64) * 1024 * 1024;
             let wifi_only_dl = app.store.data.config.wifi_only_downloads;
             let known_snapshot = app.known_tracks.lock().unwrap().clone();
             let recent_to_dl: Vec<Track> = app
@@ -1329,13 +1353,15 @@ impl YrApp {
                 if !wifi_only_dl || crate::android_media::is_wifi_connected() {
                     let _ = dl_init.resume_pending().await;
                     let mut count = dl_init.completed_count().await;
+                    let mut used_bytes = dl_init.total_downloaded_bytes().await;
                     for t in recent_to_dl {
-                        if count >= max_songs {
+                        if count >= max_songs || used_bytes >= max_bytes {
                             break;
                         }
                         if dl_init.find_local_path(&t.id).await.is_none() {
                             dl_init.enqueue(t, q_init).await;
                             count += 1;
+                            used_bytes = used_bytes.saturating_add(4 * 1024 * 1024);
                         }
                     }
                 }
@@ -1611,6 +1637,7 @@ impl YrApp {
         let smart_dl_tick = Arc::clone(&app.smart_downloads_flag);
         let notif_tick = Arc::clone(&app.notifications_flag);
         let max_smart_tick = Arc::clone(&app.max_smart_songs_atomic);
+        let max_bytes_tick = Arc::clone(&app.max_smart_bytes_atomic);
         let known_tick = Arc::clone(&app.known_tracks);
         let cached_ids_tick = Arc::clone(&app.cached_stream_ids);
         let wifi_only_tick = Arc::clone(&app.wifi_only_dl_flag);
@@ -1733,7 +1760,10 @@ impl YrApp {
                                 }
                             }
                             let max_limit = max_smart_tick.load(Ordering::Relaxed);
-                            let _ = dl_tick.prune_to_limit(max_limit, &protected_cur).await;
+                            let max_bytes_limit = max_bytes_tick.load(Ordering::Relaxed);
+                            let _ = dl_tick
+                                .prune_to_limits(max_limit, max_bytes_limit, &protected_cur)
+                                .await;
                             let tasks = dl_tick.list_tasks().await;
                             let total_bytes = dl_tick.total_downloaded_bytes().await;
                             let _ = ev_tx_tick.send(AppEvent::DownloadsRefreshed { tasks, total_bytes });
@@ -1960,14 +1990,22 @@ impl YrApp {
         self.search_suggestions.clear();
         self.suggestions_last_query = q.clone();
         self.search_filter = SearchFilter::All;
+        self.search_req_seq = self.search_req_seq.wrapping_add(1);
+        let seq = self.search_req_seq;
         self.search_loading = true;
+        self.detail_loading = false;
+        self.detail_req_seq = self.detail_req_seq.wrapping_add(1);
         self.detail_view = DetailView::None;
         let provider = Arc::clone(&self.provider);
         let tx = self.event_tx.clone();
         let ctx = ctx.clone();
         self.runtime.spawn(async move {
             let res = provider.search(&q).await.map_err(|e| e.to_string());
-            let _ = tx.send(AppEvent::SearchLoaded(res));
+            let _ = tx.send(AppEvent::SearchLoaded {
+                seq,
+                query: q,
+                result: res,
+            });
             ctx.request_repaint();
         });
     }
@@ -2005,6 +2043,8 @@ impl YrApp {
 
     fn open_album(&mut self, album_id: String, ctx: &egui::Context) {
         self.detail_scroller = SmoothTouchScroller::default();
+        self.detail_req_seq = self.detail_req_seq.wrapping_add(1);
+        let seq = self.detail_req_seq;
         self.detail_loading = true;
         self.detail_filter_query.clear();
         let provider = Arc::clone(&self.provider);
@@ -2012,13 +2052,15 @@ impl YrApp {
         let ctx = ctx.clone();
         self.runtime.spawn(async move {
             let res = provider.get_album(&album_id).await.map_err(|e| e.to_string());
-            let _ = tx.send(AppEvent::AlbumLoaded(res));
+            let _ = tx.send(AppEvent::AlbumLoaded { seq, result: res });
             ctx.request_repaint();
         });
     }
 
     fn open_playlist(&mut self, playlist_id: String, ctx: &egui::Context) {
         self.detail_scroller = SmoothTouchScroller::default();
+        self.detail_req_seq = self.detail_req_seq.wrapping_add(1);
+        let seq = self.detail_req_seq;
         self.detail_loading = true;
         self.detail_filter_query.clear();
         let provider = Arc::clone(&self.provider);
@@ -2029,13 +2071,15 @@ impl YrApp {
                 .get_playlist(&playlist_id)
                 .await
                 .map_err(|e| e.to_string());
-            let _ = tx.send(AppEvent::PlaylistLoaded(res));
+            let _ = tx.send(AppEvent::PlaylistLoaded { seq, result: res });
             ctx.request_repaint();
         });
     }
 
     fn open_artist(&mut self, artist_id: String, ctx: &egui::Context) {
         self.detail_scroller = SmoothTouchScroller::default();
+        self.detail_req_seq = self.detail_req_seq.wrapping_add(1);
+        let seq = self.detail_req_seq;
         self.detail_loading = true;
         let provider = Arc::clone(&self.provider);
         let tx = self.event_tx.clone();
@@ -2045,13 +2089,15 @@ impl YrApp {
                 .get_artist(&artist_id)
                 .await
                 .map_err(|e| e.to_string());
-            let _ = tx.send(AppEvent::ArtistLoaded(res));
+            let _ = tx.send(AppEvent::ArtistLoaded { seq, result: res });
             ctx.request_repaint();
         });
     }
 
     fn open_mood(&mut self, genre_id: String, title: String, ctx: &egui::Context) {
         self.detail_scroller = SmoothTouchScroller::default();
+        self.detail_req_seq = self.detail_req_seq.wrapping_add(1);
+        let seq = self.detail_req_seq;
         self.detail_loading = true;
         let provider = Arc::clone(&self.provider);
         let tx = self.event_tx.clone();
@@ -2061,7 +2107,11 @@ impl YrApp {
                 .get_mood_playlists(&genre_id)
                 .await
                 .map_err(|e| e.to_string());
-            let _ = tx.send(AppEvent::MoodLoaded { title, result: res });
+            let _ = tx.send(AppEvent::MoodLoaded {
+                seq,
+                title,
+                result: res,
+            });
             ctx.request_repaint();
         });
     }
@@ -2413,6 +2463,7 @@ impl YrApp {
             && self.store.data.config.wifi_only_downloads
             && !self.is_wifi_connected_cached();
         let max_songs = self.store.data.config.max_smart_download_songs;
+        let max_bytes = (self.store.data.config.max_smart_download_mb as u64) * 1024 * 1024;
         let dl = Arc::clone(&self.downloader);
         let quality = self.store.data.config.download_quality;
         let track_cloned = track.clone();
@@ -2449,7 +2500,10 @@ impl YrApp {
             if is_currently_streaming || wifi_blocked {
                 return;
             }
-            if !manual && dl.completed_count().await >= max_songs {
+            if !manual
+                && (dl.completed_count().await >= max_songs
+                    || dl.total_downloaded_bytes().await >= max_bytes)
+            {
                 return;
             }
             dl.enqueue(track_cloned.clone(), quality).await;
@@ -2463,6 +2517,35 @@ impl YrApp {
                 lyrics_dir,
                 track_cloned,
             ));
+        });
+    }
+
+    fn spawn_smart_download_prune(&self, ctx: &egui::Context) {
+        let count = self.store.data.config.max_smart_download_songs;
+        let max_bytes = (self.store.data.config.max_smart_download_mb as u64) * 1024 * 1024;
+        let dl = Arc::clone(&self.downloader);
+        let tx = self.event_tx.clone();
+        let ctx_dl = ctx.clone();
+        let mut protected: HashSet<String> = self
+            .store
+            .data
+            .liked_tracks
+            .iter()
+            .map(|t| t.id.clone())
+            .collect();
+        if let Ok(q) = self.queue.lock() {
+            if let Some(t) = q.current_track() {
+                protected.insert(t.id.clone());
+            }
+        }
+        self.runtime.spawn(async move {
+            let pruned = dl.prune_to_limits(count, max_bytes, &protected).await;
+            if pruned > 0 {
+                let tasks = dl.list_tasks().await;
+                let total_bytes = dl.total_downloaded_bytes().await;
+                let _ = tx.send(AppEvent::DownloadsRefreshed { tasks, total_bytes });
+                ctx_dl.request_repaint();
+            }
         });
     }
 
@@ -3019,9 +3102,12 @@ impl YrApp {
                         self.rebuild_samples_deck();
                     }
                 }
-                AppEvent::SearchLoaded(res) => {
+                AppEvent::SearchLoaded { seq, query, result } => {
+                    if seq != self.search_req_seq {
+                        continue;
+                    }
                     self.search_loading = false;
-                    match res {
+                    match result {
                         Ok(r) => {
                             let first_thumb = r
                                 .songs
@@ -3029,40 +3115,51 @@ impl YrApp {
                                 .and_then(|s| s.thumbnail_url.clone())
                                 .or_else(|| r.albums.first().and_then(|a| a.thumbnail_url.clone()))
                                 .or_else(|| r.artists.first().and_then(|a| a.thumbnail_url.clone()));
-                            let q = self.search_query.trim().to_string();
                             if !self.store.data.config.incognito_mode
-                                && !q.is_empty()
+                                && !query.is_empty()
                                 && first_thumb.is_some()
                             {
-                                self.store.record_search_with_thumb(&q, first_thumb);
+                                self.store.record_search_with_thumb(&query, first_thumb);
                             }
                             self.search_results = r;
                         }
                         Err(e) => self.set_banner(friendly_error_message("Error al buscar", &e)),
                     }
                 }
-                AppEvent::AlbumLoaded(res) => {
+                AppEvent::AlbumLoaded { seq, result } => {
+                    if seq != self.detail_req_seq {
+                        continue;
+                    }
                     self.detail_loading = false;
-                    match res {
+                    match result {
                         Ok(a) => self.detail_view = DetailView::Album(a),
                         Err(e) => self.set_banner(friendly_error_message("Error al abrir álbum", &e)),
                     }
                 }
-                AppEvent::PlaylistLoaded(res) => {
+                AppEvent::PlaylistLoaded { seq, result } => {
+                    if seq != self.detail_req_seq {
+                        continue;
+                    }
                     self.detail_loading = false;
-                    match res {
+                    match result {
                         Ok(p) => self.detail_view = DetailView::Playlist(p),
                         Err(e) => self.set_banner(friendly_error_message("Error al abrir playlist", &e)),
                     }
                 }
-                AppEvent::ArtistLoaded(res) => {
+                AppEvent::ArtistLoaded { seq, result } => {
+                    if seq != self.detail_req_seq {
+                        continue;
+                    }
                     self.detail_loading = false;
-                    match res {
+                    match result {
                         Ok(a) => self.detail_view = DetailView::Artist(a),
                         Err(e) => self.set_banner(friendly_error_message("Error al abrir artista", &e)),
                     }
                 }
-                AppEvent::MoodLoaded { title, result } => {
+                AppEvent::MoodLoaded { seq, title, result } => {
+                    if seq != self.detail_req_seq {
+                        continue;
+                    }
                     self.detail_loading = false;
                     match result {
                         Ok(playlists) => {
@@ -4044,15 +4141,19 @@ impl YrApp {
             } else {
                 self.now_playing_open = false;
             }
-        } else if !matches!(self.detail_view, DetailView::None) {
+        } else if !matches!(self.detail_view, DetailView::None) || self.detail_loading {
+            self.detail_loading = false;
             self.detail_view = DetailView::None;
+            self.detail_req_seq = self.detail_req_seq.wrapping_add(1);
             self.detail_filter_query.clear();
         } else if self.active_tab == NavTab::Search
-            && (!self.search_query.trim().is_empty() || has_search_results)
+            && (!self.search_query.trim().is_empty() || has_search_results || self.search_loading)
         {
             self.search_query.clear();
             self.search_results = SearchResults::default();
             self.search_suggestions.clear();
+            self.search_loading = false;
+            self.search_req_seq = self.search_req_seq.wrapping_add(1);
         } else if self.active_tab != NavTab::Home {
             self.active_tab = NavTab::Home;
         }
@@ -4231,7 +4332,9 @@ impl YrApp {
             self.active_tab = tab;
             self.now_playing_open = false;
             self.show_settings = false;
+            self.detail_loading = false;
             self.detail_view = DetailView::None;
+            self.detail_req_seq = self.detail_req_seq.wrapping_add(1);
         }
     }
 
@@ -4239,20 +4342,17 @@ impl YrApp {
         if tracks.is_empty() {
             return;
         }
-        let len = tracks.len();
         {
             let mut q = self.queue.lock().unwrap();
-            q.set_queue(tracks, 0);
             if !q.shuffle {
-                q.toggle_shuffle();
-            }
-            if len > 1 {
-                q.next_track(true);
+                q.shuffle = true;
             }
         }
-        self.now_playing_open = true;
-        self.show_settings = false;
-        self.play_current_queue_track(ctx);
+        let start_idx = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| (d.subsec_nanos() as usize) % tracks.len())
+            .unwrap_or(0);
+        self.play_track_in_list(tracks, start_idx, ctx);
     }
 
     fn render_collection_actions(
@@ -4419,6 +4519,7 @@ impl YrApp {
                 .clicked() {
                     self.detail_loading = false;
                     self.detail_view = DetailView::None;
+                    self.detail_req_seq = self.detail_req_seq.wrapping_add(1);
                 }
                 ui.spinner();
                 ui.label("Cargando...");
@@ -6582,6 +6683,8 @@ impl YrApp {
                         self.search_query.clear();
                         self.search_results = SearchResults::default();
                         self.search_suggestions.clear();
+                        self.search_loading = false;
+                        self.search_req_seq = self.search_req_seq.wrapping_add(1);
                     }
                     if icons::icon_button(
                         ui,
@@ -9603,6 +9706,7 @@ impl YrApp {
                             false,
                             queue_allow_scroll,
                         );
+                        let mut auto_center_queue_y: Option<f32> = None;
                         let queue_scroll = egui::ScrollArea::vertical()
                             .id_salt("full_queue_scroll")
                             .scroll_bar_visibility(
@@ -9813,12 +9917,19 @@ impl YrApp {
                                         });
                                     if is_curr && !self.queue_auto_scrolled {
                                         self.queue_auto_scrolled = true;
-                                        row_frame.response.scroll_to_me(Some(Align::Center));
+                                        auto_center_queue_y =
+                                            Some(row_frame.response.rect.center().y);
                                     }
                                 }
                             });
                         self.queue_scroller
                             .sync_bounds(queue_scroll.content_size.y, queue_scroll.inner_rect.height());
+                        if let Some(row_cy) = auto_center_queue_y {
+                            let target = self.queue_scroller.offset_y
+                                + (row_cy - queue_scroll.inner_rect.center().y);
+                            self.queue_scroller.smooth_scroll_to(target);
+                            ctx.request_repaint();
+                        }
                     } else if self.show_lyrics {
                         let large_lyrics = self.store.data.config.lyrics_large_text;
                         ui.horizontal(|ui| {
@@ -12082,35 +12193,36 @@ impl YrApp {
                                 self.max_smart_songs_atomic
                                     .store(count, std::sync::atomic::Ordering::Relaxed);
                                 let _ = self.store.save();
-                                let dl = Arc::clone(&self.downloader);
-                                let tx = self.event_tx.clone();
-                                let ctx_dl = ctx.clone();
-                                let mut protected: HashSet<String> = self
-                                    .store
-                                    .data
-                                    .liked_tracks
-                                    .iter()
-                                    .map(|t| t.id.clone())
-                                    .collect();
-                                if let Ok(q) = self.queue.lock() {
-                                    if let Some(t) = q.current_track() {
-                                        protected.insert(t.id.clone());
-                                    }
-                                }
-                                self.runtime.spawn(async move {
-                                    let pruned = dl.prune_to_limit(count, &protected).await;
-                                    if pruned > 0 {
-                                        let tasks = dl.list_tasks().await;
-                                        let total_bytes = dl.total_downloaded_bytes().await;
-                                        let _ = tx.send(AppEvent::DownloadsRefreshed {
-                                            tasks,
-                                            total_bytes,
-                                        });
-                                        ctx_dl.request_repaint();
-                                    }
-                                });
+                                self.spawn_smart_download_prune(ctx);
                                 self.set_banner(format!(
                                     "Auto-descargas ajustadas al límite de {count}"
+                                ));
+                            }
+                        }
+                    });
+                    ui.add_space(10.0);
+                    ui.label("Límite de espacio en auto-descargas:");
+                    ui.add_space(4.0);
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing = Vec2::new(8.0, 8.0);
+                        for limit_mb in [256_u32, 512, 1024, 2048, 4096] {
+                            let label = match limit_mb {
+                                1024 => "1 GB".to_string(),
+                                2048 => "2 GB".to_string(),
+                                4096 => "4 GB".to_string(),
+                                _ => format!("{limit_mb} MB"),
+                            };
+                            let selected = self.store.data.config.max_smart_download_mb == limit_mb;
+                            if settings_choice_pill(ui, selected, &label) {
+                                self.store.data.config.max_smart_download_mb = limit_mb;
+                                self.max_smart_bytes_atomic.store(
+                                    (limit_mb as u64) * 1024 * 1024,
+                                    std::sync::atomic::Ordering::Relaxed,
+                                );
+                                let _ = self.store.save();
+                                self.spawn_smart_download_prune(ctx);
+                                self.set_banner(format!(
+                                    "Presupuesto de descargas ajustado a {label}"
                                 ));
                             }
                         }

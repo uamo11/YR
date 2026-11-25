@@ -336,7 +336,7 @@ public final class YrUpdateChecker {
             }
         } catch (Throwable ignored) {
         }
-        return "0.9.32";
+        return "0.9.33";
     }
 
     @SuppressWarnings("deprecation")
