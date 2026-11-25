@@ -156,6 +156,8 @@ pub struct AppConfig {
     pub gapless_playback: bool,
     #[serde(default)]
     pub lyrics_large_text: bool,
+    #[serde(default = "default_true")]
+    pub auto_check_updates: bool,
 }
 
 fn default_seek_seconds() -> u32 {
@@ -214,6 +216,7 @@ impl Default for AppConfig {
             seek_seconds: default_seek_seconds(),
             gapless_playback: true,
             lyrics_large_text: false,
+            auto_check_updates: true,
         }
     }
 }

@@ -554,6 +554,28 @@ public class YrPlaybackService extends Service {
         return hasSapi && hasSid;
     }
 
+    public static void checkForUpdates(final Context ctx, final boolean isManual) {
+        try {
+            YrUpdateChecker.checkForUpdates(ctx, isManual);
+        } catch (Throwable ignored) {
+        }
+    }
+
+    public static void setAutoCheckUpdates(final Context ctx, final boolean enabled) {
+        try {
+            YrUpdateChecker.setAutoCheckEnabled(ctx, enabled);
+        } catch (Throwable ignored) {
+        }
+    }
+
+    public static boolean isAutoCheckUpdates(final Context ctx) {
+        try {
+            return YrUpdateChecker.isAutoCheckEnabled(ctx);
+        } catch (Throwable ignored) {
+            return true;
+        }
+    }
+
     public static void shareText(final Context ctx, final String title, final String text) {
         if (ctx == null || text == null) return;
         new Handler(Looper.getMainLooper()).post(() -> {
@@ -1030,7 +1052,7 @@ public class YrPlaybackService extends Service {
         } else {
             sVideoFillZoom = false;
             try {
-                targetAct.setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_PORTRAIT);
+                targetAct.setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_FULL_USER);
             } catch (Throwable ignored) {
             }
             if (decor != null) {

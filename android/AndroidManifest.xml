@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="com.yr.music"
-    android:versionCode="57"
-    android:versionName="0.9.21">
+    android:versionCode="58"
+    android:versionName="0.9.22">
 
     <uses-sdk android:minSdkVersion="24" android:targetSdkVersion="34" />
 
@@ -12,6 +12,7 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
     <application
         android:label="YR Music"
@@ -28,7 +29,7 @@
             android:icon="@mipmap/ic_launcher"
             android:roundIcon="@mipmap/ic_launcher_round"
             android:launchMode="singleTask"
-            android:screenOrientation="portrait"
+            android:screenOrientation="fullUser"
             android:configChanges="orientation|keyboardHidden|keyboard|navigation|screenSize|screenLayout|smallestScreenSize|uiMode|density|locale|layoutDirection|fontScale"
             android:exported="true">
             <meta-data android:name="android.app.lib_name" android:value="yr_app" />
@@ -42,5 +43,19 @@
             android:name="com.yr.music.YrPlaybackService"
             android:exported="false"
             android:foregroundServiceType="mediaPlayback" />
+
+        <provider
+            android:name="com.yr.music.YrFileProvider"
+            android:authorities="com.yr.music.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true" />
+
+        <receiver
+            android:name="com.yr.music.YrUpdateCleanupReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
     </application>
 </manifest>

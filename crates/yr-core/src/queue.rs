@@ -261,6 +261,40 @@ impl PlaybackQueue {
         self.current_track()
     }
 
+    /// Moves to the previous track in the queue only if an earlier track exists
+    /// (or repeat-all wraps around a multi-track queue). Returns `None` at position 0 otherwise.
+    pub fn step_prev_track(&mut self) -> Option<&Track> {
+        if self.tracks.is_empty() {
+            return None;
+        }
+        let pos = self.current_pos.unwrap_or(0);
+        if pos > 0 {
+            self.current_pos = Some(pos - 1);
+            self.current_track()
+        } else if self.repeat == RepeatMode::All && self.order.len() > 1 {
+            self.current_pos = Some(self.order.len() - 1);
+            self.current_track()
+        } else {
+            None
+        }
+    }
+
+    /// Places `track` at position 0 of the play order and selects it as current,
+    /// preserving the rest of the queue afterwards so `next_track` returns cleanly.
+    pub fn prepend_and_select(&mut self, track: Track) -> Option<&Track> {
+        let track_idx = if let Some(existing) = self.tracks.iter().position(|t| t.id == track.id) {
+            self.order.retain(|&idx| idx != existing);
+            existing
+        } else {
+            let new_idx = self.tracks.len();
+            self.tracks.push(track);
+            new_idx
+        };
+        self.order.insert(0, track_idx);
+        self.current_pos = Some(0);
+        self.current_track()
+    }
+
     pub fn ordered_tracks(&self) -> Vec<(usize, &Track)> {
         self.order
             .iter()
@@ -414,5 +448,32 @@ mod tests {
         assert_eq!(q.len(), 1);
         assert_eq!(q.remaining(), 0);
         assert_eq!(q.current_track().unwrap().id, "1");
+    }
+
+    #[test]
+    fn step_prev_track_and_prepend_history_behave_correctly() {
+        let mut q = PlaybackQueue::new();
+        q.set_queue(vec![sample_track("1"), sample_track("2")], 0);
+        // At index 0 with RepeatMode::Off, step_prev_track returns None (caller restarts 0:00)
+        assert!(q.step_prev_track().is_none());
+        assert_eq!(q.current_track().unwrap().id, "1");
+
+        // Advance to index 1, then step back -> returns song 1
+        assert_eq!(q.next_track(true).unwrap().id, "2");
+        assert_eq!(q.step_prev_track().unwrap().id, "1");
+        assert!(q.step_prev_track().is_none());
+
+        // With RepeatMode::All on multi-track queue, step_prev_track wraps to last
+        q.repeat = RepeatMode::All;
+        assert_eq!(q.step_prev_track().unwrap().id, "2");
+
+        // Single-track queue at index 0 returns None even with RepeatMode::All;
+        // prepend_and_select inserts previous session track at index 0 before current.
+        let mut single = PlaybackQueue::new();
+        single.set_queue(vec![sample_track("cur")], 0);
+        single.repeat = RepeatMode::All;
+        assert!(single.step_prev_track().is_none());
+        assert_eq!(single.prepend_and_select(sample_track("prev")).unwrap().id, "prev");
+        assert_eq!(single.next_track(true).unwrap().id, "cur");
     }
 }

@@ -333,6 +333,50 @@ mod imp {
         }
     }
 
+    pub fn check_for_updates(manual: bool) {
+        let Some(bridge) = bridge() else {
+            return;
+        };
+        let Ok(mut env) = bridge.vm.attach_current_thread() else {
+            return;
+        };
+        let service_cls: &JClass = bridge.service_class.as_obj().into();
+        if let Err(e) = env.call_static_method(
+            service_cls,
+            "checkForUpdates",
+            "(Landroid/content/Context;Z)V",
+            &[
+                JValue::Object(bridge.app_ctx.as_obj()),
+                JValue::Bool(if manual { 1 } else { 0 }),
+            ],
+        ) {
+            log::warn!("android_media: checkForUpdates failed: {e:?}");
+            let _ = env.exception_clear();
+        }
+    }
+
+    pub fn set_auto_check_updates(enabled: bool) {
+        let Some(bridge) = bridge() else {
+            return;
+        };
+        let Ok(mut env) = bridge.vm.attach_current_thread() else {
+            return;
+        };
+        let service_cls: &JClass = bridge.service_class.as_obj().into();
+        if let Err(e) = env.call_static_method(
+            service_cls,
+            "setAutoCheckUpdates",
+            "(Landroid/content/Context;Z)V",
+            &[
+                JValue::Object(bridge.app_ctx.as_obj()),
+                JValue::Bool(if enabled { 1 } else { 0 }),
+            ],
+        ) {
+            log::warn!("android_media: setAutoCheckUpdates failed: {e:?}");
+            let _ = env.exception_clear();
+        }
+    }
+
     pub fn is_wifi_connected() -> bool {
         let Some(bridge) = bridge() else {
             return true;
@@ -572,6 +616,8 @@ mod imp {
         None
     }
     pub fn share_text(_title: &str, _text: &str) {}
+    pub fn check_for_updates(_manual: bool) {}
+    pub fn set_auto_check_updates(_enabled: bool) {}
     pub fn attach_native_video(
         _video_url: &str,
         _fallback_url: &str,
@@ -608,9 +654,10 @@ mod imp {
 #[cfg(target_os = "android")]
 pub use imp::init;
 pub use imp::{
-    attach_native_video, hide_embedded_video, is_metered_network, is_wifi_connected,
-    open_audio_output_panel, open_google_login, prepare_next_embedded_video, resolve_audio_url,
-    set_action_sender, set_artwork_url, set_cookie_sender, set_egui_ctx, set_ui_at_root,
-    set_video_quality_label, set_video_seek_seconds, share_text, stop_service, sync_native_video,
-    take_back_pressed, update_playback,
+    attach_native_video, check_for_updates, hide_embedded_video, is_metered_network,
+    is_wifi_connected, open_audio_output_panel, open_google_login, prepare_next_embedded_video,
+    resolve_audio_url, set_action_sender, set_artwork_url, set_auto_check_updates,
+    set_cookie_sender, set_egui_ctx, set_ui_at_root, set_video_quality_label,
+    set_video_seek_seconds, share_text, stop_service, sync_native_video, take_back_pressed,
+    update_playback,
 };

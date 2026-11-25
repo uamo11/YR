@@ -46,6 +46,12 @@ pub fn apply_ytm_theme(ctx: &egui::Context) {
     style.spacing.item_spacing = egui::vec2(10.0, 10.0);
     style.spacing.button_padding = egui::vec2(12.0, 8.0);
     style.spacing.window_margin = Margin::same(12);
+    style.spacing.scroll = egui::style::ScrollStyle::thin();
+    style.spacing.scroll.floating = true;
+    style.spacing.scroll.bar_width = 3.0;
+    style.spacing.scroll.floating_width = 2.0;
+    style.spacing.scroll.floating_allocated_width = 0.0;
+    style.spacing.scroll.handle_min_length = 24.0;
 
     ctx.set_style(style);
 }

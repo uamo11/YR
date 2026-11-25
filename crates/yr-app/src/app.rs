@@ -201,9 +201,35 @@ enum AppEvent {
         max_h: u32,
         info: VideoStreamInfo,
     },
+    RestartCurrentFromBg,
 }
 
-/// Disambiguated touch drag & 60fps kinetic fling momentum scroller for egui on mobile.
+const PREV_RESTART_THRESHOLD_SECS: f64 = 3.5;
+
+fn step_or_pop_previous_track(
+    queue: &std::sync::Mutex<PlaybackQueue>,
+    prev_stack: &std::sync::Mutex<Vec<Track>>,
+) -> Option<Track> {
+    let mut q = queue.lock().ok()?;
+    if let Some(t) = q.step_prev_track().cloned() {
+        return Some(t);
+    }
+    let curr_id = q.current_track().map(|t| t.id.clone());
+    let popped = {
+        let mut st = prev_stack.lock().ok()?;
+        let mut chosen = None;
+        while let Some(cand) = st.pop() {
+            if curr_id.as_deref() != Some(cand.id.as_str()) {
+                chosen = Some(cand);
+                break;
+            }
+        }
+        chosen
+    };
+    popped.and_then(|prev| q.prepend_and_select(prev).cloned())
+}
+
+/// Disambiguated touch drag & 60/120fps Android OverScroller kinetic fling for egui on mobile.
 #[derive(Clone, Debug, Default)]
 pub struct SmoothTouchScroller {
     pub offset_y: f32,
@@ -211,6 +237,8 @@ pub struct SmoothTouchScroller {
     pub max_offset_y: f32,
     pub is_dragging: bool,
     pub drag_slop_exceeded: bool,
+    axis_lock: u8, // 0 = undecided, 1 = vertical, 2 = horizontal (yield to carousels/swipes)
+    smoothed_vy: f32,
 }
 
 impl SmoothTouchScroller {
@@ -230,70 +258,97 @@ impl SmoothTouchScroller {
 
         if pressed && press_in_view {
             self.vel_y = 0.0;
+            self.smoothed_vy = 0.0;
             self.is_dragging = false;
             self.drag_slop_exceeded = false;
+            self.axis_lock = 0;
         }
 
         if down && press_in_view {
-            let total_dist = match (origin_opt, pointer.latest_pos()) {
-                (Some(o), Some(p)) => (p.y - o.y).abs(),
-                _ => 0.0,
+            let (dx, dy) = match (origin_opt, pointer.latest_pos()) {
+                (Some(o), Some(p)) => ((p.x - o.x).abs(), (p.y - o.y).abs()),
+                _ => (0.0, 0.0),
             };
 
-            // Touch slop threshold: don't scroll until finger moves > 8.0 pixels,
-            // preventing natural finger jitter from swallowing clicks on mobile.
-            if total_dist > 8.0 || self.drag_slop_exceeded {
-                self.drag_slop_exceeded = true;
-                let delta = pointer.delta();
-                if delta.y.abs() > 0.1 {
-                    let is_vertical = delta.y.abs() >= delta.x.abs() * 0.6;
-                    if is_vertical || self.is_dragging {
-                        self.is_dragging = true;
-                        self.vel_y = 0.0;
+            if self.axis_lock == 0 && dx.hypot(dy) > 3.5 {
+                if dx > dy * 1.15 {
+                    self.axis_lock = 2;
+                    self.is_dragging = false;
+                } else {
+                    self.axis_lock = 1;
+                    self.drag_slop_exceeded = true;
+                    self.is_dragging = true;
+                }
+            }
 
-                        // If pulling down at top, let pull-to-refresh handle it without scrolling
-                        if !(self.offset_y <= 3.0 && delta.y > 0.0 && can_pull_refresh) {
-                            self.offset_y = (self.offset_y - delta.y).clamp(0.0, self.max_offset_y);
-                            ui.ctx().request_repaint();
-                        }
+            if self.axis_lock == 1 {
+                let delta = pointer.delta();
+                if delta.y.abs() > 0.05 {
+                    self.vel_y = 0.0;
+                    let inst_vy = (delta.y / dt).clamp(-5200.0, 5200.0);
+                    self.smoothed_vy = self.smoothed_vy * 0.4 + inst_vy * 0.6;
+                    // If pulling down at top, let pull-to-refresh handle it without scrolling
+                    if !(self.offset_y <= 2.0 && delta.y > 0.0 && can_pull_refresh) {
+                        self.offset_y = (self.offset_y - delta.y).clamp(0.0, self.max_offset_y);
+                        ui.ctx().request_repaint();
                     }
                 }
             }
         }
 
         if released {
-            let was_dragging = self.is_dragging;
+            let was_dragging = self.is_dragging && self.axis_lock == 1;
             self.is_dragging = false;
             self.drag_slop_exceeded = false;
+            self.axis_lock = 0;
             if was_dragging {
-                let vy = pointer.velocity().y;
-                if vy.abs() > 60.0 {
+                let raw_vy = pointer.velocity().y;
+                let vy = if raw_vy.abs() > 10.0 && self.smoothed_vy.signum() == raw_vy.signum() {
+                    if self.smoothed_vy.abs() > raw_vy.abs() {
+                        self.smoothed_vy
+                    } else {
+                        raw_vy
+                    }
+                } else if raw_vy.abs() > 10.0 {
+                    raw_vy
+                } else {
+                    self.smoothed_vy
+                }
+                .clamp(-5200.0, 5200.0);
+                if vy.abs() > 45.0 {
                     // Moving downward (positive vy) means scrolling up (decreasing offset_y)
                     self.vel_y = vy;
                 }
             }
+            self.smoothed_vy = 0.0;
         }
 
-        // Kinetic fling momentum (natural deceleration)
-        if !down && self.vel_y.abs() > 15.0 {
-            let friction = 1500.0 * dt;
-            if friction >= self.vel_y.abs() {
+        // Exponential viscous kinetic fling momentum (smooth Android OverScroller curve)
+        if !down && self.vel_y.abs() > 8.0 {
+            let decay = (-3.1 * dt).exp();
+            let step_vy = self.vel_y * (1.0 + decay) * 0.5;
+            let next_offset = (self.offset_y - step_vy * dt).clamp(0.0, self.max_offset_y);
+            let hit_bounds = (next_offset - self.offset_y).abs() < 0.05
+                && (next_offset <= 0.0 || next_offset >= self.max_offset_y);
+            self.offset_y = next_offset;
+            self.vel_y *= decay;
+            if hit_bounds || self.vel_y.abs() <= 8.0 {
                 self.vel_y = 0.0;
             } else {
-                self.vel_y -= friction * self.vel_y.signum();
-                self.offset_y = (self.offset_y - self.vel_y * dt).clamp(0.0, self.max_offset_y);
                 ui.ctx().request_repaint();
             }
         } else if !down {
             self.vel_y = 0.0;
         }
 
-        // Support mouse wheel / touchpad scroll
-        let wheel = ui.input(|i| i.raw_scroll_delta.y);
-        if wheel.abs() > 0.5 {
-            self.vel_y = 0.0;
-            self.offset_y = (self.offset_y - wheel).clamp(0.0, self.max_offset_y);
-            ui.ctx().request_repaint();
+        // Support mouse wheel / touchpad scroll inside viewport
+        if viewport_rect.contains(pointer.latest_pos().unwrap_or(Pos2::ZERO)) {
+            let wheel = ui.input(|i| i.raw_scroll_delta.y);
+            if wheel.abs() > 0.5 {
+                self.vel_y = 0.0;
+                self.offset_y = (self.offset_y - wheel).clamp(0.0, self.max_offset_y);
+                ui.ctx().request_repaint();
+            }
         }
     }
 
@@ -404,7 +459,10 @@ pub struct YrApp {
     home_scroller: SmoothTouchScroller,
     search_scroller: SmoothTouchScroller,
     library_scroller: SmoothTouchScroller,
+    downloads_scroller: SmoothTouchScroller,
+    settings_scroller: SmoothTouchScroller,
     detail_scroller: SmoothTouchScroller,
+    last_settings_category: SettingsCategory,
     last_video_attached: Option<(String, i32, i32, i32, i32)>,
     video_stream_track_id: Option<String>,
     video_stream_info: Option<VideoStreamInfo>,
@@ -418,7 +476,13 @@ pub struct YrApp {
     wifi_only_dl_flag: Arc<std::sync::atomic::AtomicBool>,
     notifications_flag: Arc<std::sync::atomic::AtomicBool>,
     max_smart_songs_atomic: Arc<std::sync::atomic::AtomicUsize>,
+    wifi_connected_atomic: Arc<std::sync::atomic::AtomicBool>,
+    metered_network_atomic: Arc<std::sync::atomic::AtomicBool>,
     known_tracks: Arc<std::sync::Mutex<HashMap<String, Track>>>,
+    cached_stream_ids: Arc<std::sync::Mutex<HashSet<String>>>,
+    frame_cached_stream_ids: HashSet<String>,
+    completed_download_ids: HashSet<String>,
+    prev_history_stack: Arc<std::sync::Mutex<Vec<Track>>>,
     consecutive_stream_failures: u8,
     retried_audio_error_track_id: Option<String>,
     retried_video_error_track_id: Option<String>,
@@ -584,6 +648,14 @@ impl YrApp {
         let max_smart_songs_atomic = Arc::new(std::sync::atomic::AtomicUsize::new(
             store.data.config.max_smart_download_songs,
         ));
+        let wifi_connected_atomic = Arc::new(std::sync::atomic::AtomicBool::new(
+            crate::android_media::is_wifi_connected(),
+        ));
+        let metered_network_atomic = Arc::new(std::sync::atomic::AtomicBool::new(
+            crate::android_media::is_metered_network(),
+        ));
+        let cached_stream_ids = Arc::new(std::sync::Mutex::new(HashSet::new()));
+        let prev_history_stack = Arc::new(std::sync::Mutex::new(Vec::new()));
         let mut initial_known: HashMap<String, Track> = HashMap::new();
         for t in store
             .data
@@ -686,7 +758,10 @@ impl YrApp {
             home_scroller: SmoothTouchScroller::default(),
             search_scroller: SmoothTouchScroller::default(),
             library_scroller: SmoothTouchScroller::default(),
+            downloads_scroller: SmoothTouchScroller::default(),
+            settings_scroller: SmoothTouchScroller::default(),
             detail_scroller: SmoothTouchScroller::default(),
+            last_settings_category: SettingsCategory::Root,
             last_video_attached: None,
             video_stream_track_id: None,
             video_stream_info: None,
@@ -700,7 +775,13 @@ impl YrApp {
             wifi_only_dl_flag,
             notifications_flag,
             max_smart_songs_atomic,
+            wifi_connected_atomic,
+            metered_network_atomic,
             known_tracks,
+            cached_stream_ids,
+            frame_cached_stream_ids: HashSet::new(),
+            completed_download_ids: HashSet::new(),
+            prev_history_stack,
             consecutive_stream_failures: 0,
             retried_audio_error_track_id: None,
             retried_video_error_track_id: None,
@@ -793,6 +874,7 @@ impl YrApp {
         });
         let audio_bg = app.audio.clone();
         let queue_bg = Arc::clone(&app.queue);
+        let prev_stack_bg = Arc::clone(&app.prev_history_stack);
         let dl_bg = Arc::clone(&app.downloader);
         let provider_bg = Arc::clone(&app.provider);
         let quality_bg = app.store.data.config.stream_quality;
@@ -936,8 +1018,43 @@ impl YrApp {
                         }
                     }
                     MediaAction::Prev => {
-                        let prev = queue_bg.lock().ok().and_then(|mut q| q.prev_track().cloned());
-                        if let Some(track) = prev {
+                        let snap = audio_bg.snapshot();
+                        let should_restart_current = snap.position_secs > PREV_RESTART_THRESHOLD_SECS
+                            && matches!(
+                                snap.status,
+                                PlaybackStatus::Playing
+                                    | PlaybackStatus::Paused
+                                    | PlaybackStatus::Buffering
+                                    | PlaybackStatus::Loading
+                            );
+                        if should_restart_current {
+                            audio_bg.seek(Duration::ZERO);
+                            if snap.status == PlaybackStatus::Paused {
+                                audio_bg.resume();
+                            }
+                            if show_notif {
+                                if let Some(t) =
+                                    queue_bg.lock().ok().and_then(|q| q.current_track().cloned())
+                                {
+                                    let dur_ms = snap
+                                        .duration_secs
+                                        .map(|d| (d * 1000.0).max(0.0) as u64)
+                                        .or_else(|| t.duration_secs.map(|d| d * 1000))
+                                        .unwrap_or(0);
+                                    crate::android_media::update_playback(
+                                        &t.title,
+                                        &t.artist,
+                                        true,
+                                        0,
+                                        dur_ms,
+                                    );
+                                }
+                            }
+                            let _ = ev_tx_bg.send(AppEvent::RestartCurrentFromBg);
+                            ctx_bg.request_repaint();
+                            continue;
+                        }
+                        if let Some(track) = step_or_pop_previous_track(&queue_bg, &prev_stack_bg) {
                             play_track_bg(
                                 track,
                                 quality_bg,
@@ -950,6 +1067,14 @@ impl YrApp {
                                 show_notif,
                             )
                             .await;
+                        } else {
+                            audio_bg.seek(Duration::ZERO);
+                            if snap.status == PlaybackStatus::Paused {
+                                audio_bg.resume();
+                            }
+                            let _ = ev_tx_bg.send(AppEvent::RestartCurrentFromBg);
+                            ctx_bg.request_repaint();
+                            continue;
                         }
                     }
                 }
@@ -974,8 +1099,29 @@ impl YrApp {
         let notif_tick = Arc::clone(&app.notifications_flag);
         let max_smart_tick = Arc::clone(&app.max_smart_songs_atomic);
         let known_tick = Arc::clone(&app.known_tracks);
+        let cached_ids_tick = Arc::clone(&app.cached_stream_ids);
+        let wifi_tick = Arc::clone(&app.wifi_connected_atomic);
+        let metered_tick = Arc::clone(&app.metered_network_atomic);
+        let cov_scan_dir = cover_dir.clone();
         app.runtime.spawn(async move {
             use std::sync::atomic::Ordering;
+            // Warm in-memory cover cache index once off the UI render thread
+            if let Ok(entries) = std::fs::read_dir(&cov_scan_dir) {
+                let mut ids = HashSet::new();
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if let Some(fname) = path.file_name().and_then(|n| n.to_str()) {
+                        if let Some(id) = fname.strip_suffix(".jpg") {
+                            if std::fs::metadata(&path).map(|m| m.len() > 512).unwrap_or(false) {
+                                ids.insert(id.to_string());
+                            }
+                        }
+                    }
+                }
+                if let Ok(mut g) = cover_cached_ids().lock() {
+                    *g = ids;
+                }
+            }
             let mut interval = tokio::time::interval(Duration::from_secs(1));
             let mut tick_count: u64 = 0;
             loop {
@@ -983,10 +1129,20 @@ impl YrApp {
                 tick_count = tick_count.wrapping_add(1);
                 let show_notif = notif_tick.load(Ordering::Relaxed);
 
-                // Every 3s: zero-bandwidth background auto-promoter for completed stream_cache files
-                if tick_count % 3 == 0 && smart_dl_tick.load(Ordering::Relaxed) {
+                // Every 3s (offset 1): refresh network state off the render thread
+                if tick_count % 3 == 1 {
+                    let w = crate::android_media::is_wifi_connected();
+                    let m = crate::android_media::is_metered_network();
+                    wifi_tick.store(w, Ordering::Relaxed);
+                    metered_tick.store(m, Ordering::Relaxed);
+                }
+
+                // Every 3s: refresh in-memory stream_cache IDs + auto-promote completed streams
+                if tick_count % 3 == 0 {
+                    let smart_on = smart_dl_tick.load(Ordering::Relaxed);
                     if let Ok(entries) = std::fs::read_dir(&cache_dir_tick) {
                         let mut promoted_any = false;
+                        let mut scanned_ids = HashSet::new();
                         for entry in entries.flatten() {
                             let path = entry.path();
                             if let Some(fname) = path.file_name().and_then(|n| n.to_str()) {
@@ -998,7 +1154,8 @@ impl YrApp {
                                         continue;
                                     }
                                     let id = fname.trim_start_matches("stream_").trim_end_matches(".audio");
-                                    if dl_tick.find_local_path(id).await.is_none() {
+                                    scanned_ids.insert(id.to_string());
+                                    if smart_on && dl_tick.find_local_path(id).await.is_none() {
                                         let track_opt = queue_tick
                                             .lock()
                                             .ok()
@@ -1029,6 +1186,9 @@ impl YrApp {
                                     }
                                 }
                             }
+                        }
+                        if let Ok(mut g) = cached_ids_tick.lock() {
+                            *g = scanned_ids;
                         }
                         if promoted_any {
                             let mut protected_cur = HashSet::new();
@@ -1145,6 +1305,7 @@ impl YrApp {
         }
         app.audio.set_equalizer(app.store.data.config.equalizer.clone());
         crate::android_media::set_video_seek_seconds(app.store.data.config.seek_seconds);
+        crate::android_media::set_auto_check_updates(app.store.data.config.auto_check_updates);
         if !app.store.data.last_queue.is_empty() {
             let idx = app
                 .store
@@ -1430,10 +1591,37 @@ impl YrApp {
         }
     }
 
+    fn is_wifi_connected_cached(&self) -> bool {
+        self.wifi_connected_atomic.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn is_metered_network_cached(&self) -> bool {
+        self.metered_network_atomic.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn is_track_available_offline(&self, track: &Track) -> bool {
+        track.local_path.is_some()
+            || self.completed_download_ids.contains(&track.id)
+            || self.frame_cached_stream_ids.contains(&track.id)
+    }
+
+    fn trigger_update_check(&mut self, manual: bool, _ctx: &egui::Context) {
+        #[cfg(target_os = "android")]
+        {
+            crate::android_media::check_for_updates(manual);
+        }
+        #[cfg(not(target_os = "android"))]
+        {
+            if manual {
+                self.set_banner("Busca actualizaciones en github.com/uamo11/YR/releases");
+            }
+        }
+    }
+
     fn effective_stream_quality(&self) -> AudioQuality {
         if self.store.data.config.mobile_data_saver
-            && crate::android_media::is_metered_network()
-            && !crate::android_media::is_wifi_connected()
+            && self.is_metered_network_cached()
+            && !self.is_wifi_connected_cached()
         {
             AudioQuality::Low
         } else {
@@ -1447,11 +1635,11 @@ impl YrApp {
             return manual;
         }
         if self.store.data.config.mobile_data_saver
-            && crate::android_media::is_metered_network()
-            && !crate::android_media::is_wifi_connected()
+            && self.is_metered_network_cached()
+            && !self.is_wifi_connected_cached()
         {
             360
-        } else if crate::android_media::is_metered_network() {
+        } else if self.is_metered_network_cached() {
             480
         } else {
             720
@@ -1657,7 +1845,7 @@ impl YrApp {
             .join(format!("stream_{}.audio", track.id));
         let wifi_blocked = !manual
             && self.store.data.config.wifi_only_downloads
-            && !crate::android_media::is_wifi_connected();
+            && !self.is_wifi_connected_cached();
         let max_songs = self.store.data.config.max_smart_download_songs;
         let dl = Arc::clone(&self.downloader);
         let quality = self.store.data.config.download_quality;
@@ -1795,6 +1983,22 @@ impl YrApp {
     }
 
     fn play_track_in_list(&mut self, tracks: Vec<Track>, index: usize, ctx: &egui::Context) {
+        let incoming_id = tracks.get(index).map(|t| t.id.as_str());
+        if let Ok(q) = self.queue.lock() {
+            if let Some(prev) = q.current_track() {
+                if incoming_id != Some(prev.id.as_str()) {
+                    if let Ok(mut st) = self.prev_history_stack.lock() {
+                        if st.last().map(|t| t.id.as_str()) != Some(prev.id.as_str()) {
+                            st.push(prev.clone());
+                            if st.len() > 30 {
+                                let excess = st.len() - 30;
+                                st.drain(0..excess);
+                            }
+                        }
+                    }
+                }
+            }
+        }
         let single_track_id = if tracks.len() == 1 {
             tracks.first().map(|t| t.id.clone())
         } else {
@@ -1811,6 +2015,50 @@ impl YrApp {
             if let Some(track_id) = single_track_id {
                 self.fetch_radio_internal(track_id, ctx);
             }
+        }
+    }
+
+    fn handle_skip_previous(
+        &mut self,
+        snap: &AudioSnapshot,
+        swipe_gesture: bool,
+        ctx: &egui::Context,
+    ) {
+        let pos = self.seeking_secs.unwrap_or(snap.position_secs);
+        if !swipe_gesture && pos > PREV_RESTART_THRESHOLD_SECS {
+            self.seeking_secs = None;
+            self.sponsor_skipped_idx = None;
+            self.audio.seek(Duration::ZERO);
+            if snap.status == PlaybackStatus::Paused {
+                self.audio.resume();
+            } else if !matches!(
+                snap.status,
+                PlaybackStatus::Playing | PlaybackStatus::Buffering | PlaybackStatus::Loading
+            ) {
+                self.play_current_queue_track(ctx);
+                return;
+            }
+            self.last_media_sync = None;
+            if self.is_video_mode {
+                crate::android_media::sync_native_video(true, 0, snap.speed);
+            }
+            ctx.request_repaint();
+            return;
+        }
+        if step_or_pop_previous_track(&self.queue, &self.prev_history_stack).is_some() {
+            self.play_current_queue_track(ctx);
+        } else {
+            self.seeking_secs = None;
+            self.sponsor_skipped_idx = None;
+            self.audio.seek(Duration::ZERO);
+            if snap.status == PlaybackStatus::Paused {
+                self.audio.resume();
+            }
+            self.last_media_sync = None;
+            if self.is_video_mode {
+                crate::android_media::sync_native_video(true, 0, snap.speed);
+            }
+            ctx.request_repaint();
         }
     }
 
@@ -1931,7 +2179,7 @@ impl YrApp {
         let provider = Arc::clone(&self.provider);
         let quality = self.effective_stream_quality();
         let wifi_only_streaming =
-            self.store.data.config.wifi_only_streaming && !crate::android_media::is_wifi_connected();
+            self.store.data.config.wifi_only_streaming && !self.is_wifi_connected_cached();
         let allow_prefetch =
             self.store.data.config.gapless_playback && !self.store.data.config.battery_saver;
         let tx = self.event_tx.clone();
@@ -2376,10 +2624,24 @@ impl YrApp {
                     }
                 }
                 AppEvent::DownloadsRefreshed { tasks, total_bytes } => {
+                    self.completed_download_ids = tasks
+                        .iter()
+                        .filter(|d| d.status == DownloadStatus::Completed)
+                        .map(|d| d.track.id.clone())
+                        .collect();
                     self.downloads = tasks;
                     self.total_downloaded_bytes = total_bytes;
                     if self.sample_tracks.is_empty() || self.home_offline_mode {
                         self.rebuild_samples_deck();
+                    }
+                }
+                AppEvent::RestartCurrentFromBg => {
+                    self.seeking_secs = None;
+                    self.sponsor_skipped_idx = None;
+                    self.last_media_sync = None;
+                    if self.is_video_mode {
+                        let speed = self.audio.snapshot().speed;
+                        crate::android_media::sync_native_video(true, 0, speed);
                     }
                 }
                 AppEvent::MediaAction(act) => {
@@ -2738,6 +3000,11 @@ impl eframe::App for YrApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         if crate::android_media::take_back_pressed() {
             self.pop_back_navigation();
+        }
+        if let Ok(guard) = self.cached_stream_ids.lock() {
+            if *guard != self.frame_cached_stream_ids {
+                self.frame_cached_stream_ids = guard.clone();
+            }
         }
         self.process_events(ctx);
         let snap = self.audio.snapshot();
@@ -3508,6 +3775,7 @@ impl YrApp {
                 let detail_viewport = ui.available_rect_before_wrap();
                 self.detail_scroller.update(ui, detail_viewport, !self.detail_loading);
                 let detail_scroll = egui::ScrollArea::vertical()
+                    .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
                     .vertical_scroll_offset(self.detail_scroller.offset_y)
                     .drag_to_scroll(false)
                     .show(ui, |ui| {
@@ -3671,6 +3939,7 @@ impl YrApp {
                 let detail_viewport = ui.available_rect_before_wrap();
                 self.detail_scroller.update(ui, detail_viewport, !self.detail_loading);
                 let detail_scroll = egui::ScrollArea::vertical()
+                    .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
                     .vertical_scroll_offset(self.detail_scroller.offset_y)
                     .drag_to_scroll(false)
                     .show(ui, |ui| {
@@ -3779,6 +4048,7 @@ impl YrApp {
                 let detail_viewport = ui.available_rect_before_wrap();
                 self.detail_scroller.update(ui, detail_viewport, !self.detail_loading);
                 let detail_scroll = egui::ScrollArea::vertical()
+                    .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
                     .vertical_scroll_offset(self.detail_scroller.offset_y)
                     .drag_to_scroll(false)
                     .show(ui, |ui| {
@@ -3973,10 +4243,7 @@ impl YrApp {
             .current_track()
             .map(|t| t.id == track.id)
             .unwrap_or(false);
-        let is_downloaded = self
-            .downloads
-            .iter()
-            .any(|d| d.track.id == track.id && d.status == DownloadStatus::Completed);
+        let is_downloaded = self.is_track_available_offline(track);
 
         let row_h = 54.0;
         let more_btn_w = 34.0;
@@ -4114,6 +4381,7 @@ impl YrApp {
 
         egui::ScrollArea::horizontal()
             .id_salt(salt)
+            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 10.0;
@@ -4303,6 +4571,7 @@ impl YrApp {
         } else {
             let hscroll = egui::ScrollArea::horizontal()
                 .id_salt(salt)
+                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = 12.0;
@@ -4365,6 +4634,7 @@ impl YrApp {
         let sibling_tracks = shelf.tracks.clone();
         egui::ScrollArea::horizontal()
             .id_salt(salt)
+            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 12.0;
@@ -4614,6 +4884,7 @@ impl YrApp {
         self.home_scroller.update(ui, home_viewport, !is_loading);
         let scroll_out = egui::ScrollArea::vertical()
             .id_salt("home_vertical_scroll")
+            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
             .vertical_scroll_offset(self.home_scroller.offset_y)
             .drag_to_scroll(false)
             .show(ui, |ui| {
@@ -5667,6 +5938,7 @@ impl YrApp {
         self.search_scroller.update(ui, search_viewport, !search_loading);
         let search_scroll = egui::ScrollArea::vertical()
             .id_salt("search_scroll")
+            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
             .vertical_scroll_offset(self.search_scroller.offset_y)
             .drag_to_scroll(false)
             .show(ui, |ui| {
@@ -5821,6 +6093,9 @@ impl YrApp {
                         ui.add_space(6.0);
                         egui::ScrollArea::horizontal()
                             .id_salt("recent_search_thumbs")
+                            .scroll_bar_visibility(
+                                egui::scroll_area::ScrollBarVisibility::AlwaysHidden,
+                            )
                             .show(ui, |ui| {
                                 ui.horizontal(|ui| {
                                     ui.spacing_mut().item_spacing.x = 10.0;
@@ -6060,6 +6335,9 @@ impl YrApp {
                         ui.add_space(6.0);
                         egui::ScrollArea::horizontal()
                             .id_salt("explore_albums_h")
+                            .scroll_bar_visibility(
+                                egui::scroll_area::ScrollBarVisibility::AlwaysHidden,
+                            )
                             .show(ui, |ui| {
                                 ui.horizontal(|ui| {
                                     ui.spacing_mut().item_spacing.x = 12.0;
@@ -6121,6 +6399,9 @@ impl YrApp {
                         ui.add_space(6.0);
                         egui::ScrollArea::horizontal()
                             .id_salt("explore_moods_h")
+                            .scroll_bar_visibility(
+                                egui::scroll_area::ScrollBarVisibility::AlwaysHidden,
+                            )
                             .show(ui, |ui| {
                                 ui.horizontal(|ui| {
                                     ui.spacing_mut().item_spacing.x = 8.0;
@@ -6611,6 +6892,7 @@ impl YrApp {
         self.library_scroller.update(ui, lib_viewport, !lib_loading);
         let lib_scroll = egui::ScrollArea::vertical()
             .id_salt("lib_scroll")
+            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
             .vertical_scroll_offset(self.library_scroller.offset_y)
             .drag_to_scroll(false)
             .show(ui, |ui| {
@@ -7340,7 +7622,7 @@ impl YrApp {
         let smart_on = self.store.data.config.smart_downloads;
         let wifi_blocked = smart_on
             && self.store.data.config.wifi_only_downloads
-            && !crate::android_media::is_wifi_connected();
+            && !self.is_wifi_connected_cached();
 
         ui.add_space(4.0);
         egui::Frame::new()
@@ -7521,8 +7803,12 @@ impl YrApp {
         }
 
         let dl_viewport = ui.available_rect_before_wrap();
+        self.downloads_scroller.update(ui, dl_viewport, true);
         let dl_scroll = egui::ScrollArea::vertical()
-            .drag_to_scroll(true)
+            .id_salt("downloads_vertical_scroll")
+            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+            .vertical_scroll_offset(self.downloads_scroller.offset_y)
+            .drag_to_scroll(false)
             .show(ui, |ui| {
             if self.downloads.is_empty() {
                 ui.vertical_centered(|ui| {
@@ -7871,7 +8157,9 @@ impl YrApp {
                 }
             }
         });
-        if self.handle_pull_to_refresh(ui, dl_scroll.state.offset.y, dl_viewport, false) {
+        self.downloads_scroller
+            .sync_bounds(dl_scroll.content_size.y, dl_scroll.inner_rect.height());
+        if self.handle_pull_to_refresh(ui, self.downloads_scroller.offset_y, dl_viewport, false) {
             self.refresh_downloads(ctx);
             self.set_banner("Actualizando descargas...");
         }
@@ -7911,15 +8199,7 @@ impl YrApp {
                     render_track_thumb(ui, track, 48.0);
 
                     let text_width = (ui.available_width() - 42.0).max(120.0);
-                    let is_downloaded = track.local_path.is_some()
-                        || self.downloads.iter().any(|d| {
-                            d.track.id == track.id && d.status == DownloadStatus::Completed
-                        })
-                        || self
-                            .data_dir
-                            .join("stream_cache")
-                            .join(format!("stream_{}.audio", track.id))
-                            .exists();
+                    let is_downloaded = self.is_track_available_offline(track);
                     let title_color = if is_current { ACCENT_RED } else { TEXT_PRIMARY };
                     let row_h = 56.0;
 
@@ -8077,8 +8357,8 @@ impl YrApp {
                             && self.queue.lock().unwrap().next_track(true).is_some()
                         {
                             self.play_current_queue_track(ctx);
-                        } else if d.x > 55.0 && self.queue.lock().unwrap().prev_track().is_some() {
-                            self.play_current_queue_track(ctx);
+                        } else if d.x > 55.0 {
+                            self.handle_skip_previous(snap, true, ctx);
                         }
                     }
 
@@ -8128,9 +8408,8 @@ impl YrApp {
                             17.0,
                         )
                         .clicked()
-                            && self.queue.lock().unwrap().prev_track().is_some()
                         {
-                            self.play_current_queue_track(ctx);
+                            self.handle_skip_previous(snap, false, ctx);
                         }
                     });
                 });
@@ -8286,8 +8565,8 @@ impl YrApp {
                             }
                             if v_resp.clicked() {
                                 let metered_block = self.store.data.config.prefer_video_mode
-                                    && crate::android_media::is_metered_network()
-                                    && !crate::android_media::is_wifi_connected();
+                                    && self.is_metered_network_cached()
+                                    && !self.is_wifi_connected_cached();
                                 if metered_block {
                                     self.set_banner("Ahorro de datos: videos desactivados en datos móviles");
                                 } else {
@@ -8496,6 +8775,9 @@ impl YrApp {
                         ui.add_space(6.0);
                         egui::ScrollArea::horizontal()
                             .id_salt("queue_actions_and_tuner_chips")
+                            .scroll_bar_visibility(
+                                egui::scroll_area::ScrollBarVisibility::AlwaysHidden,
+                            )
                             .show(ui, |ui| {
                                 ui.horizontal(|ui| {
                                     ui.spacing_mut().item_spacing.x = 6.0;
@@ -8632,9 +8914,7 @@ impl YrApp {
                                                 }
 
                                                 let thumb_rect = render_track_thumb(ui, &t, 44.0);
-                                                let is_dl = t.local_path.is_some()
-                                                    || self.downloads.iter().any(|d| d.track.id == t.id && d.status == DownloadStatus::Completed)
-                                                    || self.data_dir.join("stream_cache").join(format!("stream_{}.audio", t.id)).exists();
+                                                let is_dl = self.is_track_available_offline(&t);
                                                 if is_dl {
                                                     let badge_center = Pos2::new(
                                                         thumb_rect.right() - 6.0,
@@ -9398,7 +9678,10 @@ impl YrApp {
                             crate::android_media::hide_embedded_video();
                         }
                     ui.add_space(4.0);
-                    let art_size = (avail_w - 28.0).min(body_h * 0.43).clamp(155.0, 290.0);
+                    let art_size = (avail_w - 28.0)
+                        .min((body_h - 195.0).max(88.0))
+                        .min(body_h * 0.43)
+                        .clamp(88.0, 290.0);
                     ui.vertical_centered(|ui| {
                         let (art_rect, art_resp) =
                             ui.allocate_exact_size(Vec2::splat(art_size), Sense::click_and_drag());
@@ -9442,9 +9725,8 @@ impl YrApp {
                                 && self.queue.lock().unwrap().next_track(true).is_some()
                             {
                                 self.play_current_queue_track(ctx);
-                            } else if d.x > 55.0 && self.queue.lock().unwrap().prev_track().is_some()
-                            {
-                                self.play_current_queue_track(ctx);
+                            } else if d.x > 55.0 {
+                                self.handle_skip_previous(snap, true, ctx);
                             }
                         } else if art_resp.double_clicked() {
                             if let Some(pos) = art_resp.interact_pointer_pos() {
@@ -9610,16 +9892,7 @@ impl YrApp {
                         }
                     }
 
-                    let is_offline = track.local_path.is_some()
-                        || self
-                            .downloads
-                            .iter()
-                            .any(|d| d.track.id == track.id && d.status == DownloadStatus::Completed)
-                        || self
-                            .data_dir
-                            .join("stream_cache")
-                            .join(format!("stream_{}.audio", track.id))
-                            .exists();
+                    let is_offline = self.is_track_available_offline(&track);
                     let status_badge: Option<(String, Color32)> = match &snap.status {
                         PlaybackStatus::Buffering | PlaybackStatus::Loading => {
                             Some(("Cargando audio...".to_string(), Color32::from_white_alpha(210)))
@@ -10110,9 +10383,8 @@ impl YrApp {
                                 26.0,
                             )
                             .clicked()
-                                && self.queue.lock().unwrap().prev_track().is_some()
                             {
-                                self.play_current_queue_track(ctx);
+                                self.handle_skip_previous(snap, false, ctx);
                             }
                         });
                         cols[2].vertical_centered(|ui| {
@@ -10390,9 +10662,17 @@ impl YrApp {
 
         ui.add_space(10.0);
 
-        egui::ScrollArea::vertical()
+        if self.last_settings_category != self.settings_category {
+            self.last_settings_category = self.settings_category;
+            self.settings_scroller = SmoothTouchScroller::default();
+        }
+        let settings_viewport = ui.available_rect_before_wrap();
+        self.settings_scroller.update(ui, settings_viewport, false);
+        let settings_scroll = egui::ScrollArea::vertical()
             .id_salt(("yr_settings_scroll", self.settings_category as u8))
-            .drag_to_scroll(true)
+            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+            .vertical_scroll_offset(self.settings_scroller.offset_y)
+            .drag_to_scroll(false)
             .show(ui, |ui| {
         if is_root {
             // Categorized settings menu list (matches YouTube Music settings screen: media_1794881819990_14eee889.jpg)
@@ -10549,6 +10829,18 @@ impl YrApp {
                         let _ = self.store.save();
                     }
                     ui.add_space(10.0);
+                    if settings_toggle_row(
+                        ui,
+                        &mut self.store.data.config.auto_check_updates,
+                        "Buscar actualizaciones automáticamente",
+                        "Comprueba nuevas versiones oficiales de YR Music en GitHub al iniciar la app.",
+                    ) {
+                        crate::android_media::set_auto_check_updates(
+                            self.store.data.config.auto_check_updates,
+                        );
+                        let _ = self.store.save();
+                    }
+                    ui.add_space(6.0);
                     ui.label("Tocar dos veces para buscar:");
                     ui.add_space(4.0);
                     ui.horizontal_wrapped(|ui| {
@@ -10681,8 +10973,8 @@ impl YrApp {
                     }
                 }
                 SettingsCategory::DataSaver => {
-                    let is_wifi = crate::android_media::is_wifi_connected();
-                    let is_metered = crate::android_media::is_metered_network();
+                    let is_wifi = self.is_wifi_connected_cached();
+                    let is_metered = self.is_metered_network_cached();
                     egui::Frame::new()
                         .fill(BG_SURFACE)
                         .stroke(Stroke::new(0.8_f32, Color32::from_rgb(48, 48, 54)))
@@ -10960,61 +11252,91 @@ impl YrApp {
                     }
                 }
                 SettingsCategory::About => {
-                    ui.heading("YR Music v0.9.21");
+                    ui.heading(concat!("YR Music v", env!("CARGO_PKG_VERSION")));
                     ui.label("Cliente nativo de música 100% en Rust para Android y escritorio.");
                     ui.add_space(6.0);
                     ui.label(RichText::new("Motor de audio Symphonia PCM con DSP Morphe 3D binaural, reproductor integrado de video en la app, auto-scroll inteligente de cola, prefetch predictivo en disco y compatibilidad completa con YouTube Music.").size(12.0).color(TEXT_SECONDARY));
                     ui.add_space(8.0);
                     ui.label(RichText::new("Licencia MIT • Código abierto").size(12.0).color(TEXT_SECONDARY));
                     ui.add_space(10.0);
-                    if icons::icon_pill_button(
+                    if settings_toggle_row(
                         ui,
-                        icons::Icon::MusicNote,
-                        "Probar audio local (2 pistas)",
-                        BG_ELEVATED,
-                        TEXT_PRIMARY,
-                    )
-                    .clicked()
-                    {
-                        let p1 = self.data_dir.join("yr_demo_1.wav");
-                        let p2 = self.data_dir.join("yr_demo_2.wav");
-                        if generate_test_wav(&p1, 440.0, 25).is_ok()
-                            && generate_test_wav(&p2, 523.25, 25).is_ok()
-                        {
-                            let tracks = vec![
-                                Track {
-                                    id: "local_demo_1".into(),
-                                    title: "Demo Local 440 Hz (Motor Rust)".into(),
-                                    artist: "YR Audio Engine".into(),
-                                    artist_id: None,
-                                    album: Some("Test Local".into()),
-                                    album_id: None,
-                                    duration_secs: Some(25),
-                                    thumbnail_url: None,
-                                    local_path: Some(p1.to_string_lossy().into_owned()),
-                                },
-                                Track {
-                                    id: "local_demo_2".into(),
-                                    title: "Demo Local 523 Hz (Pista 2)".into(),
-                                    artist: "YR Audio Engine".into(),
-                                    artist_id: None,
-                                    album: Some("Test Local".into()),
-                                    album_id: None,
-                                    duration_secs: Some(25),
-                                    thumbnail_url: None,
-                                    local_path: Some(p2.to_string_lossy().into_owned()),
-                                },
-                            ];
-                            self.play_track_in_list(tracks, 0, ctx);
-                        } else {
-                            self.set_banner("No se pudo crear audio local de prueba");
-                        }
+                        &mut self.store.data.config.auto_check_updates,
+                        "Actualizaciones automáticas (GitHub)",
+                        "Avisar automáticamente cuando exista un nuevo release oficial de YR Music.",
+                    ) {
+                        crate::android_media::set_auto_check_updates(
+                            self.store.data.config.auto_check_updates,
+                        );
+                        let _ = self.store.save();
                     }
+                    ui.add_space(8.0);
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing = Vec2::new(8.0, 8.0);
+                        if icons::icon_pill_button(
+                            ui,
+                            icons::Icon::Refresh,
+                            "Buscar actualizaciones",
+                            ACCENT_RED,
+                            Color32::WHITE,
+                        )
+                        .clicked()
+                        {
+                            self.trigger_update_check(true, ctx);
+                        }
+                        if icons::icon_pill_button(
+                            ui,
+                            icons::Icon::MusicNote,
+                            "Probar audio local (2 pistas)",
+                            BG_ELEVATED,
+                            TEXT_PRIMARY,
+                        )
+                        .clicked()
+                        {
+                            let p1 = self.data_dir.join("yr_demo_1.wav");
+                            let p2 = self.data_dir.join("yr_demo_2.wav");
+                            if generate_test_wav(&p1, 440.0, 25).is_ok()
+                                && generate_test_wav(&p2, 523.25, 25).is_ok()
+                            {
+                                let tracks = vec![
+                                    Track {
+                                        id: "local_demo_1".into(),
+                                        title: "Demo Local 440 Hz (Motor Rust)".into(),
+                                        artist: "YR Audio Engine".into(),
+                                        artist_id: None,
+                                        album: Some("Test Local".into()),
+                                        album_id: None,
+                                        duration_secs: Some(25),
+                                        thumbnail_url: None,
+                                        local_path: Some(p1.to_string_lossy().into_owned()),
+                                    },
+                                    Track {
+                                        id: "local_demo_2".into(),
+                                        title: "Demo Local 523 Hz (Pista 2)".into(),
+                                        artist: "YR Audio Engine".into(),
+                                        artist_id: None,
+                                        album: Some("Test Local".into()),
+                                        album_id: None,
+                                        duration_secs: Some(25),
+                                        thumbnail_url: None,
+                                        local_path: Some(p2.to_string_lossy().into_owned()),
+                                    },
+                                ];
+                                self.play_track_in_list(tracks, 0, ctx);
+                            } else {
+                                self.set_banner("No se pudo crear audio local de prueba");
+                            }
+                        }
+                    });
                 }
             }
         }
         ui.add_space(56.0);
         });
+        self.settings_scroller.sync_bounds(
+            settings_scroll.content_size.y,
+            settings_scroll.inner_rect.height(),
+        );
     }
 
     fn render_action_sheet_modal(&mut self, ctx: &egui::Context) {
@@ -11290,8 +11612,8 @@ impl YrApp {
                 }
                 if sheet_row(ui, icons::Icon::Video, "Ver video musical") {
                     let metered_block = self.store.data.config.prefer_video_mode
-                        && crate::android_media::is_metered_network()
-                        && !crate::android_media::is_wifi_connected();
+                        && self.is_metered_network_cached()
+                        && !self.is_wifi_connected_cached();
                     if metered_block {
                         self.set_banner("Ahorro de datos: videos desactivados en datos móviles");
                     } else {
@@ -12241,6 +12563,10 @@ impl YrApp {
                             self.logout_google(ctx);
                             self.set_banner("Sesión de Google cerrada");
                         }
+                        if menu_row(ui, icons::Icon::Download, "Buscar actualizaciones").clicked() {
+                            self.show_account_modal = false;
+                            self.trigger_update_check(true, ctx);
+                        }
                         if menu_row(ui, icons::Icon::Settings, "Configuración").clicked() {
                             self.show_account_modal = false;
                             self.show_settings = true;
@@ -12248,7 +12574,7 @@ impl YrApp {
                         }
                         if menu_row(ui, icons::Icon::Help, "Ayuda y comentarios").clicked() {
                             self.show_account_modal = false;
-                            self.set_banner("YR Music v0.9.21 • Pure Rust");
+                            self.set_banner(concat!("YR Music v", env!("CARGO_PKG_VERSION"), " • Pure Rust"));
                         }
 
                         #[cfg(target_os = "android")]
@@ -13621,8 +13947,40 @@ fn paint_progressive_image(
 }
 
 fn render_track_thumb(ui: &mut egui::Ui, track: &Track, size: f32) -> egui::Rect {
-    let url = resolve_track_cover_uri(track);
-    render_thumb(ui, url.as_deref(), size)
+    let (rect, _) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
+    ui.painter()
+        .rect_filled(rect, CornerRadius::same(8), BG_ELEVATED);
+    if !ui.is_rect_visible(rect) {
+        return rect;
+    }
+    let note_rect = egui::Rect::from_center_size(
+        rect.center(),
+        Vec2::splat((size * 0.44).clamp(14.0, 44.0)),
+    );
+    icons::draw_icon(
+        ui.painter(),
+        note_rect,
+        icons::Icon::MusicNote,
+        Color32::from_white_alpha(95),
+    );
+    if let Some(u) = resolve_track_cover_uri(track) {
+        let max_px = if size <= 72.0 {
+            160
+        } else if size <= 150.0 {
+            224
+        } else {
+            320
+        };
+        let thumb_uri = tracked_thumb_uri(&u, max_px);
+        paint_ready_image(
+            ui,
+            rect,
+            thumb_uri,
+            Vec2::splat(size),
+            CornerRadius::same(8),
+        );
+    }
+    rect
 }
 
 fn render_thumb(ui: &mut egui::Ui, url: Option<&str>, size: f32) -> egui::Rect {
@@ -13664,6 +14022,11 @@ fn render_thumb(ui: &mut egui::Ui, url: Option<&str>, size: f32) -> egui::Rect {
 
 static IMAGE_LRU: OnceLock<Mutex<ImageLru>> = OnceLock::new();
 static COVER_CACHE_DIR: OnceLock<PathBuf> = OnceLock::new();
+static COVER_CACHED_IDS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+
+fn cover_cached_ids() -> &'static Mutex<HashSet<String>> {
+    COVER_CACHED_IDS.get_or_init(|| Mutex::new(HashSet::new()))
+}
 
 fn image_lru() -> &'static Mutex<ImageLru> {
     IMAGE_LRU.get_or_init(|| Mutex::new(ImageLru::default()))
@@ -13671,8 +14034,12 @@ fn image_lru() -> &'static Mutex<ImageLru> {
 
 fn resolve_track_cover_uri(track: &Track) -> Option<String> {
     if let Some(dir) = COVER_CACHE_DIR.get() {
-        let p = yr_core::image_cache::offline_cover_path(dir, &track.id);
-        if p.exists() && std::fs::metadata(&p).map(|m| m.len() > 512).unwrap_or(false) {
+        let in_mem = cover_cached_ids()
+            .lock()
+            .ok()
+            .is_some_and(|g| g.contains(&track.id));
+        if in_mem {
+            let p = yr_core::image_cache::offline_cover_path(dir, &track.id);
             return Some(yr_core::image_cache::file_uri_for_path(&p));
         }
     }
@@ -13686,6 +14053,9 @@ async fn cache_track_cover_async(
 ) {
     let dst = yr_core::image_cache::offline_cover_path(&cover_dir, &track.id);
     if dst.exists() && std::fs::metadata(&dst).map(|m| m.len() > 512).unwrap_or(false) {
+        if let Ok(mut g) = cover_cached_ids().lock() {
+            g.insert(track.id);
+        }
         return;
     }
     let Some(raw_url) = track_thumb_url(track.thumbnail_url.as_deref(), &track.id) else {
@@ -13696,8 +14066,10 @@ async fn cache_track_cover_async(
         if bytes.len() > 512 {
             let _ = std::fs::create_dir_all(&cover_dir);
             let tmp = dst.with_extension("jpg.tmp");
-            if std::fs::write(&tmp, &bytes).is_ok() {
-                let _ = std::fs::rename(&tmp, &dst);
+            if std::fs::write(&tmp, &bytes).is_ok() && std::fs::rename(&tmp, &dst).is_ok() {
+                if let Ok(mut g) = cover_cached_ids().lock() {
+                    g.insert(track.id);
+                }
             }
         }
     }

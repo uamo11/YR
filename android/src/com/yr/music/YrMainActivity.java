@@ -28,6 +28,10 @@ public class YrMainActivity extends NativeActivity {
             YrPlaybackService.onActivityResumed(this);
         } catch (Throwable ignored) {
         }
+        try {
+            YrUpdateChecker.onActivityResumed(this);
+        } catch (Throwable ignored) {
+        }
     }
 
     @Override

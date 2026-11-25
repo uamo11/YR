@@ -143,6 +143,7 @@ pub struct EventLoop<T: 'static> {
     cause: StartCause,
     ignore_volume_keys: bool,
     combining_accent: Option<char>,
+    last_scale_factor: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -192,6 +193,7 @@ impl<T: 'static> EventLoop<T> {
             cause: StartCause::Init,
             ignore_volume_keys: attributes.ignore_volume_keys,
             combining_accent: None,
+            last_scale_factor: None,
         })
     }
 
@@ -217,10 +219,14 @@ impl<T: 'static> EventLoop<T> {
                 MainEvent::TerminateWindow { .. } => {
                     callback(event::Event::Suspended, self.window_target());
                 },
-                MainEvent::WindowResized { .. } => resized = true,
+                MainEvent::WindowResized { .. } => {
+                    resized = true;
+                    pending_redraw = true;
+                },
                 MainEvent::RedrawNeeded { .. } => pending_redraw = true,
                 MainEvent::ContentRectChanged { .. } => {
-                    warn!("TODO: find a way to notify application of content rect change");
+                    resized = true;
+                    pending_redraw = true;
                 },
                 MainEvent::GainedFocus => {
                     HAS_FOCUS.store(true, Ordering::Relaxed);
@@ -244,12 +250,12 @@ impl<T: 'static> EventLoop<T> {
                 },
                 MainEvent::ConfigChanged { .. } => {
                     let monitor = MonitorHandle::new(self.android_app.clone());
-                    let old_scale_factor = monitor.scale_factor();
                     let scale_factor = monitor.scale_factor();
-                    if (scale_factor - old_scale_factor).abs() < f64::EPSILON {
-                        let new_inner_size = Arc::new(Mutex::new(
-                            MonitorHandle::new(self.android_app.clone()).size(),
-                        ));
+                    let old_scale_factor = self.last_scale_factor.replace(scale_factor);
+                    if old_scale_factor
+                        .is_some_and(|prev| (scale_factor - prev).abs() > f64::EPSILON)
+                    {
+                        let new_inner_size = Arc::new(Mutex::new(monitor.size()));
                         let event = event::Event::WindowEvent {
                             window_id: window::WindowId(WindowId),
                             event: event::WindowEvent::ScaleFactorChanged {
@@ -261,6 +267,8 @@ impl<T: 'static> EventLoop<T> {
                         };
                         callback(event, self.window_target());
                     }
+                    resized = true;
+                    pending_redraw = true;
                 },
                 MainEvent::LowMemory => {
                     callback(event::Event::MemoryWarning, self.window_target());
