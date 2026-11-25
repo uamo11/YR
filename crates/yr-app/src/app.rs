@@ -229,6 +229,78 @@ fn step_or_pop_previous_track(
     popped.and_then(|prev| q.prepend_and_select(prev).cloned())
 }
 
+/// One allocation-free snapshot of the pointer state per frame (single input lock).
+#[derive(Clone, Copy)]
+struct TouchFrameSample {
+    time: f64,
+    dt: f32,
+    down: bool,
+    pressed: bool,
+    released: bool,
+    origin: Option<Pos2>,
+    latest: Option<Pos2>,
+    delta: Vec2,
+    velocity: Vec2,
+    wheel: Vec2,
+}
+
+fn sample_touch_frame(ui: &egui::Ui) -> TouchFrameSample {
+    ui.input(|i| TouchFrameSample {
+        time: i.time,
+        dt: i.stable_dt.clamp(0.001, 0.05),
+        down: i.pointer.any_down(),
+        pressed: i.pointer.any_pressed(),
+        released: i.pointer.any_released(),
+        origin: i.pointer.press_origin(),
+        latest: i.pointer.latest_pos(),
+        delta: i.pointer.delta(),
+        velocity: i.pointer.velocity(),
+        wheel: i.raw_scroll_delta,
+    })
+}
+
+/// Minimum fling speed (px/s) at which a tap only "catches" the list (Android behaviour).
+const FLING_CATCH_MIN_VEL: f32 = 95.0;
+/// If the finger rests this long before lifting, the gesture ends without any fling.
+const HOLD_STILL_CANCEL_SECS: f64 = 0.075;
+
+/// Invisible foreground shield over a flinging list: a tap that stops a fast fling
+/// only stops it and never activates the row underneath. egui resolves the click
+/// target from the previous frame's hit-test, so the shield must already exist while
+/// the fling animates and stay up through the catching press.
+fn show_fling_tap_shield(ui: &egui::Ui, rect: egui::Rect, id: egui::Id) {
+    let clipped = rect.intersect(ui.clip_rect());
+    if clipped.width() <= 1.0 || clipped.height() <= 1.0 {
+        return;
+    }
+    egui::Area::new(id)
+        .order(egui::Order::Foreground)
+        .fixed_pos(clipped.min)
+        .movable(false)
+        .interactable(true)
+        .show(ui.ctx(), |ui| {
+            ui.allocate_exact_size(clipped.size(), Sense::click());
+        });
+}
+
+/// Picks the release fling velocity, ignoring tiny opposite lift-off hooks.
+fn release_fling_velocity(raw: f32, smoothed: f32) -> f32 {
+    let v = if smoothed.abs() > 220.0 && raw.abs() < 80.0 {
+        smoothed
+    } else if raw.abs() > 10.0 && smoothed.signum() == raw.signum() {
+        if smoothed.abs() > raw.abs() {
+            smoothed
+        } else {
+            raw
+        }
+    } else if raw.abs() > 10.0 {
+        raw
+    } else {
+        smoothed
+    };
+    v.clamp(-5200.0, 5200.0)
+}
+
 /// Disambiguated touch drag & 60/120fps Android OverScroller kinetic fling for egui on mobile.
 #[derive(Clone, Debug, Default)]
 pub struct SmoothTouchScroller {
@@ -240,6 +312,9 @@ pub struct SmoothTouchScroller {
     pub drag_slop_exceeded: bool,
     axis_lock: u8, // 0 = undecided, 1 = vertical, 2 = horizontal (yield to carousels/swipes)
     smoothed_vy: f32,
+    slop_applied: bool,
+    caught_fling: bool,
+    last_move_at: f64,
 }
 
 impl SmoothTouchScroller {
@@ -254,29 +329,50 @@ impl SmoothTouchScroller {
         viewport_rect: egui::Rect,
         can_pull_refresh: bool,
     ) {
-        const TOUCH_SLOP: f32 = 7.0;
-        let dt = ui.input(|i| i.stable_dt).clamp(0.001, 0.05);
-        let pointer = ui.input(|i| i.pointer.clone());
-        let down = pointer.any_down();
-        let pressed = pointer.any_pressed();
-        let released = pointer.any_released();
-        let origin_opt = pointer.press_origin();
-        let press_in_view = origin_opt.is_some_and(|p| viewport_rect.contains(p));
+        self.update_with_options(ui, viewport_rect, can_pull_refresh, true);
+    }
 
-        if pressed && press_in_view {
+    pub fn update_with_options(
+        &mut self,
+        ui: &egui::Ui,
+        viewport_rect: egui::Rect,
+        can_pull_refresh: bool,
+        allow_scroll: bool,
+    ) {
+        const TOUCH_SLOP: f32 = 7.0;
+        if !allow_scroll {
+            // Another widget (e.g. queue reorder grip) owns the gesture.
+            self.is_dragging = false;
+            self.drag_slop_exceeded = false;
+            self.axis_lock = 0;
+            self.vel_y = 0.0;
+            self.smoothed_vy = 0.0;
+            self.slop_applied = false;
+            self.caught_fling = false;
+            return;
+        }
+        let s = sample_touch_frame(ui);
+        let dt = s.dt;
+        let press_in_view = s.origin.is_some_and(|p| viewport_rect.contains(p));
+
+        if s.pressed && press_in_view {
+            self.caught_fling = self.vel_y.abs() > FLING_CATCH_MIN_VEL;
             self.vel_y = 0.0;
             self.snap_target_y = None;
             self.smoothed_vy = 0.0;
             self.is_dragging = false;
             self.drag_slop_exceeded = false;
+            self.slop_applied = false;
             self.axis_lock = 0;
+            self.last_move_at = s.time;
         }
 
-        if down && press_in_view {
-            let (dx, dy) = match (origin_opt, pointer.latest_pos()) {
-                (Some(o), Some(p)) => ((p.x - o.x).abs(), (p.y - o.y).abs()),
+        if s.down && press_in_view {
+            let (raw_dx, raw_dy) = match (s.origin, s.latest) {
+                (Some(o), Some(p)) => (p.x - o.x, p.y - o.y),
                 _ => (0.0, 0.0),
             };
+            let (dx, dy) = (raw_dx.abs(), raw_dy.abs());
 
             if self.axis_lock == 0 && dx.hypot(dy) > TOUCH_SLOP {
                 if dx > dy * 1.15 {
@@ -286,54 +382,69 @@ impl SmoothTouchScroller {
                     self.axis_lock = 1;
                     self.drag_slop_exceeded = true;
                     self.is_dragging = true;
+                    // Vertical scroll owns the gesture: cancel row/slider drags underneath.
+                    ui.ctx().stop_dragging();
                 }
+                self.caught_fling = false;
             }
 
             if self.axis_lock == 1 {
-                let delta = pointer.delta();
-                if delta.y.abs() > 0.05 {
+                // First locked frame: apply the movement accumulated past the slop so the
+                // content tracks the finger 1:1 instead of lagging ~7px behind it.
+                let step_dy = if !self.slop_applied {
+                    self.slop_applied = true;
+                    raw_dy - raw_dy.signum() * TOUCH_SLOP.min(dy)
+                } else {
+                    s.delta.y
+                };
+                if step_dy.abs() > 0.05 {
+                    self.last_move_at = s.time;
                     self.vel_y = 0.0;
                     self.snap_target_y = None;
-                    let inst_vy = (delta.y / dt).clamp(-5200.0, 5200.0);
-                    self.smoothed_vy = self.smoothed_vy * 0.4 + inst_vy * 0.6;
+                    let inst_vy = (step_dy / dt).clamp(-5200.0, 5200.0);
+                    self.smoothed_vy = if self.smoothed_vy == 0.0 {
+                        inst_vy
+                    } else {
+                        self.smoothed_vy * 0.35 + inst_vy * 0.65
+                    };
                     // If pulling down at top, let pull-to-refresh handle it without scrolling
-                    if !(self.offset_y <= 2.0 && delta.y > 0.0 && can_pull_refresh) {
-                        self.offset_y = (self.offset_y - delta.y).clamp(0.0, self.max_offset_y);
-                        ui.ctx().request_repaint();
+                    if !(self.offset_y <= 2.0 && step_dy > 0.0 && can_pull_refresh) {
+                        self.offset_y = (self.offset_y - step_dy).clamp(0.0, self.max_offset_y);
                     }
+                    ui.ctx().request_repaint();
+                } else {
+                    self.smoothed_vy *= (-20.0 * dt).exp();
                 }
             }
         }
 
-        if released {
+        if s.released {
             let was_dragging = self.is_dragging && self.axis_lock == 1;
+            // Wall-clock check: no frames are produced while the finger rests, so a
+            // per-frame accumulator would miss the pause and fling with stale speed.
+            let held_still = s.time - self.last_move_at > HOLD_STILL_CANCEL_SECS;
             self.is_dragging = false;
             self.drag_slop_exceeded = false;
+            self.slop_applied = false;
+            self.caught_fling = false;
             self.axis_lock = 0;
             if was_dragging {
-                let raw_vy = pointer.velocity().y;
-                let vy = if raw_vy.abs() > 10.0 && self.smoothed_vy.signum() == raw_vy.signum() {
-                    if self.smoothed_vy.abs() > raw_vy.abs() {
-                        self.smoothed_vy
-                    } else {
-                        raw_vy
-                    }
-                } else if raw_vy.abs() > 10.0 {
-                    raw_vy
+                if held_still {
+                    self.vel_y = 0.0;
                 } else {
-                    self.smoothed_vy
-                }
-                .clamp(-5200.0, 5200.0);
-                if vy.abs() > 45.0 {
                     // Moving downward (positive vy) means scrolling up (decreasing offset_y)
-                    self.vel_y = vy;
+                    let vy = release_fling_velocity(s.velocity.y, self.smoothed_vy);
+                    if vy.abs() > 45.0 {
+                        self.vel_y = vy;
+                        ui.ctx().request_repaint();
+                    }
                 }
             }
             self.smoothed_vy = 0.0;
         }
 
         // Exponential viscous kinetic fling momentum (smooth Android OverScroller curve)
-        if !down {
+        if !s.down {
             if let Some(target) = self.snap_target_y {
                 let clamped_target = target.clamp(0.0, self.max_offset_y);
                 let diff = clamped_target - self.offset_y;
@@ -363,14 +474,18 @@ impl SmoothTouchScroller {
         }
 
         // Support mouse wheel / touchpad scroll inside viewport
-        if viewport_rect.contains(pointer.latest_pos().unwrap_or(Pos2::ZERO)) {
-            let wheel = ui.input(|i| i.raw_scroll_delta.y);
-            if wheel.abs() > 0.5 {
-                self.vel_y = 0.0;
-                self.snap_target_y = None;
-                self.offset_y = (self.offset_y - wheel).clamp(0.0, self.max_offset_y);
-                ui.ctx().request_repaint();
-            }
+        if viewport_rect.contains(s.latest.unwrap_or(Pos2::ZERO)) && s.wheel.y.abs() > 0.5 {
+            self.vel_y = 0.0;
+            self.snap_target_y = None;
+            self.offset_y = (self.offset_y - s.wheel.y).clamp(0.0, self.max_offset_y);
+            ui.ctx().request_repaint();
+        }
+
+        let flinging = !s.down
+            && self.snap_target_y.is_none()
+            && self.vel_y.abs() > FLING_CATCH_MIN_VEL;
+        if flinging || (self.caught_fling && s.down) {
+            show_fling_tap_shield(ui, viewport_rect, ui.id().with("yr_vfling_shield"));
         }
     }
 
@@ -394,6 +509,9 @@ pub struct SmoothHorizScroller {
     pub is_dragging: bool,
     axis_lock: u8, // 0 = undecided, 1 = horizontal, 2 = vertical yield
     smoothed_vx: f32,
+    slop_applied: bool,
+    caught_fling: bool,
+    last_move_at: f64,
 }
 
 impl SmoothHorizScroller {
@@ -402,9 +520,10 @@ impl SmoothHorizScroller {
         ui: &egui::Ui,
         viewport_rect: egui::Rect,
         page_stride: Option<f32>,
+        shield_id: egui::Id,
     ) {
         const TOUCH_SLOP: f32 = 7.0;
-        let active_rect = if let Some(prev) = self.last_rect {
+        let raw_rect = if let Some(prev) = self.last_rect {
             egui::Rect::from_min_size(
                 viewport_rect.min,
                 Vec2::new(viewport_rect.width(), prev.height().max(32.0)),
@@ -412,69 +531,82 @@ impl SmoothHorizScroller {
         } else {
             viewport_rect
         };
-        let dt = ui.input(|i| i.stable_dt).clamp(0.001, 0.05);
-        let pointer = ui.input(|i| i.pointer.clone());
-        let down = pointer.any_down();
-        let pressed = pointer.any_pressed();
-        let released = pointer.any_released();
-        let origin_opt = pointer.press_origin();
-        let press_in_view = origin_opt.is_some_and(|p| active_rect.contains(p));
+        // Only the visible part of a carousel may capture touches; a row scrolled
+        // half off-screen must not steal swipes from the header/bottom bar.
+        let active_rect = raw_rect.intersect(ui.clip_rect());
+        let s = sample_touch_frame(ui);
+        let dt = s.dt;
+        let press_in_view =
+            active_rect.is_positive() && s.origin.is_some_and(|p| active_rect.contains(p));
 
-        if pressed && press_in_view {
+        if s.pressed && press_in_view {
+            self.caught_fling = self.vel_x.abs() > FLING_CATCH_MIN_VEL;
             self.vel_x = 0.0;
             self.smoothed_vx = 0.0;
             self.snap_target_x = None;
             self.is_dragging = false;
+            self.slop_applied = false;
             self.axis_lock = 0;
+            self.last_move_at = s.time;
         }
 
-        if down && press_in_view {
-            let (dx, dy) = match (origin_opt, pointer.latest_pos()) {
-                (Some(o), Some(p)) => ((p.x - o.x).abs(), (p.y - o.y).abs()),
+        if s.down && press_in_view {
+            let (raw_dx, raw_dy) = match (s.origin, s.latest) {
+                (Some(o), Some(p)) => (p.x - o.x, p.y - o.y),
                 _ => (0.0, 0.0),
             };
+            let (dx, dy) = (raw_dx.abs(), raw_dy.abs());
 
             if self.axis_lock == 0 && dx.hypot(dy) > TOUCH_SLOP {
                 if dx > dy * 1.15 {
                     self.axis_lock = 1;
                     self.is_dragging = true;
+                    ui.ctx().stop_dragging();
                 } else {
                     self.axis_lock = 2;
                     self.is_dragging = false;
                 }
+                self.caught_fling = false;
             }
 
             if self.axis_lock == 1 {
-                let delta = pointer.delta();
-                if delta.x.abs() > 0.05 {
+                let step_dx = if !self.slop_applied {
+                    self.slop_applied = true;
+                    raw_dx - raw_dx.signum() * TOUCH_SLOP.min(dx)
+                } else {
+                    s.delta.x
+                };
+                if step_dx.abs() > 0.05 {
+                    self.last_move_at = s.time;
                     self.vel_x = 0.0;
                     self.snap_target_x = None;
-                    let inst_vx = (delta.x / dt).clamp(-5200.0, 5200.0);
-                    self.smoothed_vx = self.smoothed_vx * 0.4 + inst_vx * 0.6;
-                    self.offset_x = (self.offset_x - delta.x).clamp(0.0, self.max_offset_x);
+                    let inst_vx = (step_dx / dt).clamp(-5200.0, 5200.0);
+                    self.smoothed_vx = if self.smoothed_vx == 0.0 {
+                        inst_vx
+                    } else {
+                        self.smoothed_vx * 0.35 + inst_vx * 0.65
+                    };
+                    self.offset_x = (self.offset_x - step_dx).clamp(0.0, self.max_offset_x);
                     ui.ctx().request_repaint();
+                } else {
+                    self.smoothed_vx *= (-20.0 * dt).exp();
                 }
             }
         }
 
-        if released {
+        if s.released {
             let was_dragging = self.is_dragging && self.axis_lock == 1;
+            let held_still = s.time - self.last_move_at > HOLD_STILL_CANCEL_SECS;
             self.is_dragging = false;
+            self.slop_applied = false;
+            self.caught_fling = false;
             self.axis_lock = 0;
             if was_dragging {
-                let raw_vx = pointer.velocity().x;
-                let vx = if raw_vx.abs() > 10.0 && self.smoothed_vx.signum() == raw_vx.signum() {
-                    if self.smoothed_vx.abs() > raw_vx.abs() {
-                        self.smoothed_vx
-                    } else {
-                        raw_vx
-                    }
-                } else if raw_vx.abs() > 10.0 {
-                    raw_vx
+                let vx = if held_still {
+                    0.0
                 } else {
-                    self.smoothed_vx
-                }
-                .clamp(-5200.0, 5200.0);
+                    release_fling_velocity(s.velocity.x, self.smoothed_vx)
+                };
                 if let Some(stride) = page_stride.filter(|&s| s > 10.0 && self.max_offset_x > 1.0) {
                     let target_page = if vx.abs() > 140.0 {
                         if vx < 0.0 {
@@ -491,12 +623,15 @@ impl SmoothHorizScroller {
                     ui.ctx().request_repaint();
                 } else if vx.abs() > 45.0 {
                     self.vel_x = vx;
+                    ui.ctx().request_repaint();
+                } else {
+                    self.vel_x = 0.0;
                 }
             }
             self.smoothed_vx = 0.0;
         }
 
-        if !down {
+        if !s.down {
             if let Some(target) = self.snap_target_x {
                 let diff = target - self.offset_x;
                 if diff.abs() < 0.5 {
@@ -524,14 +659,18 @@ impl SmoothHorizScroller {
             }
         }
 
-        if active_rect.contains(pointer.latest_pos().unwrap_or(Pos2::ZERO)) {
-            let wheel_x = ui.input(|i| i.raw_scroll_delta.x);
-            if wheel_x.abs() > 0.5 {
-                self.vel_x = 0.0;
-                self.snap_target_x = None;
-                self.offset_x = (self.offset_x - wheel_x).clamp(0.0, self.max_offset_x);
-                ui.ctx().request_repaint();
-            }
+        if active_rect.contains(s.latest.unwrap_or(Pos2::ZERO)) && s.wheel.x.abs() > 0.5 {
+            self.vel_x = 0.0;
+            self.snap_target_x = None;
+            self.offset_x = (self.offset_x - s.wheel.x).clamp(0.0, self.max_offset_x);
+            ui.ctx().request_repaint();
+        }
+
+        let flinging = !s.down
+            && self.snap_target_x.is_none()
+            && self.vel_x.abs() > FLING_CATCH_MIN_VEL;
+        if flinging || (self.caught_fling && s.down) {
+            show_fling_tap_shield(ui, active_rect, shield_id);
         }
     }
 
@@ -4706,7 +4845,7 @@ impl YrApp {
         );
         let offset_x = {
             let sc = self.horiz_scrollers.entry(key).or_default();
-            sc.update(ui, fallback_rect, page_stride);
+            sc.update(ui, fallback_rect, page_stride, key.with("yr_hfling_shield"));
             sc.offset_x
         };
         let scroll_out = egui::ScrollArea::horizontal()
@@ -9261,7 +9400,12 @@ impl YrApp {
                         let total_ordered = ordered.len();
                         let queue_viewport = ui.available_rect_before_wrap();
                         let queue_allow_scroll = ui.ctx().dragged_id().is_none();
-                        self.queue_scroller.update(ui, queue_viewport, queue_allow_scroll);
+                        self.queue_scroller.update_with_options(
+                            ui,
+                            queue_viewport,
+                            false,
+                            queue_allow_scroll,
+                        );
                         let queue_scroll = egui::ScrollArea::vertical()
                             .id_salt("full_queue_scroll")
                             .scroll_bar_visibility(

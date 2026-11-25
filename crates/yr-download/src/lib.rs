@@ -115,6 +115,54 @@ pub fn infer_fallback_audio_meta(url: &str) -> (&'static str, &'static str) {
     }
 }
 
+/// Detects the real audio container of a cached stream file (e.g. `stream_<id>.audio`)
+/// via magic bytes so promoted offline downloads get a correct, playable extension.
+/// Rejects WebM/Matroska/Opus, which the Symphonia build cannot decode.
+pub fn sniff_cached_audio_extension(path: &Path) -> Result<&'static str, String> {
+    let mut hdr = [0u8; 16];
+    let n = std::fs::File::open(path)
+        .and_then(|mut f| std::io::Read::read(&mut f, &mut hdr))
+        .map_err(|e| format!("Cannot read cached audio header: {e}"))?;
+    if n >= 4 && hdr[0..4] == [0x1A, 0x45, 0xDF, 0xA3] {
+        return Err("Unsupported WebM container for offline playback".to_string());
+    }
+    if n >= 8 && &hdr[4..8] == b"ftyp" {
+        return Ok("m4a");
+    }
+    if n >= 4 && &hdr[0..4] == b"fLaC" {
+        return Ok("flac");
+    }
+    if n >= 4 && &hdr[0..4] == b"OggS" {
+        return Ok("ogg");
+    }
+    if n >= 12 && &hdr[0..4] == b"RIFF" && &hdr[8..12] == b"WAVE" {
+        return Ok("wav");
+    }
+    if (n >= 3 && &hdr[0..3] == b"ID3")
+        || (n >= 2
+            && hdr[0] == 0xFF
+            && (hdr[1] & 0xE0) == 0xE0
+            && (hdr[1] & 0x18) != 0x08
+            && (hdr[1] & 0x06) != 0x00)
+    {
+        return Ok("mp3");
+    }
+    match path.extension().and_then(|e| e.to_str()) {
+        Some(e)
+            if e.eq_ignore_ascii_case("webm")
+                || e.eq_ignore_ascii_case("mkv")
+                || e.eq_ignore_ascii_case("opus") =>
+        {
+            Err("Unsupported WebM/Opus extension for offline playback".to_string())
+        }
+        Some(e) if e.eq_ignore_ascii_case("mp3") => Ok("mp3"),
+        Some(e) if e.eq_ignore_ascii_case("flac") => Ok("flac"),
+        Some(e) if e.eq_ignore_ascii_case("ogg") => Ok("ogg"),
+        Some(e) if e.eq_ignore_ascii_case("wav") => Ok("wav"),
+        _ => Ok("m4a"),
+    }
+}
+
 /// Concurrent download manager with Range resume, retries, and offline metadata index.
 pub struct DownloadManager {
     download_dir: PathBuf,
@@ -333,10 +381,7 @@ impl DownloadManager {
             sanitize_filename(&track.title),
             sanitize_filename(&track.id)
         );
-        let ext = source_audio_file
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("m4a");
+        let ext = sniff_cached_audio_extension(source_audio_file)?;
         let final_path = self.download_dir.join(format!("{base_name}.{ext}"));
 
         // Copy if not already in final location
@@ -637,6 +682,10 @@ impl DownloadManager {
             .ok()
             .flatten()?;
         let (mime_type, extension) = infer_fallback_audio_meta(&url);
+        if extension == "webm" {
+            // Symphonia cannot decode WebM/Opus; never persist an unplayable offline file.
+            return None;
+        }
         let info = yr_core::StreamInfo {
             track_id: track.id.clone(),
             url,
@@ -1168,6 +1217,7 @@ mod tests {
         let mgr = DownloadManager::new(dl_dir.clone(), Arc::clone(&provider), 2);
         let registered = mgr.register_cached_track(track, &fake_audio).await.unwrap();
         assert!(registered.exists());
+        assert_eq!(registered.extension().and_then(|e| e.to_str()), Some("m4a"));
         assert_eq!(mgr.completed_count().await, 1);
         assert_eq!(mgr.find_local_path("test123").await, Some(registered.clone()));
 
@@ -1175,6 +1225,64 @@ mod tests {
         let mgr2 = DownloadManager::new(dl_dir, provider, 2);
         assert_eq!(mgr2.completed_count().await, 1);
         assert_eq!(mgr2.find_local_path("test123").await, Some(registered));
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn sniff_cached_audio_extension_maps_containers_and_rejects_webm() {
+        let base = std::env::temp_dir().join(format!("yr_sniff_test_{}", std::process::id()));
+        let dl_dir = base.join("downloads");
+        let cache_dir = base.join("stream_cache");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&cache_dir).unwrap();
+
+        let mut mp4 = vec![0x00, 0x00, 0x00, 0x20];
+        mp4.extend_from_slice(b"ftypM4A ");
+        mp4.resize(40_000, 0x11);
+        let mp4_path = cache_dir.join("stream_mp4id.audio");
+        std::fs::write(&mp4_path, &mp4).unwrap();
+        assert_eq!(sniff_cached_audio_extension(&mp4_path), Ok("m4a"));
+
+        let mut id3 = b"ID3\x04\x00\x00\x00\x00\x00\x00".to_vec();
+        id3.resize(40_000, 0x22);
+        let mp3_path = cache_dir.join("stream_mp3id.audio");
+        std::fs::write(&mp3_path, &id3).unwrap();
+        assert_eq!(sniff_cached_audio_extension(&mp3_path), Ok("mp3"));
+
+        let mut webm = vec![0x1A, 0x45, 0xDF, 0xA3];
+        webm.resize(40_000, 0x33);
+        let webm_path = cache_dir.join("stream_webmid.audio");
+        std::fs::write(&webm_path, &webm).unwrap();
+        assert!(sniff_cached_audio_extension(&webm_path).is_err());
+
+        let make_track = |id: &str| Track {
+            id: id.into(),
+            title: format!("Title {id}"),
+            artist: "Artist".into(),
+            artist_id: None,
+            album: None,
+            album_id: None,
+            duration_secs: Some(120),
+            thumbnail_url: None,
+            local_path: None,
+        };
+        let provider: Arc<dyn MusicProvider> = Arc::new(yr_provider::YtMusicProvider::new());
+        let mgr = DownloadManager::new(dl_dir, provider, 2);
+        assert!(mgr.register_cached_track(make_track("webmid"), &webm_path).await.is_err());
+        assert_eq!(mgr.completed_count().await, 0);
+
+        let mp4_dst = mgr
+            .register_cached_track(make_track("mp4id"), &mp4_path)
+            .await
+            .unwrap();
+        assert_eq!(mp4_dst.extension().and_then(|e| e.to_str()), Some("m4a"));
+        let mp3_dst = mgr
+            .register_cached_track(make_track("mp3id"), &mp3_path)
+            .await
+            .unwrap();
+        assert_eq!(mp3_dst.extension().and_then(|e| e.to_str()), Some("mp3"));
+        assert_eq!(mgr.completed_count().await, 2);
 
         let _ = std::fs::remove_dir_all(&base);
     }

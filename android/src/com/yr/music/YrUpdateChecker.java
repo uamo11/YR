@@ -45,6 +45,7 @@ import java.io.InputStreamReader;
 import java.lang.ref.WeakReference;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
@@ -106,11 +107,18 @@ public final class YrUpdateChecker {
         public final String name;
         public final long size;
         public final String downloadUrl;
+        /** Lowercase 64-hex SHA-256 of the asset, or "" when the release does not publish one. */
+        public final String sha256;
 
         public ReleaseAsset(String name, long size, String downloadUrl) {
+            this(name, size, downloadUrl, "");
+        }
+
+        public ReleaseAsset(String name, long size, String downloadUrl, String sha256) {
             this.name = name;
             this.size = size;
             this.downloadUrl = downloadUrl;
+            this.sha256 = sha256 != null ? sha256.trim().toLowerCase(Locale.US) : "";
         }
     }
 
@@ -328,7 +336,7 @@ public final class YrUpdateChecker {
             }
         } catch (Throwable ignored) {
         }
-        return "0.9.22";
+        return "0.9.30";
     }
 
     @SuppressWarnings("deprecation")
@@ -401,7 +409,28 @@ public final class YrUpdateChecker {
         return true;
     }
 
+    private static final Pattern SHA256_PATTERN =
+            Pattern.compile("(?i)sha-?256[:=\\s]+([0-9a-f]{64})(?![0-9a-f])");
+
+    /**
+     * Extracts a SHA-256 hex digest from GitHub asset "digest" fields ("sha256:&lt;hex&gt;")
+     * or release notes ("SHA-256: &lt;hex&gt;"). Returns "" when absent.
+     */
+    public static String extractSha256Hex(String text) {
+        if (text == null || text.isEmpty()) return "";
+        Matcher m = SHA256_PATTERN.matcher(text);
+        return m.find() ? m.group(1).toLowerCase(Locale.US) : "";
+    }
+
     private static ReleaseAsset selectTargetAsset(List<ReleaseAsset> assets, String tagName) {
+        return selectTargetAsset(assets, tagName, "");
+    }
+
+    private static ReleaseAsset selectTargetAsset(
+            List<ReleaseAsset> assets,
+            String tagName,
+            String bodySha
+    ) {
         for (int i = 0; i < assets.size(); i++) {
             ReleaseAsset a = assets.get(i);
             String lower = a.name.toLowerCase(Locale.US);
@@ -418,7 +447,7 @@ public final class YrUpdateChecker {
         if (!assets.isEmpty()) return assets.get(0);
         String fallbackName = "yr-music-" + tagName + "-android.apk";
         String fallbackUrl = "https://github.com/" + GITHUB_REPO + "/releases/download/" + tagName + "/" + fallbackName;
-        return new ReleaseAsset(fallbackName, 0L, fallbackUrl);
+        return new ReleaseAsset(fallbackName, 0L, fallbackUrl, bodySha);
     }
 
     private static ReleaseInfo parseReleaseObject(JSONObject obj) {
@@ -435,6 +464,7 @@ public final class YrUpdateChecker {
                 "html_url",
                 "https://github.com/" + GITHUB_REPO + "/releases/tag/" + tagName
         );
+        String bodySha = extractSha256Hex(rawBody);
         List<ReleaseAsset> assets = new ArrayList<ReleaseAsset>();
         JSONArray arr = obj.optJSONArray("assets");
         if (arr != null) {
@@ -444,12 +474,16 @@ public final class YrUpdateChecker {
                 String aName = aObj.optString("name", "");
                 long aSize = aObj.optLong("size", 0L);
                 String dlUrl = aObj.optString("browser_download_url", "");
+                String digestSha = extractSha256Hex(aObj.optString("digest", ""));
+                if (digestSha.isEmpty() && aName.toLowerCase(Locale.US).endsWith(".apk")) {
+                    digestSha = bodySha;
+                }
                 if (!aName.isEmpty() && !dlUrl.isEmpty()) {
-                    assets.add(new ReleaseAsset(aName, aSize, dlUrl));
+                    assets.add(new ReleaseAsset(aName, aSize, dlUrl, digestSha));
                 }
             }
         }
-        ReleaseAsset target = selectTargetAsset(assets, tagName);
+        ReleaseAsset target = selectTargetAsset(assets, tagName, bodySha);
         return new ReleaseInfo(tagName, version, name, body, htmlUrl, target);
     }
 
@@ -479,8 +513,10 @@ public final class YrUpdateChecker {
                     : ("https://github.com/" + GITHUB_REPO + "/releases/tag/" + tagName);
             Matcher cM = contentPat.matcher(block);
             String rawHtml = cM.find() ? cM.group(1) : "";
-            String body = cleanReleaseNotes(stripHtml(rawHtml));
-            ReleaseAsset target = selectTargetAsset(new ArrayList<ReleaseAsset>(), tagName);
+            String plainNotes = stripHtml(rawHtml);
+            String body = cleanReleaseNotes(plainNotes);
+            ReleaseAsset target = selectTargetAsset(
+                    new ArrayList<ReleaseAsset>(), tagName, extractSha256Hex(plainNotes));
             ReleaseInfo candidate = new ReleaseInfo(tagName, version, title, body, htmlUrl, target);
             if (best == null || isVersionNewer(candidate.version, best.version)) {
                 best = candidate;
@@ -602,20 +638,15 @@ public final class YrUpdateChecker {
     }
 
     private static HttpResult executeHttpGet(Context ctx, String urlStr, String etag) throws IOException {
-        HttpURLConnection conn = openConnectionWithRedirects(ctx, urlStr, 0L);
+        // Single connection: conditional ETag + API Accept headers are sent on the first request.
+        HttpURLConnection conn = openConnectionWithRedirects(
+                ctx,
+                urlStr,
+                0L,
+                "application/vnd.github.v3+json, application/atom+xml, */*",
+                etag
+        );
         try {
-            if (etag != null && !etag.trim().isEmpty()) {
-                conn.disconnect();
-                URL url = new URL(urlStr);
-                conn = (HttpURLConnection) url.openConnection();
-                conn.setConnectTimeout(12000);
-                conn.setReadTimeout(18000);
-                conn.setInstanceFollowRedirects(true);
-                conn.setRequestProperty("Accept", "application/vnd.github.v3+json, application/atom+xml, */*");
-                conn.setRequestProperty("User-Agent", "YR-Music-Android/" + getCurrentVersionName(ctx));
-                conn.setRequestProperty("If-None-Match", etag);
-                conn.connect();
-            }
             int code = conn.getResponseCode();
             String respEtag = conn.getHeaderField("ETag");
             String body = "";
@@ -636,15 +667,31 @@ public final class YrUpdateChecker {
             String urlStr,
             long rangeStartBytes
     ) throws IOException {
+        return openConnectionWithRedirects(ctx, urlStr, rangeStartBytes, "*/*", null);
+    }
+
+    private static HttpURLConnection openConnectionWithRedirects(
+            Context ctx,
+            String urlStr,
+            long rangeStartBytes,
+            String acceptHeader,
+            String ifNoneMatchEtag
+    ) throws IOException {
         URL url = new URL(urlStr);
+        final String originHost = url.getHost();
         String ua = "YR-Music-Android/" + getCurrentVersionName(ctx);
         for (int redirects = 0; redirects < 6; redirects++) {
             HttpURLConnection conn = (HttpURLConnection) url.openConnection();
-            conn.setInstanceFollowRedirects(true);
+            // Redirects are followed manually so Range survives cross-host CDN hops.
+            conn.setInstanceFollowRedirects(false);
             conn.setConnectTimeout(15000);
             conn.setReadTimeout(30000);
             conn.setRequestProperty("User-Agent", ua);
-            conn.setRequestProperty("Accept", "*/*");
+            conn.setRequestProperty("Accept", acceptHeader != null ? acceptHeader : "*/*");
+            if (ifNoneMatchEtag != null && !ifNoneMatchEtag.trim().isEmpty()
+                    && originHost.equalsIgnoreCase(url.getHost())) {
+                conn.setRequestProperty("If-None-Match", ifNoneMatchEtag);
+            }
             if (rangeStartBytes > 0L) {
                 conn.setRequestProperty("Range", "bytes=" + rangeStartBytes + "-");
             }
@@ -730,28 +777,75 @@ public final class YrUpdateChecker {
         }
     }
 
-    private static boolean isValidDownloadedApk(Context ctx, File file, long expectedSize) {
+    /** Lowercase hex SHA-256 of {@code file}, or "" on any I/O error. */
+    private static String computeFileSha256(File file) {
+        FileInputStream fis = null;
+        try {
+            MessageDigest md = MessageDigest.getInstance("SHA-256");
+            fis = new FileInputStream(file);
+            byte[] buf = new byte[32768];
+            int n;
+            while ((n = fis.read(buf)) != -1) {
+                md.update(buf, 0, n);
+            }
+            byte[] digest = md.digest();
+            StringBuilder sb = new StringBuilder(digest.length * 2);
+            for (int i = 0; i < digest.length; i++) {
+                sb.append(String.format(Locale.US, "%02x", Integer.valueOf(digest[i] & 0xFF)));
+            }
+            return sb.toString();
+        } catch (Throwable ignored) {
+            return "";
+        } finally {
+            if (fis != null) {
+                try {
+                    fis.close();
+                } catch (IOException ignored) {
+                }
+            }
+        }
+    }
+
+    @SuppressWarnings("deprecation")
+    private static boolean isValidDownloadedApk(
+            Context ctx,
+            File file,
+            long expectedSize,
+            String expectedSha256
+    ) {
         if (file == null || !file.exists() || !file.isFile() || file.length() <= 65536L) return false;
         if (expectedSize > 0L && file.length() != expectedSize) return false;
         if (!hasZipMagic(file)) return false;
         try {
             PackageInfo pi = ctx.getPackageManager().getPackageArchiveInfo(file.getAbsolutePath(), 0);
-            return pi != null && ctx.getPackageName().equals(pi.packageName);
+            if (pi == null || !ctx.getPackageName().equals(pi.packageName)) return false;
+            long apkCode = (Build.VERSION.SDK_INT >= 28) ? pi.getLongVersionCode() : (long) pi.versionCode;
+            // Never hand the installer a downgrade/same-build APK (it would fail or loop).
+            if (apkCode < getCurrentVersionCode(ctx)) return false;
         } catch (Throwable ignored) {
             return false;
         }
+        if (expectedSha256 != null && expectedSha256.length() == 64) {
+            return expectedSha256.equalsIgnoreCase(computeFileSha256(file));
+        }
+        return true;
     }
 
-    private static File findExistingValidUpdateApk(Context ctx, ReleaseInfo info) {
+    /**
+     * Finds an already-downloaded update APK. {@code verifySha} hashes the file (slow, ~30 MB),
+     * so it must only be true off the UI thread.
+     */
+    private static File findExistingValidUpdateApk(Context ctx, ReleaseInfo info, boolean verifySha) {
         String name = info.targetAsset.name;
         long expected = info.targetAsset.size;
+        String sha = verifySha ? info.targetAsset.sha256 : null;
         File ext = ctx.getExternalFilesDir(null);
         if (ext != null) {
             File f = new File(new File(ext, "updates"), name);
-            if (isValidDownloadedApk(ctx, f, expected)) return f;
+            if (isValidDownloadedApk(ctx, f, expected, sha)) return f;
         }
         File f2 = new File(new File(ctx.getCacheDir(), "updates"), name);
-        if (isValidDownloadedApk(ctx, f2, expected)) return f2;
+        if (isValidDownloadedApk(ctx, f2, expected, sha)) return f2;
         return null;
     }
 
@@ -1030,6 +1124,9 @@ public final class YrUpdateChecker {
         verBox.addView(verText);
 
         String sizeStr = info.targetAsset.size > 0L ? formatSize(info.targetAsset.size) : "APK";
+        if (!info.targetAsset.sha256.isEmpty()) {
+            sizeStr = sizeStr + " • SHA-256";
+        }
         TextView fileText = new TextView(act);
         fileText.setText("Archivo: " + info.targetAsset.name + " (" + sizeStr + ")");
         fileText.setTextColor(COLOR_TEXT_SECONDARY);
@@ -1104,22 +1201,16 @@ public final class YrUpdateChecker {
             }
         });
 
-        final File preDownloaded = findExistingValidUpdateApk(act, info);
+        // Cheap size/package check only on the UI thread; the SHA-256 verification of an
+        // existing file runs on the download worker inside downloadAndInstall().
+        final File preDownloaded = findExistingValidUpdateApk(act, info, false);
         String primaryText = preDownloaded != null ? "Instalar ahora" : "Actualizar";
         Button btnUpdate = makeDialogButton(act, primaryText, COLOR_ACCENT_RED, 0xFFFFFFFF);
         btnUpdate.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
                 dismissSafely(dialog);
-                if (preDownloaded != null && isValidDownloadedApk(act, preDownloaded, info.targetAsset.size)) {
-                    prefs(act).edit()
-                            .putString(PREF_PENDING_APK_PATH, preDownloaded.getAbsolutePath())
-                            .putString(PREF_PENDING_VERSION, info.version)
-                            .apply();
-                    launchApkInstallation(act, preDownloaded);
-                } else {
-                    downloadAndInstall(act, info);
-                }
+                downloadAndInstall(act, info);
             }
         });
 
@@ -1205,7 +1296,7 @@ public final class YrUpdateChecker {
             public void run() {
                 File tempFile = null;
                 try {
-                    File existing = findExistingValidUpdateApk(appCtx, info);
+                    File existing = findExistingValidUpdateApk(appCtx, info, true);
                     File finalFile;
                     if (existing != null) {
                         finalFile = existing;
@@ -1297,9 +1388,9 @@ public final class YrUpdateChecker {
                             }
 
                             long valSize = totalBytes > 0L ? totalBytes : expectedSize;
-                            if (!isValidDownloadedApk(appCtx, tempFile, valSize)) {
+                            if (!isValidDownloadedApk(appCtx, tempFile, valSize, info.targetAsset.sha256)) {
                                 tempFile.delete();
-                                throw new IOException("El APK descargado está corrupto o incompleto");
+                                throw new IOException("Verificación SHA-256 o integridad del APK falló");
                             }
                             if (destFile.exists()) destFile.delete();
                             if (!tempFile.renameTo(destFile)) {
