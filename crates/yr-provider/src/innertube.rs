@@ -1240,11 +1240,32 @@ pub fn is_bot_or_auth_err(msg: &str) -> bool {
         || low.contains("login_required")
 }
 
-fn update_player_err(last_err: &mut String, new_err: String) {
-    if is_bot_or_auth_err(last_err) {
-        return;
+fn is_explicit_bot_err(msg: &str) -> bool {
+    let low = msg.to_lowercase();
+    low.contains("bot") || low.contains("confirmar que no eres")
+}
+
+fn player_err_rank(msg: &str) -> u8 {
+    if is_explicit_bot_err(msg) {
+        3
+    } else if is_bot_or_auth_err(msg) {
+        2
+    } else if !msg.starts_with("No ")
+        && !msg.contains("HTTP ")
+        && !msg.contains("had no matching streams")
+    {
+        1
+    } else {
+        0
     }
-    if is_bot_or_auth_err(&new_err) || last_err.starts_with("No ") || !new_err.contains("HTTP ") {
+}
+
+fn update_player_err(last_err: &mut String, new_err: String) {
+    let cur_rank = player_err_rank(last_err);
+    let new_rank = player_err_rank(&new_err);
+    if new_rank > cur_rank
+        || (new_rank == cur_rank && cur_rank <= 1 && last_err.starts_with("No "))
+    {
         *last_err = new_err;
     }
 }
@@ -2642,5 +2663,30 @@ mod tests {
         assert!(err.contains("not a bot"));
         assert!(is_bot_or_auth_err("LOGIN_REQUIRED"));
         assert!(!is_bot_or_auth_err("HTTP 503"));
+    }
+
+    #[test]
+    fn update_player_err_prefers_explicit_bot_over_generic_login_required() {
+        let mut err = String::from("No stream returned");
+        update_player_err(
+            &mut err,
+            "VISIONOS playability LOGIN_REQUIRED: Este contenido no está disponible".to_string(),
+        );
+        assert!(err.contains("VISIONOS"));
+
+        update_player_err(
+            &mut err,
+            "ANDROID_VR playability LOGIN_REQUIRED: Inicia sesión para confirmar que no eres un bot"
+                .to_string(),
+        );
+        assert!(err.contains("ANDROID_VR") && err.contains("no eres un bot"));
+
+        // Lower or equal generic errors must not overwrite the explicit bot reason
+        update_player_err(
+            &mut err,
+            "VISIONOS playability LOGIN_REQUIRED: Este contenido no está disponible".to_string(),
+        );
+        update_player_err(&mut err, "IOS had no matching streams".to_string());
+        assert!(err.contains("ANDROID_VR") && err.contains("no eres un bot"));
     }
 }

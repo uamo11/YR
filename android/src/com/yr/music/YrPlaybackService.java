@@ -398,6 +398,9 @@ public class YrPlaybackService extends Service {
     private static final long WEB_POS_TTL_MS = 15L * 60L * 1000L;
     private static final long WEB_NEG_BG_TTL_MS = 45L * 1000L;
     private static final long WEB_NEG_FG_TTL_MS = 8L * 1000L;
+    private static final long WEB_BG_CIRCUIT_TTL_MS = 60L * 1000L;
+    private static int sConsecutiveWebFailures = 0;
+    private static long sBgCircuitOpenUntilMs = 0L;
     private static final java.util.HashMap<String, String> sWebPosUrl =
             new java.util.HashMap<String, String>();
     private static final java.util.HashMap<String, Long> sWebPosTime =
@@ -441,6 +444,9 @@ public class YrPlaybackService extends Service {
                 sWebPosUrl.remove(cacheKey);
                 sWebPosTime.remove(cacheKey);
             }
+            if (!isInteractive && now < sBgCircuitOpenUntilMs) {
+                return "";
+            }
             Long failedAt = sWebNegTime.get(cacheKey);
             if (failedAt != null) {
                 long negTtl = isInteractive ? WEB_NEG_FG_TTL_MS : WEB_NEG_BG_TTL_MS;
@@ -464,6 +470,8 @@ public class YrPlaybackService extends Service {
             sWebPosUrl.put(cacheKey, url);
             sWebPosTime.put(cacheKey, Long.valueOf(now));
             sWebNegTime.remove(cacheKey);
+            sConsecutiveWebFailures = 0;
+            sBgCircuitOpenUntilMs = 0L;
         }
     }
 
@@ -474,6 +482,18 @@ public class YrPlaybackService extends Service {
                 sWebNegTime.clear();
             }
             sWebNegTime.put(cacheKey, Long.valueOf(now));
+            sConsecutiveWebFailures++;
+            if (sConsecutiveWebFailures >= 2) {
+                sBgCircuitOpenUntilMs = now + WEB_BG_CIRCUIT_TTL_MS;
+            }
+        }
+    }
+
+    public static void clearWebNegativeCache() {
+        synchronized (sWebCacheLock) {
+            sWebNegTime.clear();
+            sConsecutiveWebFailures = 0;
+            sBgCircuitOpenUntilMs = 0L;
         }
     }
 
@@ -2391,6 +2411,7 @@ public class YrPlaybackService extends Service {
                     if (hasGoogleAuthCookies(merged)) {
                         if (sent.compareAndSet(false, true)) {
                             Log.i("YR_LOGIN", "Captured Google cookies len=" + merged.length());
+                            clearWebNegativeCache();
                             nativeOnGoogleCookie(merged);
                             try {
                                 wv.stopLoading();

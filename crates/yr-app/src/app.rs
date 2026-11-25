@@ -806,6 +806,8 @@ pub struct YrApp {
     max_smart_songs_atomic: Arc<std::sync::atomic::AtomicUsize>,
     wifi_connected_atomic: Arc<std::sync::atomic::AtomicBool>,
     metered_network_atomic: Arc<std::sync::atomic::AtomicBool>,
+    stream_quality_atomic: Arc<std::sync::atomic::AtomicU8>,
+    mobile_data_saver_atomic: Arc<std::sync::atomic::AtomicBool>,
     known_tracks: Arc<std::sync::Mutex<HashMap<String, Track>>>,
     cached_stream_ids: Arc<std::sync::Mutex<HashSet<String>>>,
     frame_cached_stream_ids: HashSet<String>,
@@ -818,6 +820,7 @@ pub struct YrApp {
     retried_audio_error_track_id: Option<String>,
     retried_video_error_track_id: Option<String>,
     home_offline_mode: bool,
+    eq_dirty_unsaved: bool,
 }
 
 fn cache_webview_audio_url(
@@ -858,6 +861,78 @@ fn build_webview_video_info(track_id: String, url: String) -> VideoStreamInfo {
         height: 720,
         is_hls,
     }
+}
+
+fn encode_audio_quality(q: AudioQuality) -> u8 {
+    match q {
+        AudioQuality::Low => 0,
+        AudioQuality::Medium => 1,
+        AudioQuality::High => 2,
+        AudioQuality::Best => 3,
+    }
+}
+
+fn decode_audio_quality(v: u8) -> AudioQuality {
+    match v {
+        0 => AudioQuality::Low,
+        1 => AudioQuality::Medium,
+        3 => AudioQuality::Best,
+        _ => AudioQuality::High,
+    }
+}
+
+fn resolve_bg_stream_quality(
+    stream_q: &std::sync::atomic::AtomicU8,
+    data_saver: &std::sync::atomic::AtomicBool,
+    metered: &std::sync::atomic::AtomicBool,
+    wifi: &std::sync::atomic::AtomicBool,
+) -> AudioQuality {
+    use std::sync::atomic::Ordering;
+    if data_saver.load(Ordering::Relaxed)
+        && metered.load(Ordering::Relaxed)
+        && !wifi.load(Ordering::Relaxed)
+    {
+        AudioQuality::Low
+    } else {
+        decode_audio_quality(stream_q.load(Ordering::Relaxed))
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_bg_play(
+    track: Track,
+    quality: AudioQuality,
+    dl: &Arc<DownloadManager>,
+    provider: &Arc<dyn MusicProvider>,
+    audio: &AudioEngine,
+    tx: &mpsc::UnboundedSender<AppEvent>,
+    ctx: &egui::Context,
+    cache_dir: &std::path::Path,
+    show_notif: bool,
+    bg_play_gen: &Arc<std::sync::atomic::AtomicU64>,
+) {
+    let my_gen = bg_play_gen.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+    audio.stop();
+    let dl_c = Arc::clone(dl);
+    let prov_c = Arc::clone(provider);
+    let audio_c = audio.clone();
+    let ev_c = tx.clone();
+    let ctx_c = ctx.clone();
+    let cache_c = cache_dir.to_path_buf();
+    let bg_gen_c = Arc::clone(bg_play_gen);
+    tokio::spawn(play_track_bg(
+        track,
+        quality,
+        dl_c,
+        prov_c,
+        audio_c,
+        ev_c,
+        ctx_c,
+        cache_c,
+        show_notif,
+        my_gen,
+        bg_gen_c,
+    ));
 }
 
 async fn play_track_bg(
@@ -1052,6 +1127,12 @@ impl YrApp {
         let metered_network_atomic = Arc::new(std::sync::atomic::AtomicBool::new(
             crate::android_media::is_metered_network(),
         ));
+        let stream_quality_atomic = Arc::new(std::sync::atomic::AtomicU8::new(
+            encode_audio_quality(store.data.config.stream_quality),
+        ));
+        let mobile_data_saver_atomic = Arc::new(std::sync::atomic::AtomicBool::new(
+            store.data.config.mobile_data_saver,
+        ));
         let cached_stream_ids = Arc::new(std::sync::Mutex::new(HashSet::new()));
         let prev_history_stack = Arc::new(std::sync::Mutex::new(Vec::new()));
         let mut initial_known: HashMap<String, Track> = HashMap::new();
@@ -1181,6 +1262,8 @@ impl YrApp {
             max_smart_songs_atomic,
             wifi_connected_atomic,
             metered_network_atomic,
+            stream_quality_atomic,
+            mobile_data_saver_atomic,
             known_tracks,
             cached_stream_ids,
             frame_cached_stream_ids: HashSet::new(),
@@ -1193,6 +1276,7 @@ impl YrApp {
             retried_audio_error_track_id: None,
             retried_video_error_track_id: None,
             home_offline_mode: false,
+            eq_dirty_unsaved: false,
         };
 
         let (media_tx, mut media_rx) = mpsc::unbounded_channel();
@@ -1284,7 +1368,10 @@ impl YrApp {
         let prev_stack_bg = Arc::clone(&app.prev_history_stack);
         let dl_bg = Arc::clone(&app.downloader);
         let provider_bg = Arc::clone(&app.provider);
-        let quality_bg = app.store.data.config.stream_quality;
+        let stream_q_rx = Arc::clone(&app.stream_quality_atomic);
+        let data_saver_rx = Arc::clone(&app.mobile_data_saver_atomic);
+        let wifi_rx = Arc::clone(&app.wifi_connected_atomic);
+        let metered_rx = Arc::clone(&app.metered_network_atomic);
         let ev_tx_bg = app.event_tx.clone();
         let ctx_bg = cc.egui_ctx.clone();
         let cache_dir_bg = app.data_dir.join("stream_cache");
@@ -1295,6 +1382,12 @@ impl YrApp {
             use std::sync::atomic::Ordering;
             while let Some(act) = media_rx.recv().await {
                 let show_notif = notif_bg.load(Ordering::Relaxed);
+                let live_q = resolve_bg_stream_quality(
+                    &stream_q_rx,
+                    &data_saver_rx,
+                    &metered_rx,
+                    &wifi_rx,
+                );
                 match act {
                     MediaAction::Play | MediaAction::Pause | MediaAction::Toggle => {
                         let st = audio_bg.snapshot().status;
@@ -1307,31 +1400,18 @@ impl YrApp {
                                     let track_opt =
                                         queue_bg.lock().ok().and_then(|q| q.current_track().cloned());
                                     if let Some(track) = track_opt {
-                                        let my_gen = bg_gen_rx.fetch_add(1, Ordering::SeqCst) + 1;
-                                        audio_bg.stop();
-                                        let dl_c = Arc::clone(&dl_bg);
-                                        let prov_c = Arc::clone(&provider_bg);
-                                        let audio_c = audio_bg.clone();
-                                        let ev_c = ev_tx_bg.clone();
-                                        let ctx_c = ctx_bg.clone();
-                                        let cache_c = cache_dir_bg.clone();
-                                        let bg_gen_c = Arc::clone(&bg_gen_rx);
-                                        tokio::spawn(async move {
-                                            play_track_bg(
-                                                track,
-                                                quality_bg,
-                                                dl_c,
-                                                prov_c,
-                                                audio_c,
-                                                ev_c,
-                                                ctx_c,
-                                                cache_c,
-                                                show_notif,
-                                                my_gen,
-                                                bg_gen_c,
-                                            )
-                                            .await;
-                                        });
+                                        spawn_bg_play(
+                                            track,
+                                            live_q,
+                                            &dl_bg,
+                                            &provider_bg,
+                                            &audio_bg,
+                                            &ev_tx_bg,
+                                            &ctx_bg,
+                                            &cache_dir_bg,
+                                            show_notif,
+                                            &bg_gen_rx,
+                                        );
                                         true
                                     } else {
                                         false
@@ -1357,31 +1437,18 @@ impl YrApp {
                                     let track_opt =
                                         queue_bg.lock().ok().and_then(|q| q.current_track().cloned());
                                     if let Some(track) = track_opt {
-                                        let my_gen = bg_gen_rx.fetch_add(1, Ordering::SeqCst) + 1;
-                                        audio_bg.stop();
-                                        let dl_c = Arc::clone(&dl_bg);
-                                        let prov_c = Arc::clone(&provider_bg);
-                                        let audio_c = audio_bg.clone();
-                                        let ev_c = ev_tx_bg.clone();
-                                        let ctx_c = ctx_bg.clone();
-                                        let cache_c = cache_dir_bg.clone();
-                                        let bg_gen_c = Arc::clone(&bg_gen_rx);
-                                        tokio::spawn(async move {
-                                            play_track_bg(
-                                                track,
-                                                quality_bg,
-                                                dl_c,
-                                                prov_c,
-                                                audio_c,
-                                                ev_c,
-                                                ctx_c,
-                                                cache_c,
-                                                show_notif,
-                                                my_gen,
-                                                bg_gen_c,
-                                            )
-                                            .await;
-                                        });
+                                        spawn_bg_play(
+                                            track,
+                                            live_q,
+                                            &dl_bg,
+                                            &provider_bg,
+                                            &audio_bg,
+                                            &ev_tx_bg,
+                                            &ctx_bg,
+                                            &cache_dir_bg,
+                                            show_notif,
+                                            &bg_gen_rx,
+                                        );
                                         true
                                     } else {
                                         false
@@ -1442,33 +1509,20 @@ impl YrApp {
                     MediaAction::Next => {
                         let next = queue_bg.lock().ok().and_then(|mut q| q.next_track(true).cloned());
                         if let Some(track) = next {
-                            let my_gen = bg_gen_rx.fetch_add(1, Ordering::SeqCst) + 1;
-                            audio_bg.stop();
                             let _ = ev_tx_bg.send(AppEvent::MediaAction(act));
                             ctx_bg.request_repaint();
-                            let dl_c = Arc::clone(&dl_bg);
-                            let prov_c = Arc::clone(&provider_bg);
-                            let audio_c = audio_bg.clone();
-                            let ev_c = ev_tx_bg.clone();
-                            let ctx_c = ctx_bg.clone();
-                            let cache_c = cache_dir_bg.clone();
-                            let bg_gen_c = Arc::clone(&bg_gen_rx);
-                            tokio::spawn(async move {
-                                play_track_bg(
-                                    track,
-                                    quality_bg,
-                                    dl_c,
-                                    prov_c,
-                                    audio_c,
-                                    ev_c,
-                                    ctx_c,
-                                    cache_c,
-                                    show_notif,
-                                    my_gen,
-                                    bg_gen_c,
-                                )
-                                .await;
-                            });
+                            spawn_bg_play(
+                                track,
+                                live_q,
+                                &dl_bg,
+                                &provider_bg,
+                                &audio_bg,
+                                &ev_tx_bg,
+                                &ctx_bg,
+                                &cache_dir_bg,
+                                show_notif,
+                                &bg_gen_rx,
+                            );
                             continue;
                         }
                     }
@@ -1510,33 +1564,20 @@ impl YrApp {
                             continue;
                         }
                         if let Some(track) = step_or_pop_previous_track(&queue_bg, &prev_stack_bg) {
-                            let my_gen = bg_gen_rx.fetch_add(1, Ordering::SeqCst) + 1;
-                            audio_bg.stop();
                             let _ = ev_tx_bg.send(AppEvent::MediaAction(act));
                             ctx_bg.request_repaint();
-                            let dl_c = Arc::clone(&dl_bg);
-                            let prov_c = Arc::clone(&provider_bg);
-                            let audio_c = audio_bg.clone();
-                            let ev_c = ev_tx_bg.clone();
-                            let ctx_c = ctx_bg.clone();
-                            let cache_c = cache_dir_bg.clone();
-                            let bg_gen_c = Arc::clone(&bg_gen_rx);
-                            tokio::spawn(async move {
-                                play_track_bg(
-                                    track,
-                                    quality_bg,
-                                    dl_c,
-                                    prov_c,
-                                    audio_c,
-                                    ev_c,
-                                    ctx_c,
-                                    cache_c,
-                                    show_notif,
-                                    my_gen,
-                                    bg_gen_c,
-                                )
-                                .await;
-                            });
+                            spawn_bg_play(
+                                track,
+                                live_q,
+                                &dl_bg,
+                                &provider_bg,
+                                &audio_bg,
+                                &ev_tx_bg,
+                                &ctx_bg,
+                                &cache_dir_bg,
+                                show_notif,
+                                &bg_gen_rx,
+                            );
                             continue;
                         } else {
                             audio_bg.seek(Duration::ZERO);
@@ -1575,6 +1616,8 @@ impl YrApp {
         let wifi_only_tick = Arc::clone(&app.wifi_only_dl_flag);
         let wifi_tick = Arc::clone(&app.wifi_connected_atomic);
         let metered_tick = Arc::clone(&app.metered_network_atomic);
+        let stream_q_tick = Arc::clone(&app.stream_quality_atomic);
+        let data_saver_tick = Arc::clone(&app.mobile_data_saver_atomic);
         let cov_scan_dir = cover_dir.clone();
         app.runtime.spawn(async move {
             use std::sync::atomic::Ordering;
@@ -1748,34 +1791,28 @@ impl YrApp {
                     }
                     let next = queue_tick.lock().ok().and_then(|mut q| q.next_track(false).cloned());
                     if let Some(track) = next {
-                        let my_gen = bg_gen_tick.fetch_add(1, Ordering::SeqCst) + 1;
+                        let live_q = resolve_bg_stream_quality(
+                            &stream_q_tick,
+                            &data_saver_tick,
+                            &metered_tick,
+                            &wifi_tick,
+                        );
                         let _ = ev_tx_tick.send(AppEvent::MediaAction(
                             crate::android_media::MediaAction::Next,
                         ));
                         ctx_tick.request_repaint();
-                        let dl_next = Arc::clone(&dl_tick);
-                        let prov_next = Arc::clone(&provider_tick);
-                        let audio_next = audio_tick.clone();
-                        let ev_next = ev_tx_tick.clone();
-                        let ctx_next = ctx_tick.clone();
-                        let c_next = cache_dir_tick.clone();
-                        let bg_gen_next = Arc::clone(&bg_gen_tick);
-                        tokio::spawn(async move {
-                            play_track_bg(
-                                track,
-                                quality_bg,
-                                dl_next,
-                                prov_next,
-                                audio_next,
-                                ev_next,
-                                ctx_next,
-                                c_next,
-                                show_notif,
-                                my_gen,
-                                bg_gen_next,
-                            )
-                            .await;
-                        });
+                        spawn_bg_play(
+                            track,
+                            live_q,
+                            &dl_tick,
+                            &provider_tick,
+                            &audio_tick,
+                            &ev_tx_tick,
+                            &ctx_tick,
+                            &cache_dir_tick,
+                            show_notif,
+                            &bg_gen_tick,
+                        );
                         continue;
                     }
                 }
@@ -3623,6 +3660,14 @@ impl eframe::App for YrApp {
                 self.frame_cached_stream_ids = guard.clone();
             }
         }
+        self.stream_quality_atomic.store(
+            encode_audio_quality(self.store.data.config.stream_quality),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        self.mobile_data_saver_atomic.store(
+            self.store.data.config.mobile_data_saver,
+            std::sync::atomic::Ordering::Relaxed,
+        );
         self.process_events(ctx);
         let snap = self.audio.snapshot();
         if snap.status == PlaybackStatus::Playing && snap.position_secs > 0.3 {
@@ -12812,6 +12857,10 @@ impl YrApp {
 
     fn render_equalizer_modal(&mut self, ctx: &egui::Context) {
         if !self.show_equalizer_modal {
+            if self.eq_dirty_unsaved {
+                self.eq_dirty_unsaved = false;
+                let _ = self.store.save();
+            }
             return;
         }
         let screen = ctx.screen_rect();
@@ -12819,7 +12868,8 @@ impl YrApp {
             self.show_equalizer_modal = false;
         }
 
-        let mut changed = false;
+        let mut dsp_changed = false;
+        let mut save_now = false;
         let panel_w = screen.width();
         let inner_w = (panel_w - 36.0).max(220.0);
 
@@ -12882,7 +12932,8 @@ impl YrApp {
                             "",
                         ) {
                             self.store.data.config.equalizer.enabled = eq_enabled;
-                            changed = true;
+                            dsp_changed = true;
+                            save_now = true;
                         }
 
                         let mut norm = self.store.data.config.equalizer.loudness_normalization;
@@ -12893,7 +12944,8 @@ impl YrApp {
                             "",
                         ) {
                             self.store.data.config.equalizer.loudness_normalization = norm;
-                            changed = true;
+                            dsp_changed = true;
+                            save_now = true;
                         }
 
                         ui.add_space(6.0);
@@ -12910,7 +12962,8 @@ impl YrApp {
                                 .clicked()
                                 {
                                     self.store.data.config.equalizer.apply_preset("Plano");
-                                    changed = true;
+                                    dsp_changed = true;
+                                    save_now = true;
                                 }
                             });
                         });
@@ -12925,7 +12978,8 @@ impl YrApp {
                                     if !self.store.data.config.equalizer.enabled {
                                         self.store.data.config.equalizer.enabled = true;
                                     }
-                                    changed = true;
+                                    dsp_changed = true;
+                                    save_now = true;
                                 }
                             }
                         });
@@ -12946,7 +13000,11 @@ impl YrApp {
                             if slider_resp.changed() {
                                 self.store.data.config.equalizer.bass_boost_db = bass;
                                 self.store.data.config.equalizer.preset_name = "Personalizado".to_string();
-                                changed = true;
+                                dsp_changed = true;
+                                self.eq_dirty_unsaved = true;
+                            }
+                            if slider_resp.drag_stopped() || slider_resp.lost_focus() {
+                                save_now = true;
                             }
                         });
 
@@ -12987,7 +13045,11 @@ impl YrApp {
                                         if resp.changed() {
                                             self.store.data.config.equalizer.bands_db[i] = gain;
                                             self.store.data.config.equalizer.preset_name = "Personalizado".to_string();
-                                            changed = true;
+                                            dsp_changed = true;
+                                            self.eq_dirty_unsaved = true;
+                                        }
+                                        if resp.drag_stopped() || resp.lost_focus() {
+                                            save_now = true;
                                         }
 
                                         ui.label(
@@ -13006,8 +13068,11 @@ impl YrApp {
                     });
             });
 
-        if changed {
+        if dsp_changed {
             self.audio.set_equalizer(self.store.data.config.equalizer.clone());
+        }
+        if save_now || (!self.show_equalizer_modal && self.eq_dirty_unsaved) {
+            self.eq_dirty_unsaved = false;
             let _ = self.store.save();
         }
     }
@@ -15062,6 +15127,8 @@ fn friendly_error_message(prefix: &str, raw: &str) -> String {
     } else if low.contains("no eres un bot")
         || low.contains("not a bot")
         || low.contains("confirmar que no eres")
+        || low.contains("sign in to confirm")
+        || low.contains("inicia sesión")
     {
         if prefix.is_empty() {
             "Verificación anti-bot • Conecta Google en Cuenta".to_string()
