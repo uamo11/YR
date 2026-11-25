@@ -421,6 +421,8 @@ pub struct YrApp {
     known_tracks: Arc<std::sync::Mutex<HashMap<String, Track>>>,
     consecutive_stream_failures: u8,
     retried_audio_error_track_id: Option<String>,
+    retried_video_error_track_id: Option<String>,
+    home_offline_mode: bool,
 }
 
 async fn play_track_bg(
@@ -701,6 +703,8 @@ impl YrApp {
             known_tracks,
             consecutive_stream_failures: 0,
             retried_audio_error_track_id: None,
+            retried_video_error_track_id: None,
+            home_offline_mode: false,
         };
 
         let (media_tx, mut media_rx) = mpsc::unbounded_channel();
@@ -911,7 +915,9 @@ impl YrApp {
                         }
                     }
                     MediaAction::Stop => audio_bg.stop(),
-                    MediaAction::CycleVideoQuality | MediaAction::CycleSpeed => {}
+                    MediaAction::CycleVideoQuality
+                    | MediaAction::CycleSpeed
+                    | MediaAction::VideoPlaybackError => {}
                     MediaAction::Next => {
                         let next = queue_bg.lock().ok().and_then(|mut q| q.next_track(true).cloned());
                         if let Some(track) = next {
@@ -1796,6 +1802,7 @@ impl YrApp {
         };
         self.consecutive_stream_failures = 0;
         self.retried_audio_error_track_id = None;
+        self.retried_video_error_track_id = None;
         self.queue.lock().unwrap().set_queue(tracks, index);
         self.now_playing_open = true;
         self.show_settings = false;
@@ -2085,6 +2092,7 @@ impl YrApp {
                     self.home_loading = false;
                     match res {
                         Ok(mut feed) => {
+                            self.home_offline_mode = false;
                             if feed.account.is_some() && self.store.data.google_cookie.is_some() {
                                 self.store.data.google_account = feed.account.clone();
                                 let _ = self.store.save();
@@ -2133,10 +2141,21 @@ impl YrApp {
                             }
                         }
                         Err(e) => {
-                            if self.home_feed.shelves.is_empty()
+                            self.home_offline_mode = true;
+                            self.rebuild_samples_deck();
+                            let offline_n = self
+                                .downloads
+                                .iter()
+                                .filter(|d| d.status == DownloadStatus::Completed)
+                                .count();
+                            if offline_n > 0 {
+                                self.set_banner(format!(
+                                    "Sin conexión • {offline_n} canciones listas offline"
+                                ));
+                            } else if self.home_feed.shelves.is_empty()
                                 && self.home_feed.listen_again.is_empty()
                             {
-                                self.set_banner(format!("Sin conexión: {e}"));
+                                self.set_banner(friendly_error_message("Inicio", &e));
                             } else {
                                 self.set_banner("Sin conexión: mostrando inicio guardado");
                             }
@@ -2359,6 +2378,9 @@ impl YrApp {
                 AppEvent::DownloadsRefreshed { tasks, total_bytes } => {
                     self.downloads = tasks;
                     self.total_downloaded_bytes = total_bytes;
+                    if self.sample_tracks.is_empty() || self.home_offline_mode {
+                        self.rebuild_samples_deck();
+                    }
                 }
                 AppEvent::MediaAction(act) => {
                     use crate::android_media::MediaAction;
@@ -2431,6 +2453,33 @@ impl YrApp {
                             );
                         }
                         self.set_banner(format!("Velocidad: {next}x"));
+                    } else if matches!(act, MediaAction::VideoPlaybackError) {
+                        let curr_id = self
+                            .queue
+                            .lock()
+                            .unwrap()
+                            .current_track()
+                            .map(|t| t.id.clone());
+                        if let Some(cid) = curr_id {
+                            self.video_stream_cache.retain(|(id, _), _| id != &cid);
+                            self.provider.invalidate_track_streams(&cid);
+                            self.last_video_attached = None;
+                            if self.is_video_mode
+                                && self.retried_video_error_track_id.as_deref() != Some(cid.as_str())
+                            {
+                                self.retried_video_error_track_id = Some(cid.clone());
+                                self.video_stream_track_id = None;
+                                self.video_stream_info = None;
+                                self.video_stream_error = None;
+                                self.resolve_video_for_track(cid, ctx);
+                            } else {
+                                self.video_stream_info = None;
+                                self.video_stream_loading = false;
+                                self.video_stream_error = Some(
+                                    "No se pudo decodificar el stream de video.".to_string(),
+                                );
+                            }
+                        }
                     }
                 }
                 AppEvent::VideoStreamResolved { track_id, result } => {
@@ -4683,6 +4732,12 @@ impl YrApp {
                     });
             }
 
+            let offline_completed: Vec<Track> = self
+                .downloads
+                .iter()
+                .filter(|d| d.status == DownloadStatus::Completed)
+                .map(|d| d.track.clone())
+                .collect();
             let home_empty =
                 self.home_feed.shelves.is_empty() && self.home_feed.listen_again.is_empty();
             if self.home_loading && home_empty {
@@ -4691,6 +4746,68 @@ impl YrApp {
                     ui.spinner();
                     ui.label(RichText::new("Cargando YouTube Music...").color(TEXT_SECONDARY));
                 });
+            } else if ((home_empty && self.home_feed.quick_picks.is_empty()) || self.home_offline_mode)
+                && !offline_completed.is_empty()
+            {
+                ui.add_space(8.0);
+                egui::Frame::new()
+                    .fill(BG_SURFACE)
+                    .stroke(Stroke::new(0.8_f32, Color32::from_rgb(52, 52, 60)))
+                    .corner_radius(CornerRadius::same(14))
+                    .inner_margin(egui::Margin::symmetric(14, 12))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 6.0;
+                            let (dot_r, _) = ui.allocate_exact_size(Vec2::splat(8.0), Sense::hover());
+                            ui.painter().circle_filled(dot_r.center(), 4.0, GREEN_OK);
+                            ui.label(
+                                RichText::new(format!(
+                                    "Modo sin conexión • {} canciones descargadas",
+                                    offline_completed.len()
+                                ))
+                                .size(13.5)
+                                .strong()
+                                .color(Color32::WHITE),
+                            );
+                        });
+                        ui.add_space(8.0);
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 6.0;
+                            if icons::icon_pill_button(
+                                ui,
+                                icons::Icon::Play,
+                                "Reproducir",
+                                GREEN_OK,
+                                Color32::BLACK,
+                            )
+                            .clicked()
+                            {
+                                self.play_track_in_list(offline_completed.clone(), 0, ctx);
+                            }
+                            if icons::icon_pill_button(
+                                ui,
+                                icons::Icon::Shuffle,
+                                "Aleatorio",
+                                BG_ELEVATED,
+                                Color32::WHITE,
+                            )
+                            .clicked()
+                            {
+                                self.play_tracks_shuffled(offline_completed.clone(), ctx);
+                            }
+                            if icons::icon_pill_button(
+                                ui,
+                                icons::Icon::Refresh,
+                                "Reintentar",
+                                BG_ELEVATED,
+                                Color32::WHITE,
+                            )
+                            .clicked()
+                            {
+                                self.refresh_home(ctx);
+                            }
+                        });
+                    });
             } else if home_empty && self.home_feed.quick_picks.is_empty() {
                 ui.add_space(8.0);
                 egui::Frame::new()
@@ -4738,6 +4855,21 @@ impl YrApp {
                     tracks: self.home_feed.quick_picks.clone(),
                     cards: Vec::new(),
                 });
+            }
+            if (self.home_offline_mode || home_empty)
+                && !offline_completed.is_empty()
+                && !shelves.iter().any(|s| s.title == "Disponible sin conexión")
+            {
+                shelves.insert(
+                    0,
+                    HomeShelf {
+                        title: "Disponible sin conexión".to_string(),
+                        eyebrow: Some("OFFLINE".to_string()),
+                        layout: HomeShelfLayout::QuickPicks4Row,
+                        tracks: offline_completed,
+                        cards: Vec::new(),
+                    },
+                );
             }
 
             let has_speed_dial = shelves
@@ -4886,13 +5018,27 @@ impl YrApp {
     fn rebuild_samples_deck(&mut self) {
         let mut seen = HashSet::new();
         let mut deck = Vec::new();
+        let offline_completed: Vec<Track> = self
+            .downloads
+            .iter()
+            .filter(|d| d.status == DownloadStatus::Completed)
+            .map(|d| d.track.clone())
+            .collect();
+        if self.home_offline_mode && !offline_completed.is_empty() {
+            for t in &offline_completed {
+                if !t.id.starts_with("local_demo_") && seen.insert(t.id.clone()) {
+                    deck.push(t.clone());
+                }
+            }
+        }
         let candidates = self
             .explore_feed
             .trending_tracks
             .iter()
             .chain(self.home_feed.recommended_tracks.iter())
             .chain(self.home_feed.quick_picks.iter())
-            .chain(self.home_feed.shelves.iter().flat_map(|s| s.tracks.iter()));
+            .chain(self.home_feed.shelves.iter().flat_map(|s| s.tracks.iter()))
+            .chain(offline_completed.iter());
         for t in candidates {
             if t.id.starts_with("local_demo_") || !seen.insert(t.id.clone()) {
                 continue;
@@ -9095,17 +9241,24 @@ impl YrApp {
                                 ctx.request_repaint();
                             } else if let Some(err) = self.video_stream_error.clone() {
                                 ui.painter().text(
-                                    Pos2::new(video_rect.center().x, video_rect.center().y - 14.0),
+                                    Pos2::new(video_rect.center().x, video_rect.center().y - 16.0),
                                     Align2::CENTER_CENTER,
                                     "Video no disponible para esta pista",
                                     egui::FontId::proportional(13.0),
                                     Color32::WHITE,
                                 );
-                                ui.painter().text(
-                                    Pos2::new(video_rect.center().x, video_rect.center().y + 6.0),
-                                    Align2::CENTER_CENTER,
+                                let sub_galley = ui.painter().layout(
                                     friendly_error_message("Stream", &err),
                                     egui::FontId::proportional(11.0),
+                                    TEXT_SECONDARY,
+                                    (video_w - 28.0).max(120.0),
+                                );
+                                ui.painter().galley(
+                                    Pos2::new(
+                                        video_rect.center().x - sub_galley.size().x * 0.5,
+                                        video_rect.center().y + 2.0,
+                                    ),
+                                    sub_galley,
                                     TEXT_SECONDARY,
                                 );
                             } else if let Some(info) = self
@@ -9197,6 +9350,9 @@ impl YrApp {
                                     self.video_stream_track_id = None;
                                     self.video_stream_error = None;
                                     self.resolve_video_for_track(track.id.clone(), ctx);
+                                }
+                                if self.video_stream_error.is_some() {
+                                    ui.add_space(6.0);
                                 }
                                 let active_h = self
                                     .video_stream_info
@@ -10804,7 +10960,7 @@ impl YrApp {
                     }
                 }
                 SettingsCategory::About => {
-                    ui.heading("YR Music v0.9.20");
+                    ui.heading("YR Music v0.9.21");
                     ui.label("Cliente nativo de música 100% en Rust para Android y escritorio.");
                     ui.add_space(6.0);
                     ui.label(RichText::new("Motor de audio Symphonia PCM con DSP Morphe 3D binaural, reproductor integrado de video en la app, auto-scroll inteligente de cola, prefetch predictivo en disco y compatibilidad completa con YouTube Music.").size(12.0).color(TEXT_SECONDARY));
@@ -12092,7 +12248,7 @@ impl YrApp {
                         }
                         if menu_row(ui, icons::Icon::Help, "Ayuda y comentarios").clicked() {
                             self.show_account_modal = false;
-                            self.set_banner("YR Music v0.9.20 • Pure Rust");
+                            self.set_banner("YR Music v0.9.21 • Pure Rust");
                         }
 
                         #[cfg(target_os = "android")]
@@ -13604,6 +13760,15 @@ fn friendly_error_message(prefix: &str, raw: &str) -> String {
         with_prefix("Sin conexión a internet.")
     } else if low.contains("timed out") || low.contains("timeout") {
         with_prefix("Tiempo de espera agotado.")
+    } else if low.contains("no eres un bot")
+        || low.contains("not a bot")
+        || low.contains("confirmar que no eres")
+    {
+        if prefix.is_empty() {
+            "Verificación anti-bot • Conecta Google en Cuenta".to_string()
+        } else {
+            format!("{prefix}: conecta tu cuenta Google para verificar.")
+        }
     } else if low.contains("extraction error:")
         || low.contains("was not found (no content)")
         || low.contains("content unavailable")

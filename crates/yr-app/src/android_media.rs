@@ -9,6 +9,7 @@ pub enum MediaAction {
     Stop,
     CycleVideoQuality,
     CycleSpeed,
+    VideoPlaybackError,
 }
 
 #[cfg(target_os = "android")]
@@ -246,10 +247,14 @@ mod imp {
             6 => MediaAction::Stop,
             7 => MediaAction::CycleVideoQuality,
             8 => MediaAction::CycleSpeed,
+            9 => MediaAction::VideoPlaybackError,
             _ => return,
         };
         if let Some(tx) = ACTION_TX.lock().ok().and_then(|g| g.clone()) {
             let _ = tx.send(mapped);
+        }
+        if let Some(ctx) = EGUI_CTX.lock().ok().and_then(|g| g.clone()) {
+            ctx.request_repaint();
         }
     }
 

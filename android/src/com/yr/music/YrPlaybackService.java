@@ -98,6 +98,7 @@ public class YrPlaybackService extends Service {
     public static final int NATIVE_STOP = 6;
     public static final int NATIVE_CYCLE_VIDEO_QUALITY = 7;
     public static final int NATIVE_CYCLE_SPEED = 8;
+    public static final int NATIVE_VIDEO_ERROR = 9;
 
     private static volatile String currentTitle = "YR Music";
     private static volatile String currentArtist = "";
@@ -1106,6 +1107,24 @@ public class YrPlaybackService extends Service {
         }
     }
 
+    private static void handleTerminalVideoError(final Activity act) {
+        releaseMediaPlayerLocked();
+        if (sVideoFullscreen) {
+            setVideoFullscreen(act, false);
+        }
+        sVideoWantedVisible = false;
+        if (sVideoOverlayRoot != null) {
+            sVideoOverlayRoot.setVisibility(View.GONE);
+        }
+        if (sVideoSpinner != null) {
+            sVideoSpinner.setVisibility(View.GONE);
+        }
+        try {
+            nativeOnMediaAction(NATIVE_VIDEO_ERROR, 0);
+        } catch (Throwable ignored) {
+        }
+    }
+
     private static void prepareNativeMediaPlayer(final Activity act, final String streamUrl, final String ua) {
         if (act == null || streamUrl == null || streamUrl.isEmpty()) return;
         cancelPendingBufferingSpinner();
@@ -1188,9 +1207,7 @@ public class YrPlaybackService extends Service {
                     prepareNativeMediaPlayer(act, sVideoFallbackUrl, sVideoUserAgent);
                     return true;
                 }
-                if (sVideoSpinner != null) {
-                    sVideoSpinner.setVisibility(View.GONE);
-                }
+                handleTerminalVideoError(act);
                 return true;
             });
             Map<String, String> headers = new HashMap<String, String>();
@@ -1204,8 +1221,8 @@ public class YrPlaybackService extends Service {
             if (!sTriedFallback && sVideoFallbackUrl != null && !sVideoFallbackUrl.isEmpty()) {
                 sTriedFallback = true;
                 prepareNativeMediaPlayer(act, sVideoFallbackUrl, sVideoUserAgent);
-            } else if (sVideoSpinner != null) {
-                sVideoSpinner.setVisibility(View.GONE);
+            } else {
+                handleTerminalVideoError(act);
             }
         }
     }

@@ -737,15 +737,18 @@ impl MusicProvider for YtMusicProvider {
             }
         }
 
-        if let Ok(info) = innertube::fetch_player_stream(&self.http, track_id, quality).await {
-            if let Ok(mut guard) = self.stream_cache.lock() {
-                if guard.len() > 200 {
-                    guard.clear();
+        let inner_err = match innertube::fetch_player_stream(&self.http, track_id, quality).await {
+            Ok(info) => {
+                if let Ok(mut guard) = self.stream_cache.lock() {
+                    if guard.len() > 200 {
+                        guard.clear();
+                    }
+                    guard.insert(cache_key, (info.clone(), Instant::now()));
                 }
-                guard.insert(cache_key, (info.clone(), Instant::now()));
+                return Ok(info);
             }
-            return Ok(info);
-        }
+            Err(e) => e,
+        };
 
         let player = self
             .client
@@ -755,7 +758,21 @@ impl MusicProvider for YtMusicProvider {
                 &[ClientType::Ios, ClientType::Android, ClientType::Tv, ClientType::Desktop],
             )
             .await
-            .map_err(|e| ProviderError::Api(e.to_string()))?;
+            .map_err(|e| {
+                let rs_msg = e.to_string();
+                let inner_lc = inner_err.to_lowercase();
+                let rs_lc = rs_msg.to_lowercase();
+                if !inner_err.is_empty()
+                    && (inner_lc.contains("bot")
+                        || inner_lc.contains("login")
+                        || rs_lc.contains("unavailable")
+                        || rs_lc.contains("no content"))
+                {
+                    ProviderError::Api(inner_err)
+                } else {
+                    ProviderError::Api(rs_msg)
+                }
+            })?;
 
         let target_bps = quality.target_bitrate_kbps() * 1000;
         let player_dur = Some(player.details.duration as u64).filter(|&d| d > 0);

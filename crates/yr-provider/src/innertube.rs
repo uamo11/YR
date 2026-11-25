@@ -1532,23 +1532,7 @@ pub async fn fetch_browse_collection(
     Ok((title, artist_or_author, year, thumb, tracks))
 }
 
-pub async fn fetch_search_fallback(
-    http: &reqwest::Client,
-    session: Option<&GoogleSession>,
-    query: &str,
-) -> Result<SearchResults, String> {
-    let body = json!({
-        "context": {
-            "client": {
-                "clientName": "WEB_REMIX",
-                "clientVersion": CLIENT_VERSION,
-                "hl": "es-419",
-                "gl": "MX"
-            }
-        },
-        "query": query
-    });
-    let val = post_innertube(http, "search", body, session).await?;
+pub fn parse_search_response_value(val: &Value) -> SearchResults {
     let mut out = SearchResults::default();
     let mut seen_songs = std::collections::HashSet::new();
     let mut seen_albums = std::collections::HashSet::new();
@@ -1684,7 +1668,27 @@ pub async fn fetch_search_fallback(
             &mut seen_playlists,
         );
     }
-    Ok(out)
+    out
+}
+
+pub async fn fetch_search_fallback(
+    http: &reqwest::Client,
+    session: Option<&GoogleSession>,
+    query: &str,
+) -> Result<SearchResults, String> {
+    let body = json!({
+        "context": {
+            "client": {
+                "clientName": "WEB_REMIX",
+                "clientVersion": CLIENT_VERSION,
+                "hl": "es-419",
+                "gl": "MX"
+            }
+        },
+        "query": query
+    });
+    let val = post_innertube(http, "search", body, session).await?;
+    Ok(parse_search_response_value(&val))
 }
 
 pub async fn fetch_artist_fallback(
@@ -2455,5 +2459,75 @@ mod tests {
             extract_artist_from_subtitle("Álbum • Bad Bunny • 2025"),
             "Bad Bunny"
         );
+    }
+
+    #[test]
+    fn parse_search_response_value_extracts_artist_song_album_and_playlist() {
+        let sample = json!({
+            "contents": {
+                "tabbedSearchResultsRenderer": {
+                    "tabs": [{
+                        "tabRenderer": {
+                            "content": {
+                                "sectionListRenderer": {
+                                    "contents": [
+                                        {
+                                            "musicCardShelfRenderer": {
+                                                "title": {"runs": [{"text": "Daft Punk"}]},
+                                                "subtitle": {"runs": [{"text": "Artista"}]},
+                                                "onTap": {"browseEndpoint": {"browseId": "UCRr1xG_2WIDs18a6cIiCxeA"}}
+                                            }
+                                        },
+                                        {
+                                            "itemSectionRenderer": {
+                                                "contents": [
+                                                    {
+                                                        "musicResponsiveListItemRenderer": {
+                                                            "playlistItemData": {"videoId": "FGBhQbmPwH8"},
+                                                            "flexColumns": [
+                                                                {"musicResponsiveListItemFlexColumnRenderer": {"text": {"runs": [{"text": "One More Time"}]}}},
+                                                                {"musicResponsiveListItemFlexColumnRenderer": {"text": {"runs": [{"text": "Daft Punk"}, {"text": " • 5:20"}]}}}
+                                                            ]
+                                                        }
+                                                    },
+                                                    {
+                                                        "musicResponsiveListItemRenderer": {
+                                                            "navigationEndpoint": {"browseEndpoint": {"browseId": "MPREb_discovery123"}},
+                                                            "flexColumns": [
+                                                                {"musicResponsiveListItemFlexColumnRenderer": {"text": {"runs": [{"text": "Discovery"}]}}},
+                                                                {"musicResponsiveListItemFlexColumnRenderer": {"text": {"runs": [{"text": "Álbum • Daft Punk • 2001"}]}}}
+                                                            ]
+                                                        }
+                                                    },
+                                                    {
+                                                        "musicResponsiveListItemRenderer": {
+                                                            "navigationEndpoint": {"browseEndpoint": {"browseId": "VLPL_mix_456"}},
+                                                            "flexColumns": [
+                                                                {"musicResponsiveListItemFlexColumnRenderer": {"text": {"runs": [{"text": "Electronic Mix"}]}}},
+                                                                {"musicResponsiveListItemFlexColumnRenderer": {"text": {"runs": [{"text": "YouTube Music"}]}}}
+                                                            ]
+                                                        }
+                                                    }
+                                                ]
+                                            }
+                                        }
+                                    ]
+                                }
+                            }
+                        }
+                    }]
+                }
+            }
+        });
+        let res = parse_search_response_value(&sample);
+        assert_eq!(res.artists.len(), 1);
+        assert_eq!(res.artists[0].id, "UCRr1xG_2WIDs18a6cIiCxeA");
+        assert_eq!(res.songs.len(), 1);
+        assert_eq!(res.songs[0].id, "FGBhQbmPwH8");
+        assert_eq!(res.songs[0].duration_secs, Some(320));
+        assert_eq!(res.albums.len(), 1);
+        assert_eq!(res.albums[0].id, "MPREb_discovery123");
+        assert_eq!(res.playlists.len(), 1);
+        assert_eq!(res.playlists[0].id, "PL_mix_456");
     }
 }
