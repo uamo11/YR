@@ -767,6 +767,7 @@ pub struct YrApp {
     pending_color_urls: HashSet<String>,
 
     last_finished_counter: Arc<std::sync::atomic::AtomicU64>,
+    bg_play_gen: Arc<std::sync::atomic::AtomicU64>,
     last_media_sync: Option<(String, bool, u64, Instant)>,
     status_banner: Option<(String, Instant)>,
     seeking_secs: Option<f64>,
@@ -827,6 +828,9 @@ fn cache_webview_audio_url(
     url: &str,
 ) {
     let (mime, ext) = yr_download::infer_fallback_audio_meta(url);
+    if ext == "webm" {
+        return;
+    }
     provider.cache_audio_stream(
         track_id,
         quality,
@@ -866,7 +870,15 @@ async fn play_track_bg(
     ctx: egui::Context,
     cache_dir: PathBuf,
     notifications_enabled: bool,
+    expected_gen: u64,
+    bg_play_gen: Arc<std::sync::atomic::AtomicU64>,
 ) {
+    use std::sync::atomic::Ordering;
+    if bg_play_gen.load(Ordering::SeqCst) != expected_gen {
+        return;
+    }
+    audio.stop();
+
     if notifications_enabled {
         crate::android_media::update_playback(
             &track.title,
@@ -882,6 +894,9 @@ async fn play_track_bg(
     if let Some(local) = &track.local_path {
         let p = PathBuf::from(local);
         if p.exists() {
+            if bg_play_gen.load(Ordering::SeqCst) != expected_gen {
+                return;
+            }
             audio.play_file(p, track.duration_secs);
             ctx.request_repaint();
             return;
@@ -889,6 +904,9 @@ async fn play_track_bg(
     }
 
     if let Some(local_path) = dl.find_local_path(&track.id).await {
+        if bg_play_gen.load(Ordering::SeqCst) != expected_gen {
+            return;
+        }
         audio.play_file(local_path, track.duration_secs);
         ctx.request_repaint();
         return;
@@ -900,6 +918,9 @@ async fn play_track_bg(
             .map(|m| m.len() > 32_768)
             .unwrap_or(false)
     {
+        if bg_play_gen.load(Ordering::SeqCst) != expected_gen {
+            return;
+        }
         let dl_reg = Arc::clone(&dl);
         let track_cloned = track.clone();
         let cached_path = cached_stream_file.clone();
@@ -915,6 +936,9 @@ async fn play_track_bg(
         match provider.resolve_audio_stream(&track.id, quality).await {
             Ok(s) => Ok((s.url, s.duration_secs)),
             Err(rust_err) => {
+                if bg_play_gen.load(Ordering::SeqCst) != expected_gen {
+                    return;
+                }
                 let vid = track.id.clone();
                 let webview_url = tokio::task::spawn_blocking(move || {
                     crate::android_media::resolve_audio_url_with_priority(&vid, true)
@@ -930,6 +954,9 @@ async fn play_track_bg(
                     .ok_or_else(|| rust_err.to_string())
             }
         };
+    if bg_play_gen.load(Ordering::SeqCst) != expected_gen {
+        return;
+    }
     match res {
         Ok((url, resolved_dur)) => {
             audio.play_url(url, track.id, resolved_dur.or(track.duration_secs));
@@ -1117,6 +1144,7 @@ impl YrApp {
             cover_colors: HashMap::new(),
             pending_color_urls: HashSet::new(),
             last_finished_counter: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            bg_play_gen: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             last_media_sync: None,
             status_banner: None,
             seeking_secs: None,
@@ -1261,6 +1289,7 @@ impl YrApp {
         let ctx_bg = cc.egui_ctx.clone();
         let cache_dir_bg = app.data_dir.join("stream_cache");
         let notif_bg = Arc::clone(&app.notifications_flag);
+        let bg_gen_rx = Arc::clone(&app.bg_play_gen);
         app.runtime.spawn(async move {
             use crate::android_media::MediaAction;
             use std::sync::atomic::Ordering;
@@ -1278,18 +1307,31 @@ impl YrApp {
                                     let track_opt =
                                         queue_bg.lock().ok().and_then(|q| q.current_track().cloned());
                                     if let Some(track) = track_opt {
-                                        play_track_bg(
-                                            track,
-                                            quality_bg,
-                                            Arc::clone(&dl_bg),
-                                            Arc::clone(&provider_bg),
-                                            audio_bg.clone(),
-                                            ev_tx_bg.clone(),
-                                            ctx_bg.clone(),
-                                            cache_dir_bg.clone(),
-                                            show_notif,
-                                        )
-                                        .await;
+                                        let my_gen = bg_gen_rx.fetch_add(1, Ordering::SeqCst) + 1;
+                                        audio_bg.stop();
+                                        let dl_c = Arc::clone(&dl_bg);
+                                        let prov_c = Arc::clone(&provider_bg);
+                                        let audio_c = audio_bg.clone();
+                                        let ev_c = ev_tx_bg.clone();
+                                        let ctx_c = ctx_bg.clone();
+                                        let cache_c = cache_dir_bg.clone();
+                                        let bg_gen_c = Arc::clone(&bg_gen_rx);
+                                        tokio::spawn(async move {
+                                            play_track_bg(
+                                                track,
+                                                quality_bg,
+                                                dl_c,
+                                                prov_c,
+                                                audio_c,
+                                                ev_c,
+                                                ctx_c,
+                                                cache_c,
+                                                show_notif,
+                                                my_gen,
+                                                bg_gen_c,
+                                            )
+                                            .await;
+                                        });
                                         true
                                     } else {
                                         false
@@ -1299,11 +1341,13 @@ impl YrApp {
                                 }
                             }
                             MediaAction::Pause => {
+                                bg_gen_rx.fetch_add(1, Ordering::SeqCst);
                                 audio_bg.pause();
                                 false
                             }
                             MediaAction::Toggle => {
                                 if st == PlaybackStatus::Playing {
+                                    bg_gen_rx.fetch_add(1, Ordering::SeqCst);
                                     audio_bg.pause();
                                     false
                                 } else if st == PlaybackStatus::Paused {
@@ -1313,18 +1357,31 @@ impl YrApp {
                                     let track_opt =
                                         queue_bg.lock().ok().and_then(|q| q.current_track().cloned());
                                     if let Some(track) = track_opt {
-                                        play_track_bg(
-                                            track,
-                                            quality_bg,
-                                            Arc::clone(&dl_bg),
-                                            Arc::clone(&provider_bg),
-                                            audio_bg.clone(),
-                                            ev_tx_bg.clone(),
-                                            ctx_bg.clone(),
-                                            cache_dir_bg.clone(),
-                                            show_notif,
-                                        )
-                                        .await;
+                                        let my_gen = bg_gen_rx.fetch_add(1, Ordering::SeqCst) + 1;
+                                        audio_bg.stop();
+                                        let dl_c = Arc::clone(&dl_bg);
+                                        let prov_c = Arc::clone(&provider_bg);
+                                        let audio_c = audio_bg.clone();
+                                        let ev_c = ev_tx_bg.clone();
+                                        let ctx_c = ctx_bg.clone();
+                                        let cache_c = cache_dir_bg.clone();
+                                        let bg_gen_c = Arc::clone(&bg_gen_rx);
+                                        tokio::spawn(async move {
+                                            play_track_bg(
+                                                track,
+                                                quality_bg,
+                                                dl_c,
+                                                prov_c,
+                                                audio_c,
+                                                ev_c,
+                                                ctx_c,
+                                                cache_c,
+                                                show_notif,
+                                                my_gen,
+                                                bg_gen_c,
+                                            )
+                                            .await;
+                                        });
                                         true
                                     } else {
                                         false
@@ -1375,25 +1432,44 @@ impl YrApp {
                             }
                         }
                     }
-                    MediaAction::Stop => audio_bg.stop(),
+                    MediaAction::Stop => {
+                        bg_gen_rx.fetch_add(1, Ordering::SeqCst);
+                        audio_bg.stop();
+                    }
                     MediaAction::CycleVideoQuality
                     | MediaAction::CycleSpeed
                     | MediaAction::VideoPlaybackError => {}
                     MediaAction::Next => {
                         let next = queue_bg.lock().ok().and_then(|mut q| q.next_track(true).cloned());
                         if let Some(track) = next {
-                            play_track_bg(
-                                track,
-                                quality_bg,
-                                Arc::clone(&dl_bg),
-                                Arc::clone(&provider_bg),
-                                audio_bg.clone(),
-                                ev_tx_bg.clone(),
-                                ctx_bg.clone(),
-                                cache_dir_bg.clone(),
-                                show_notif,
-                            )
-                            .await;
+                            let my_gen = bg_gen_rx.fetch_add(1, Ordering::SeqCst) + 1;
+                            audio_bg.stop();
+                            let _ = ev_tx_bg.send(AppEvent::MediaAction(act));
+                            ctx_bg.request_repaint();
+                            let dl_c = Arc::clone(&dl_bg);
+                            let prov_c = Arc::clone(&provider_bg);
+                            let audio_c = audio_bg.clone();
+                            let ev_c = ev_tx_bg.clone();
+                            let ctx_c = ctx_bg.clone();
+                            let cache_c = cache_dir_bg.clone();
+                            let bg_gen_c = Arc::clone(&bg_gen_rx);
+                            tokio::spawn(async move {
+                                play_track_bg(
+                                    track,
+                                    quality_bg,
+                                    dl_c,
+                                    prov_c,
+                                    audio_c,
+                                    ev_c,
+                                    ctx_c,
+                                    cache_c,
+                                    show_notif,
+                                    my_gen,
+                                    bg_gen_c,
+                                )
+                                .await;
+                            });
+                            continue;
                         }
                     }
                     MediaAction::Prev => {
@@ -1434,18 +1510,34 @@ impl YrApp {
                             continue;
                         }
                         if let Some(track) = step_or_pop_previous_track(&queue_bg, &prev_stack_bg) {
-                            play_track_bg(
-                                track,
-                                quality_bg,
-                                Arc::clone(&dl_bg),
-                                Arc::clone(&provider_bg),
-                                audio_bg.clone(),
-                                ev_tx_bg.clone(),
-                                ctx_bg.clone(),
-                                cache_dir_bg.clone(),
-                                show_notif,
-                            )
-                            .await;
+                            let my_gen = bg_gen_rx.fetch_add(1, Ordering::SeqCst) + 1;
+                            audio_bg.stop();
+                            let _ = ev_tx_bg.send(AppEvent::MediaAction(act));
+                            ctx_bg.request_repaint();
+                            let dl_c = Arc::clone(&dl_bg);
+                            let prov_c = Arc::clone(&provider_bg);
+                            let audio_c = audio_bg.clone();
+                            let ev_c = ev_tx_bg.clone();
+                            let ctx_c = ctx_bg.clone();
+                            let cache_c = cache_dir_bg.clone();
+                            let bg_gen_c = Arc::clone(&bg_gen_rx);
+                            tokio::spawn(async move {
+                                play_track_bg(
+                                    track,
+                                    quality_bg,
+                                    dl_c,
+                                    prov_c,
+                                    audio_c,
+                                    ev_c,
+                                    ctx_c,
+                                    cache_c,
+                                    show_notif,
+                                    my_gen,
+                                    bg_gen_c,
+                                )
+                                .await;
+                            });
+                            continue;
                         } else {
                             audio_bg.seek(Duration::ZERO);
                             if snap.status == PlaybackStatus::Paused {
@@ -1469,6 +1561,7 @@ impl YrApp {
         let ev_tx_tick = app.event_tx.clone();
         let ctx_tick = cc.egui_ctx.clone();
         let fin_tick = Arc::clone(&app.last_finished_counter);
+        let bg_gen_tick = Arc::clone(&app.bg_play_gen);
         let sleep_tick = Arc::clone(&app.sleep_after_track);
         let timer_tick = Arc::clone(&app.sleep_timer_until);
         let cache_dir_tick = app.data_dir.join("stream_cache");
@@ -1655,12 +1748,18 @@ impl YrApp {
                     }
                     let next = queue_tick.lock().ok().and_then(|mut q| q.next_track(false).cloned());
                     if let Some(track) = next {
+                        let my_gen = bg_gen_tick.fetch_add(1, Ordering::SeqCst) + 1;
+                        let _ = ev_tx_tick.send(AppEvent::MediaAction(
+                            crate::android_media::MediaAction::Next,
+                        ));
+                        ctx_tick.request_repaint();
                         let dl_next = Arc::clone(&dl_tick);
                         let prov_next = Arc::clone(&provider_tick);
                         let audio_next = audio_tick.clone();
                         let ev_next = ev_tx_tick.clone();
                         let ctx_next = ctx_tick.clone();
                         let c_next = cache_dir_tick.clone();
+                        let bg_gen_next = Arc::clone(&bg_gen_tick);
                         tokio::spawn(async move {
                             play_track_bg(
                                 track,
@@ -1672,6 +1771,8 @@ impl YrApp {
                                 ctx_next,
                                 c_next,
                                 show_notif,
+                                my_gen,
+                                bg_gen_next,
                             )
                             .await;
                         });
@@ -2563,6 +2664,8 @@ impl YrApp {
         for prev_t in prev_recents {
             self.maybe_smart_download_track(&prev_t, false, false);
         }
+        self.bg_play_gen
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         self.audio.stop();
         if self.is_video_mode {
             self.video_stream_track_id = None;
@@ -3041,14 +3144,26 @@ impl YrApp {
                                     || err_lc.contains("network is unreachable")
                                     || err_lc.contains("connection refused")
                                     || err_lc.contains("timed out");
-                                let next_opt = if !net_down && self.consecutive_stream_failures < 2 {
-                                    self.queue.lock().unwrap().next_track(true).cloned()
-                                } else {
-                                    None
-                                };
-                                match next_opt {
-                                    Some(next_t) if next_t.id != track.id => {
-                                        self.consecutive_stream_failures += 1;
+                                let session_wide_block = net_down
+                                    || err_lc.contains("solo wi-fi")
+                                    || yr_provider::innertube::is_bot_or_auth_err(&e);
+                                if session_wide_block {
+                                    let completed_ids = &self.completed_download_ids;
+                                    let cached_ids = &self.frame_cached_stream_ids;
+                                    let offline_next = self
+                                        .queue
+                                        .lock()
+                                        .unwrap()
+                                        .advance_to_next_matching(|t| {
+                                            t.id != track.id
+                                                && (t.local_path
+                                                    .as_deref()
+                                                    .is_some_and(|p| std::path::Path::new(p).exists())
+                                                    || completed_ids.contains(&t.id)
+                                                    || cached_ids.contains(&t.id))
+                                        })
+                                        .cloned();
+                                    if let Some(next_t) = offline_next {
                                         if let Some(pos) =
                                             self.sample_tracks.iter().position(|t| t.id == next_t.id)
                                         {
@@ -3057,14 +3172,43 @@ impl YrApp {
                                             }
                                         }
                                         self.set_banner(
-                                            "Pista no disponible, pasando a la siguiente...".to_string(),
+                                            "Modo sin conexión: reproduciendo siguiente pista offline..."
+                                                .to_string(),
                                         );
                                         self.play_current_queue_track(ctx);
+                                    } else {
+                                        self.set_banner(friendly_error_message(
+                                            "No se pudo reproducir",
+                                            &e,
+                                        ));
                                     }
-                                    _ => self.set_banner(friendly_error_message(
-                                        "No se pudo reproducir",
-                                        &e,
-                                    )),
+                                } else {
+                                    let next_opt = if self.consecutive_stream_failures < 2 {
+                                        self.queue.lock().unwrap().next_track(true).cloned()
+                                    } else {
+                                        None
+                                    };
+                                    match next_opt {
+                                        Some(next_t) if next_t.id != track.id => {
+                                            self.consecutive_stream_failures += 1;
+                                            if let Some(pos) =
+                                                self.sample_tracks.iter().position(|t| t.id == next_t.id)
+                                            {
+                                                if self.active_tab == NavTab::Samples {
+                                                    self.sample_idx = pos;
+                                                }
+                                            }
+                                            self.set_banner(
+                                                "Pista no disponible, pasando a la siguiente..."
+                                                    .to_string(),
+                                            );
+                                            self.play_current_queue_track(ctx);
+                                        }
+                                        _ => self.set_banner(friendly_error_message(
+                                            "No se pudo reproducir",
+                                            &e,
+                                        )),
+                                    }
                                 }
                             }
                         }
@@ -3130,6 +3274,14 @@ impl YrApp {
                                     art_cover.as_deref().unwrap_or(""),
                                 );
                             }
+                            self.maybe_smart_download_track(&track, true, false);
+                            if self.store.data.config.autoplay_radio
+                                && self.queue.lock().unwrap().remaining() <= 1
+                                && self.last_autoplay_track_id.as_deref() != Some(&track.id)
+                            {
+                                self.last_autoplay_track_id = Some(track.id.clone());
+                                self.fetch_radio_internal(track.id.clone(), ctx);
+                            }
                             self.load_lyrics(track.clone(), ctx);
                             if self.show_related || self.now_playing_open {
                                 self.load_related(track.id.clone(), ctx);
@@ -3144,6 +3296,9 @@ impl YrApp {
                                 self.resolve_video_for_track(track.id, ctx);
                             }
                         }
+                    } else if matches!(act, MediaAction::SeekMs(_)) {
+                        self.seeking_secs = None;
+                        self.last_media_sync = None;
                     } else if matches!(act, MediaAction::CycleVideoQuality) {
                         let maybe_id = self
                             .queue
@@ -6124,10 +6279,7 @@ impl YrApp {
                                 self.store.toggle_like(track.clone());
                             }
                             ui.add_space(8.0);
-                            let is_downloaded = track.local_path.is_some()
-                                || self.downloads.iter().any(|d| {
-                                    d.track.id == track.id && d.status == DownloadStatus::Completed
-                                });
+                            let is_downloaded = self.is_track_available_offline(&track);
                             if icons::icon_button(
                                 ui,
                                 if is_downloaded {
@@ -12464,6 +12616,8 @@ impl YrApp {
                 let queue_not_empty = !self.queue.lock().unwrap().is_empty();
                 if queue_not_empty && sheet_row(ui, icons::Icon::Close, "Descartar fila") {
                     self.queue.lock().unwrap().clear();
+                    self.bg_play_gen
+                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     self.audio.stop();
                     self.set_banner("Fila descartada");
                     self.action_sheet_track = None;

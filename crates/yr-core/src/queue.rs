@@ -246,6 +246,36 @@ impl PlaybackQueue {
         }
     }
 
+    /// Advances `current_pos` to the next upcoming track in play order satisfying `pred`
+    /// (wrapping around `0..pos` only when `self.repeat == RepeatMode::All`).
+    /// Leaves `current_pos` unchanged and returns `None` if no matching track exists.
+    pub fn advance_to_next_matching<F>(&mut self, mut pred: F) -> Option<&Track>
+    where
+        F: FnMut(&Track) -> bool,
+    {
+        if self.tracks.is_empty() || self.order.is_empty() {
+            return None;
+        }
+        let pos = self.current_pos.unwrap_or(0);
+        let tail = (pos + 1)..self.order.len();
+        let wrap = if self.repeat == RepeatMode::All {
+            0..pos
+        } else {
+            0..0
+        };
+        for cand_pos in tail.chain(wrap) {
+            if let Some(&track_idx) = self.order.get(cand_pos) {
+                if let Some(track) = self.tracks.get(track_idx) {
+                    if pred(track) {
+                        self.current_pos = Some(cand_pos);
+                        return self.current_track();
+                    }
+                }
+            }
+        }
+        None
+    }
+
     pub fn prev_track(&mut self) -> Option<&Track> {
         if self.tracks.is_empty() {
             return None;
@@ -475,5 +505,38 @@ mod tests {
         assert!(single.step_prev_track().is_none());
         assert_eq!(single.prepend_and_select(sample_track("prev")).unwrap().id, "prev");
         assert_eq!(single.next_track(true).unwrap().id, "cur");
+    }
+
+    #[test]
+    fn advance_to_next_matching_jumps_to_offline_or_preserves_pos() {
+        let mut q = PlaybackQueue::new();
+        q.set_queue(
+            vec![
+                sample_track("1"),
+                sample_track("2"),
+                sample_track("3"),
+                sample_track("4"),
+            ],
+            0,
+        );
+        assert_eq!(
+            q.advance_to_next_matching(|t| t.id == "3")
+                .map(|t| t.id.as_str()),
+            Some("3")
+        );
+        assert_eq!(q.current_track().unwrap().id, "3");
+
+        // RepeatMode::Off does not wrap back to index 1 ("2")
+        assert!(q.advance_to_next_matching(|t| t.id == "2").is_none());
+        assert_eq!(q.current_track().unwrap().id, "3");
+
+        // RepeatMode::All wraps around to index 1 ("2")
+        q.repeat = RepeatMode::All;
+        assert_eq!(
+            q.advance_to_next_matching(|t| t.id == "2")
+                .map(|t| t.id.as_str()),
+            Some("2")
+        );
+        assert_eq!(q.current_track().unwrap().id, "2");
     }
 }

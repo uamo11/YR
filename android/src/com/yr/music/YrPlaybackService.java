@@ -1594,6 +1594,40 @@ public class YrPlaybackService extends Service {
                             }
                             return true;
                         }
+
+                        @Override
+                        public boolean onFling(MotionEvent e1, MotionEvent e2, float velocityX, float velocityY) {
+                            if (e1 == null || e2 == null) return false;
+                            float density = act.getResources().getDisplayMetrics().density;
+                            float dx = e2.getX() - e1.getX();
+                            float dy = e2.getY() - e1.getY();
+                            if (sVideoFullscreen
+                                    && dy > 72f * density
+                                    && Math.abs(dy) > Math.abs(dx) * 1.35f
+                                    && velocityY > 220f * density) {
+                                setVideoFullscreen(act, false);
+                                return true;
+                            }
+                            if (Math.abs(dx) > 56f * density
+                                    && Math.abs(dx) > Math.abs(dy) * 1.35f
+                                    && Math.abs(velocityX) > 200f * density) {
+                                try {
+                                    if (dx < 0f) {
+                                        nativeOnMediaAction(NATIVE_NEXT, 0);
+                                        showVideoSeekBadge(act, "Siguiente \u00BB", true);
+                                    } else {
+                                        nativeOnMediaAction(NATIVE_PREV, 0);
+                                        showVideoSeekBadge(act, "\u00AB Anterior", false);
+                                    }
+                                } catch (Throwable ignored) {
+                                }
+                                if (sVideoFullscreen) {
+                                    scheduleFsHudAutoHide();
+                                }
+                                return true;
+                            }
+                            return false;
+                        }
                     });
                     final ScaleGestureDetector sgd = new ScaleGestureDetector(act, new ScaleGestureDetector.SimpleOnScaleGestureListener() {
                         @Override
